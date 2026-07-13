@@ -23,6 +23,9 @@ os.environ["CODEX_LB_STICKY_SESSION_CLEANUP_ENABLED"] = "false"
 os.environ["CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ENABLED"] = "false"
 os.environ["CODEX_LB_QUOTA_PLANNER_SCHEDULER_ENABLED"] = "false"
 os.environ["CODEX_LB_REQUEST_LOG_COUNT_CACHE_TTL_SECONDS"] = "0"
+# Route-resolution caching is opt-in per test (cache-specific tests set a TTL
+# explicitly); keeping it off preserves fresh-read semantics everywhere else.
+os.environ["CODEX_LB_UPSTREAM_ROUTE_CACHE_TTL_SECONDS"] = "0"
 
 from app.db.models import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
@@ -193,6 +196,12 @@ def _reset_global_state() -> None:
         from app.core.cache.invalidation import set_cache_invalidation_poller
 
         set_cache_invalidation_poller(None)
+    except Exception:
+        pass
+    try:
+        from app.core.upstream_proxy.cache import get_upstream_route_cache
+
+        get_upstream_route_cache().clear()
     except Exception:
         pass
     try:
