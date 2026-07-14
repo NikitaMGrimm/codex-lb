@@ -20,9 +20,11 @@ import {
   updateAccount,
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
+  updateAccountUsageLimit,
 } from "@/features/accounts/api";
 import type {
   AccountRoutingPolicy,
+  AccountUsageLimitUpdateRequest,
   AccountUsageResetConsumeResponse,
 } from "@/features/accounts/schemas";
 
@@ -201,6 +203,27 @@ export function useAccountMutations() {
     },
   });
 
+  const usageLimitMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      update,
+    }: {
+      accountId: string;
+      update: AccountUsageLimitUpdateRequest;
+    }) => updateAccountUsageLimit(accountId, update),
+    onSuccess: (data) => {
+      if (data.percent === null) {
+        toast.success("Account usage limit removed");
+      } else {
+        toast.success(data.enabled ? "Account usage limit enabled" : "Account usage limit disabled");
+      }
+      void invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Usage limit update failed");
+    },
+  });
+
   const exportAuthMutation = useMutation({
     mutationFn: exportAccountAuth,
     onSuccess: () => {
@@ -253,6 +276,7 @@ export function useAccountMutations() {
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,
+    usageLimitMutation,
     updateMutation,
     resetCreditConsumeMutation,
   };
