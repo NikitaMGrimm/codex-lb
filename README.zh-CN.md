@@ -447,9 +447,9 @@ Helm chart 会基于 headless service 的 per-pod DNS 名称为多副本部署�
 docker compose watch
 
 # 本地
-uv sync && cd frontend && bun install && cd ..
+uv sync && cd frontend && npm ci && cd ..
 uv run fastapi run app/main.py --reload --no-proxy-headers  # 后端 :2455
-cd frontend && bun run dev                     # 前端 :5173
+cd frontend && npm run dev                     # 前端 :5173
 ```
 
 ## 贡献者 ✨

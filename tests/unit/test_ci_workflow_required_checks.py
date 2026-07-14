@@ -17,6 +17,28 @@ def _job_block(text: str, job_name: str) -> str:
     return text[start_match.start() : start_match.end() + next_job_match.start()]
 
 
+def test_frontend_consumers_use_pinned_node_and_npm_lock_cache() -> None:
+    workflow = _ci_workflow_text()
+
+    assert "oven-sh/setup-bun" not in workflow
+    assert "frontend/bun.lock" not in workflow
+    for job_name in (
+        "frontend-lint",
+        "frontend-typecheck",
+        "frontend-test",
+        "frontend-build",
+        "test",
+        "test-integration-core",
+        "test-postgres",
+        "package",
+    ):
+        job = _job_block(workflow, job_name)
+        assert "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020" in job
+        assert 'node-version: "22.23.1"' in job
+        assert "cache: npm" in job
+        assert "cache-dependency-path: frontend/package-lock.json" in job
+
+
 def test_pytest_matrix_required_contexts_are_created_for_non_backend_prs() -> None:
     test_job = _job_block(_ci_workflow_text(), "test")
 
@@ -34,8 +56,7 @@ def test_pytest_matrix_real_test_steps_still_run_only_for_backend_changes() -> N
     assert "if: needs.changes.outputs.backend == 'true'\n        run: make test-${{ matrix.slice.name }}" in test_job
     for step_name in (
         "Checkout repository",
-        "Set up Bun",
-        "Cache Bun dependencies",
+        "Set up Node.js",
         "Set up uv",
     ):
         step = test_job.split(f"- name: {step_name}", maxsplit=1)[1]
@@ -58,8 +79,7 @@ def test_postgres_real_test_steps_still_run_only_for_backend_changes() -> None:
     assert "if: needs.changes.outputs.backend == 'true'\n        run: make test-postgres" in pg_job
     for step_name in (
         "Checkout repository",
-        "Set up Bun",
-        "Cache Bun dependencies",
+        "Set up Node.js",
         "Set up uv",
     ):
         step = pg_job.split(f"- name: {step_name}", maxsplit=1)[1]

@@ -350,7 +350,7 @@ def test_pr_guard_accepts_dependency_only_package_json_edits_on_beta_base(tmp_pa
     git(repo, "add", "frontend/package.json")
     git(repo, "commit", "-m", "chore(deps): bump frontend dependencies")
     sha = git(repo, "rev-parse", "HEAD")
-    branch = "dependabot/bun/frontend/frontend-minor-patch"
+    branch = "dependabot/npm_and_yarn/frontend/frontend-minor-patch"
     event = event_file(tmp_path, head_ref=branch, head_sha=sha, body="")
 
     result = run_guard(

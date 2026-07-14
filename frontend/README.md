@@ -1,22 +1,23 @@
-# Frontend (Bun + Vite + React + TypeScript + SWC)
+# Frontend (Node.js + npm + Vite + React + TypeScript + SWC)
 
-This frontend is built with Bun, Vite, React, TypeScript, and SWC.
+This frontend is built with Node.js, npm, Vite, React, TypeScript, and SWC.
 
 ## Prerequisites
 
-- Bun 1.3+
+- Node.js 22.23.1
+- npm 10.9.8
 
 ## Setup
 
 ```bash
 cd frontend
-bun install
+npm ci
 ```
 
 ## Development
 
 ```bash
-bun run dev
+npm run dev
 ```
 
 Vite dev server runs on port `5173` by default and proxies API routes to FastAPI:
@@ -29,7 +30,7 @@ Vite dev server runs on port `5173` by default and proxies API routes to FastAPI
 ## Build
 
 ```bash
-bun run build
+npm run build
 ```
 
 Production assets are emitted to `../app/static`.
@@ -37,7 +38,8 @@ Production assets are emitted to `../app/static`.
 ## Quality
 
 ```bash
-bun run lint
-bun run test
-bun run test:coverage
+npm run lint
+npm run typecheck
+npm run test
+npm run test:coverage
 ```

@@ -5,5 +5,5 @@ name = "codex-lb"
 [setup]
 script = '''
 uv sync
-cd frontend && bun install
+cd frontend && npm ci
 '''

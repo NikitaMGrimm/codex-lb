@@ -118,9 +118,9 @@ Full docs live at **<https://soju06.github.io/codex-lb/>**:
 docker compose watch
 
 # Local
-uv sync && cd frontend && bun install && cd ..
+uv sync && cd frontend && npm ci && cd ..
 uv run fastapi run app/main.py --reload --no-proxy-headers  # backend :2455
-cd frontend && bun run dev                     # frontend :5173
+cd frontend && npm run dev                     # frontend :5173
 ```
 
 ## Contributors ✨

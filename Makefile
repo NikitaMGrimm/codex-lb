@@ -42,22 +42,22 @@ help:
 .PHONY: frontend-install frontend-lint frontend-typecheck frontend-test frontend-test-fast frontend-build \
 	frontend-playwright-chromium test-dashboard-browser-smoke
 frontend-install:
-	cd frontend && bun install --frozen-lockfile
+	cd frontend && npm ci
 
 frontend-lint: frontend-install
-	cd frontend && bun run lint
+	cd frontend && npm run lint
 
 frontend-typecheck: frontend-install
-	cd frontend && bun run typecheck
+	cd frontend && npm run typecheck
 
 frontend-test: frontend-install
-	cd frontend && bun run test:coverage
+	cd frontend && npm run test:coverage
 
 frontend-test-fast: frontend-install
-	cd frontend && bun run test
+	cd frontend && npm run test
 
 frontend-build: frontend-install
-	cd frontend && bun run build
+	cd frontend && npm run build
 
 frontend-playwright-chromium: frontend-install
 	cd frontend && bun run playwright install chromium

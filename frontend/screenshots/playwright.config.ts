@@ -3,7 +3,7 @@ import { defineConfig } from "@playwright/test";
 const screenshotPort = Number(process.env.SCREENSHOT_PORT ?? "4173");
 const screenshotWebServerCommand =
   process.env.SCREENSHOT_WEBSERVER_COMMAND ??
-  `bun run build && bun run preview --port ${screenshotPort}`;
+  `npm run build && npm run preview -- --port ${screenshotPort}`;
 
 export default defineConfig({
   testDir: ".",

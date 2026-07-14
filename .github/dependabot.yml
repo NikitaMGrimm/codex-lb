@@ -19,8 +19,8 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # Frontend dependencies (bun / package.json / bun.lock)
-  - package-ecosystem: "bun"
+  # Frontend dependencies (npm / package.json / package-lock.json)
+  - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
       interval: "weekly"
