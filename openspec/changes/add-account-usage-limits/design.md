@@ -46,11 +46,13 @@ Codex LB cannot know the upstream percentage cost of a request before sending it
 
 A forward Alembic revision adds both account columns and database checks for the percentage range and enabled/value relationship. Existing accounts remain disabled with no percentage. Downgrade removes the checks and columns through batch operations so SQLite and PostgreSQL both round-trip.
 
+The account-usage-limit revision retains its original parent because installations may already be stamped at that revision. When upstream adds migrations on a parallel branch from the same parent, a no-op merge revision joins both heads. This lets an existing usage-limit installation apply every upstream migration on its next upgrade while fresh installations traverse both branches and converge on one head.
+
 ## Test plan
 
 - Pure evaluator tests for disabled, available, reached, stale, missing, elapsed, weekly-only, and monthly-only windows.
 - Selector tests proving equality blocks, one limited account falls back to another, all-limited returns the stable error, and standard limits survive the additional-quota bypass flag.
 - Load-balancer tests proving standard rows gate a request whose ranking rows come from an additional quota and sticky selection cannot reuse a capped account.
 - Accounts API/service/mapper tests for set, disable-retain, remove, validation, response state, and cache invalidation.
-- Migration upgrade/downgrade/upgrade coverage.
+- Migration upgrade/downgrade/upgrade coverage, including an already-stamped usage-limit database rejoining the upstream migration chain.
 - Dashboard schema, request hook, control interaction, and reached-state presentation tests.

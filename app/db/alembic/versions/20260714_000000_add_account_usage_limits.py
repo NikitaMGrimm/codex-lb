@@ -1,7 +1,7 @@
 """add per-account usage limits
 
 Revision ID: 20260714_000000_add_account_usage_limits
-Revises: 20260716_010000_add_dashboard_retention_settings
+Revises: 20260713_020000_add_model_registry_snapshot
 Create Date: 2026-07-14
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260714_000000_add_account_usage_limits"
-down_revision = "20260716_010000_add_dashboard_retention_settings"
+down_revision = "20260713_020000_add_model_registry_snapshot"
 branch_labels = None
 depends_on = None
 
