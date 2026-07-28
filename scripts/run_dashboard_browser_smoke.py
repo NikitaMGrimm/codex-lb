@@ -130,7 +130,7 @@ def run() -> int:
             }
             playwright_environment.pop("CODEX_LB_DASHBOARD_BOOTSTRAP_TOKEN")
             completed = subprocess.run(
-                ["bun", "run", "test:browser-smoke"],
+                ["npm", "run", "test:browser-smoke"],
                 cwd=FRONTEND_ROOT,
                 env=playwright_environment,
                 check=False,

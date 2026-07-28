@@ -63,7 +63,6 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     StickySelectionRequest,
     _account_cap_error_code,
     _clone_account,
-    _filter_states_for_account_caps,
     _filter_states_for_usage_limit_and_account_caps,
     _select_account_preferring_budget_safe,
     _StickySelectionOutcome,

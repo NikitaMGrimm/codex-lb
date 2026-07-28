@@ -217,6 +217,7 @@ describe("AccountActions", () => {
           onSecurityWorkAuthorizedChange={vi.fn()}
           onLimitWarmupChange={vi.fn()}
           onRoutingPolicyChange={vi.fn()}
+          onUsageLimitChange={vi.fn()}
         />,
       );
 

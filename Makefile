@@ -60,7 +60,7 @@ frontend-build: frontend-install
 	cd frontend && npm run build
 
 frontend-playwright-chromium: frontend-install
-	cd frontend && bun run playwright install chromium
+	cd frontend && npm exec playwright install chromium
 
 test-dashboard-browser-smoke: frontend-build frontend-playwright-chromium
 	uv sync --dev --frozen

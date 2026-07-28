@@ -92,6 +92,6 @@ def test_dashboard_browser_smoke_covers_both_contract_sides_and_is_required() ->
     required_job = _job_block(workflow, "ci-required")
 
     assert "if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true'" in browser_job
-    assert "bun run playwright install --with-deps chromium" in browser_job
+    assert "npm exec playwright install --with-deps chromium" in browser_job
     assert "run: make test-dashboard-browser-smoke" in browser_job
     assert "- dashboard-browser-smoke" in required_job

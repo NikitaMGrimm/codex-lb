@@ -4,25 +4,22 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 ARM64_NATIVE_OPTIONAL_DEPENDENCIES = {
-    "@oxc-parser/binding-linux-arm64-gnu": "0.138.0",
-    "@oxc-parser/binding-linux-arm64-musl": "0.138.0",
+    "@oxc-parser/binding-linux-arm64-gnu": "0.141.0",
+    "@oxc-parser/binding-linux-arm64-musl": "0.141.0",
     "@oxc-resolver/binding-linux-arm64-gnu": "11.24.2",
     "@oxc-resolver/binding-linux-arm64-musl": "11.24.2",
-    "@oxlint/binding-linux-arm64-gnu": "1.66.0",
-    "@oxlint/binding-linux-arm64-musl": "1.66.0",
+    "@oxlint/binding-linux-arm64-gnu": "1.74.0",
+    "@oxlint/binding-linux-arm64-musl": "1.74.0",
     "@rolldown/binding-linux-arm64-gnu": "1.1.5",
     "@rolldown/binding-linux-arm64-musl": "1.1.5",
-    "@tailwindcss/oxide-linux-arm64-gnu": "4.3.2",
-    "@tailwindcss/oxide-linux-arm64-musl": "4.3.2",
+    "@tailwindcss/oxide-linux-arm64-gnu": "4.3.3",
+    "@tailwindcss/oxide-linux-arm64-musl": "4.3.3",
     "@typescript/typescript-linux-arm64": "7.0.2",
     "lightningcss-linux-arm64-gnu": "1.32.0",
     "lightningcss-linux-arm64-musl": "1.32.0",
 }
 
-NESTED_ARM64_NATIVE_LOCK_ENTRIES = {
-    "node_modules/vitest/node_modules/@rolldown/binding-linux-arm64-gnu": "1.1.3",
-    "node_modules/vitest/node_modules/@rolldown/binding-linux-arm64-musl": "1.1.3",
-}
+NESTED_ARM64_NATIVE_LOCK_ENTRIES: dict[str, str] = {}
 
 
 def _read_json(path: Path) -> dict:
