@@ -1555,3 +1555,51 @@ async def test_deployed_account_usage_limits_revision_rejoins_upstream_migration
         assert retention_columns <= dashboard_columns
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_deployed_account_usage_limits_merge_revision_applies_later_upstream_migrations(tmp_path):
+    from sqlalchemy import inspect as sa_inspect
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'deployed-account-usage-limits-merge.sqlite'}"
+    deployed_revision = "20260716_020000_merge_account_usage_limits"
+    later_upstream_tables = {
+        "request_usage_hourly_rollups",
+        "request_usage_hourly_error_rollups",
+        "request_demand_quarter_rollups",
+    }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, deployed_revision, bootstrap_legacy=True))
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            tables, request_log_columns, bridge_columns = await conn.run_sync(
+                lambda sync_conn: (
+                    set(sa_inspect(sync_conn).get_table_names()),
+                    {column["name"] for column in sa_inspect(sync_conn).get_columns("request_logs")},
+                    {column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_sessions")},
+                )
+            )
+        assert not later_upstream_tables & tables
+        assert "conversation_id" not in request_log_columns
+        assert "latest_pending_tool_calls_json" not in bridge_columns
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+
+        async with engine.connect() as conn:
+            tables, account_columns, request_log_columns, bridge_columns = await conn.run_sync(
+                lambda sync_conn: (
+                    set(sa_inspect(sync_conn).get_table_names()),
+                    {column["name"] for column in sa_inspect(sync_conn).get_columns("accounts")},
+                    {column["name"] for column in sa_inspect(sync_conn).get_columns("request_logs")},
+                    {column["name"] for column in sa_inspect(sync_conn).get_columns("http_bridge_sessions")},
+                )
+            )
+        assert later_upstream_tables <= tables
+        assert {"usage_limit_enabled", "usage_limit_percent"} <= account_columns
+        assert "conversation_id" in request_log_columns
+        assert "latest_pending_tool_calls_json" in bridge_columns
+    finally:
+        await engine.dispose()

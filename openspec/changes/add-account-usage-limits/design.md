@@ -46,7 +46,7 @@ Codex LB cannot know the upstream percentage cost of a request before sending it
 
 A forward Alembic revision adds both account columns and database checks for the percentage range and enabled/value relationship. Existing accounts remain disabled with no percentage. Downgrade removes the checks and columns through batch operations so SQLite and PostgreSQL both round-trip.
 
-The account-usage-limit revision retains its original parent because installations may already be stamped at that revision. When upstream adds migrations on a parallel branch from the same parent, a no-op merge revision joins both heads. This lets an existing usage-limit installation apply every upstream migration on its next upgrade while fresh installations traverse both branches and converge on one head.
+The account-usage-limit revision retains its original parent because installations may already be stamped at that revision. When upstream adds migrations on a parallel branch from the same parent, a no-op merge revision joins both heads. Deployed merge revisions are also immutable: if upstream later extends one of their parent branches, a new no-op merge revision joins the deployed merge head with the newer upstream head. This lets an existing usage-limit installation apply every upstream migration on its next upgrade while fresh installations traverse both branches and converge on one head.
 
 ## Test plan
 
