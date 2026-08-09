@@ -1252,6 +1252,17 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "NikitaMGrimm",
+      "name": "Nikita Maximilian Grimm",
+      "avatar_url": "https://avatars.githubusercontent.com/u/65914808?v=4",
+      "profile": "https://github.com/NikitaMGrimm",
+      "contributions": [
+        "code",
+        "doc",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,
