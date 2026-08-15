@@ -1565,7 +1565,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
             )
             await _await_task_deferring_cancellation(cleanup_task)
-            if isinstance(exc, ProxyResponseError):
+            if isinstance(exc, ProxyResponseError) and not owned_unanchored_handoff:
                 if session.upstream_control.retire_after_drain and not session.upstream_close_attempted:
                     await self._retire_http_bridge_after_drain_if_ready(session)
             raise
@@ -1612,7 +1612,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
             )
             await _await_task_deferring_cancellation(cleanup_task)
-            if session.upstream_control.retire_after_drain and not session.upstream_close_attempted:
+            if (
+                not owned_unanchored_handoff
+                and session.upstream_control.retire_after_drain
+                and not session.upstream_close_attempted
+            ):
                 await self._retire_http_bridge_after_drain_if_ready(session)
             raise
         try:
