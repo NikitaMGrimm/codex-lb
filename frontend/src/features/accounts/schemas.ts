@@ -276,10 +276,10 @@ export const AccountRoutingPolicyUpdateResponseSchema = z.object({
 export const AccountUsageLimitUpdateRequestSchema = z
   .object({
     enabled: z.boolean(),
-    percent: z.number().gt(0).max(100).nullable(),
+    percent: z.number().gt(0).max(100).nullable().optional(),
   })
   .superRefine((value, context) => {
-    if (value.enabled && value.percent === null) {
+    if (value.enabled && value.percent == null) {
       context.addIssue({
         code: "custom",
         path: ["percent"],

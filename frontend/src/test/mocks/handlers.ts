@@ -109,9 +109,9 @@ const AccountRoutingPolicyPayloadSchema = z.object({
 const AccountUsageLimitPayloadSchema = z
   .object({
     enabled: z.boolean(),
-    percent: z.number().gt(0).max(100).nullable(),
+    percent: z.number().gt(0).max(100).nullable().optional(),
   })
-  .refine((value) => !value.enabled || value.percent !== null);
+  .refine((value) => !value.enabled || value.percent != null);
 
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
@@ -1009,9 +1009,15 @@ export const handlers = [
         );
       }
       account.usageLimitEnabled = payload.enabled;
-      account.usageLimitPercent = payload.percent;
+      if (payload.percent !== undefined) {
+        account.usageLimitPercent = payload.percent;
+      }
       account.usageLimitState = payload.enabled ? "available" : "disabled";
-      return HttpResponse.json({ accountId, ...payload });
+      return HttpResponse.json({
+        accountId,
+        enabled: account.usageLimitEnabled,
+        percent: account.usageLimitPercent ?? null,
+      });
     },
   ),
 
