@@ -29,6 +29,8 @@ from app.modules.proxy._load_balancer.sticky_selection import (
 )
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
+    SELECTION_STATE_CHANGED,
+    SELECTION_STATE_CHANGED_MESSAGE,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
@@ -362,8 +364,6 @@ async def run_unbound_selection_path(
             )
             for aid, runtime in owner._runtime.items()
         }
-        pre_persist_cache_generation = owner._selection_inputs_cache.generation
-
         try:
             async with owner._repo_factory() as repos:
                 stale_account_ids = await owner._persist_selection_state(
@@ -402,13 +402,18 @@ async def run_unbound_selection_path(
 
         if (
             selected_snapshot is not None
-            and owner._selection_inputs_cache.generation != pre_persist_cache_generation
-            and attempt < MAX_SELECTION_ATTEMPTS
+            and owner._selection_inputs_cache.generation != selection_inputs.selection_cache_generation
         ):
             await owner.release_account_lease(selected_lease)
             selected_lease = None
             async with owner._runtime_lock:
                 owner._release_due_probe_reservation_locked(probe_reservation)
+            if attempt >= MAX_SELECTION_ATTEMPTS:
+                return _direct_error(
+                    account=None,
+                    error_message=SELECTION_STATE_CHANGED_MESSAGE,
+                    error_code=SELECTION_STATE_CHANGED,
+                )
             selection_inputs = await load_selection_inputs()
             if selection_inputs.error_code is not None and not selection_inputs.accounts:
                 return _direct_error(
