@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select, update
 
 import app.modules.proxy.service as proxy_module
+import app.modules.usage.updater as usage_updater_module
 from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import ProxyResponseError
@@ -18,10 +19,15 @@ from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKeyLimit, RequestLog
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
+from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.account_cache import AccountSelectionCache
 from app.modules.usage.repository import UsageRepository
+from app.modules.usage.updater import UsageUpdater
 
 pytestmark = pytest.mark.integration
 
@@ -291,6 +297,107 @@ async def test_warmup_force_mode_does_not_override_account_usage_limit(async_cli
         "skipped": [{"account_id": account_id, "reason": "account_usage_limit_reached"}],
         "failed": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_warmup_immediately_observes_usage_refresh_transitions_for_account_limit(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(
+        async_client,
+        "acc-warmup-limit-reset",
+        "warmup-limit-reset@example.com",
+    )
+    await _add_primary_usage(account_id, used_percent=10.0, window_minutes=300)
+    usage_limit = await async_client.put(
+        f"/api/accounts/{account_id}/usage-limit",
+        json={"enabled": True, "percent": 10.0},
+    )
+    assert usage_limit.status_code == 200
+    _, key = await _create_api_key(async_client, name="warmup-limit-reset")
+
+    selection_cache = AccountSelectionCache(ttl_seconds=60)
+    proxy_service = get_proxy_service_for_app(async_client._transport.app)
+    proxy_service._load_balancer._selection_inputs_cache = selection_cache
+    monkeypatch.setattr(usage_updater_module, "get_account_selection_cache", lambda: selection_cache)
+
+    captured_models: list[str] = []
+    _install_successful_warmup_stub(monkeypatch, captured_models)
+
+    blocked = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "force"},
+    )
+    assert blocked.status_code == 200
+    assert blocked.json()["skipped"] == [{"account_id": account_id, "reason": "account_usage_limit_reached"}]
+    assert captured_models == []
+
+    async def _fetch_reset_usage(**kwargs: object) -> UsagePayload:
+        del kwargs
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(
+                    used_percent=0.0,
+                    reset_at=int((utcnow() + timedelta(hours=5)).replace(tzinfo=timezone.utc).timestamp()),
+                    limit_window_seconds=300 * 60,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_reset_usage)
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        account = await accounts_repo.get_by_id(account_id)
+        assert account is not None
+        refreshed = await UsageUpdater(UsageRepository(session), accounts_repo).force_refresh(
+            account,
+            ignore_refresh_disabled=True,
+        )
+    assert refreshed is True
+
+    available = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "normal"},
+    )
+    assert available.status_code == 200
+    assert [item["account_id"] for item in available.json()["submitted"]] == [account_id]
+    assert available.json()["skipped"] == []
+    assert captured_models == [get_settings().warmup_model]
+
+    async def _fetch_unknown_usage(**kwargs: object) -> UsagePayload:
+        del kwargs
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(
+                    used_percent=None,
+                    reset_at=int((utcnow() + timedelta(hours=5)).replace(tzinfo=timezone.utc).timestamp()),
+                    limit_window_seconds=300 * 60,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_unknown_usage)
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        account = await accounts_repo.get_by_id(account_id)
+        assert account is not None
+        refreshed = await UsageUpdater(UsageRepository(session), accounts_repo).force_refresh(
+            account,
+            ignore_refresh_disabled=True,
+        )
+    assert refreshed is True
+
+    unknown = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "force"},
+    )
+    assert unknown.status_code == 200
+    assert unknown.json()["skipped"] == [{"account_id": account_id, "reason": "account_usage_limit_reached"}]
+    assert captured_models == [get_settings().warmup_model]
 
 
 @pytest.mark.asyncio
