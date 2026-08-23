@@ -685,30 +685,30 @@ class UsageUpdater:
 
         rate_limit = payload.rate_limit
         if rate_limit is None:
-            additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
-            return AccountRefreshResult(usage_written=additional_synced)
-        # Treat both None and empty rate_limit (both windows absent) as
-        # additional-only to avoid falling through to window processing.
-        normalized_windows = usage_core.normalize_rate_limit_windows(
-            rate_limit.primary_window,
-            rate_limit.secondary_window,
-        )
-        primary = normalized_windows.primary
-        secondary = normalized_windows.secondary
-        monthly = normalized_windows.monthly
-        if primary is None and secondary is None:
-            if monthly is None:
-                additional_synced = (
-                    self._additional_usage_repo is not None and payload.additional_rate_limits is not None
-                )
-                return AccountRefreshResult(usage_written=additional_synced)
-        if primary is None and secondary is None and monthly is None:
-            additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
-            return AccountRefreshResult(usage_written=additional_synced)
+            primary = secondary = monthly = None
+        else:
+            normalized_windows = usage_core.normalize_rate_limit_windows(
+                rate_limit.primary_window,
+                rate_limit.secondary_window,
+            )
+            primary = normalized_windows.primary
+            secondary = normalized_windows.secondary
+            monthly = normalized_windows.monthly
+        standard_data_unavailable = primary is None and secondary is None and monthly is None
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         snapshot_windows: list[UsageWindowWrite] = []
 
-        if primary is not None and (primary.used_percent is not None or account.usage_limit_enabled):
+        if standard_data_unavailable:
+            snapshot_windows.append(
+                _unavailable_standard_window_write(
+                    account,
+                    credits_has=credits_has,
+                    credits_unlimited=credits_unlimited,
+                    credits_balance=credits_balance,
+                )
+            )
+
+        if primary is not None:
             snapshot_windows.append(
                 _standard_usage_window_write(
                     window="primary",
@@ -720,7 +720,7 @@ class UsageUpdater:
                 )
             )
 
-        if secondary is not None and (secondary.used_percent is not None or account.usage_limit_enabled):
+        if secondary is not None:
             snapshot_windows.append(
                 _standard_usage_window_write(
                     window="secondary",
@@ -729,7 +729,7 @@ class UsageUpdater:
                 )
             )
 
-        if monthly is not None and (monthly.used_percent is not None or account.usage_limit_enabled):
+        if monthly is not None:
             snapshot_windows.append(
                 _standard_usage_window_write(
                     window="monthly",
@@ -747,12 +747,31 @@ class UsageUpdater:
         )
         usage_written = any(_usage_entry_written(entry) for entry in entries)
         await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
-        if usage_written and account.usage_limit_enabled:
+        if usage_written and await self._usage_limit_enabled_after_snapshot(account):
             # A fresh observation can either block an account or make a
             # previously blocked account eligible again. Do not leave either
             # transition hidden behind the selection-cache TTL.
             get_account_selection_cache().invalidate()
-        return AccountRefreshResult(usage_written=usage_written)
+        additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
+        return AccountRefreshResult(usage_written=usage_written or (standard_data_unavailable and additional_synced))
+
+    async def _usage_limit_enabled_after_snapshot(self, account: Account) -> bool:
+        if self._accounts_repo is None:
+            return bool(account.usage_limit_enabled)
+        try:
+            current = await self._accounts_repo.get_by_id_fresh(account.id)
+        except Exception:
+            # The telemetry commit already succeeded. Conservatively invalidate
+            # when the post-commit policy read fails so cached routing cannot
+            # outlive a concurrent enable.
+            logger.warning(
+                "Usage refresh could not re-read account policy after snapshot account_id=%s request_id=%s",
+                account.id,
+                get_request_id(),
+                exc_info=True,
+            )
+            return True
+        return current is not None and bool(current.usage_limit_enabled)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:
@@ -1123,6 +1142,26 @@ def _standard_usage_window_write(
         used_percent=float(used_percent),
         reset_at=_reset_at(usage_window.reset_at, usage_window.reset_after_seconds, now_epoch),
         window_minutes=_window_minutes(usage_window.limit_window_seconds),
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
+    )
+
+
+def _unavailable_standard_window_write(
+    account: Account,
+    *,
+    credits_has: bool | None,
+    credits_unlimited: bool | None,
+    credits_balance: float | None,
+) -> UsageWindowWrite:
+    # One fresh placeholder is enough to supersede older measured rows and
+    # make the canonical evaluator fail closed. Monthly-only plans must use
+    # their relevant slot; all other plans use the primary slot.
+    window = "monthly" if usage_core.capacity_for_plan(account.plan_type, "monthly") is not None else "primary"
+    return UsageWindowWrite(
+        window=window,
+        used_percent=0.0,
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,

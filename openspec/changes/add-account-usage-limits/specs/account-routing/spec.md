@@ -127,6 +127,15 @@ An enabled maximum-usage policy MUST require current standard quota data. Elapse
 - **THEN** the account is not selected
 - **AND** its usage-limit state is `data_unavailable`
 
+#### Scenario: Enabling a policy overlaps a usage refresh
+
+- **GIVEN** an account has a disabled maximum usage policy and an older below-limit observation
+- **AND** an in-flight refresh receives a newer standard observation that is at the limit or unavailable
+- **WHEN** the operator enables the policy before that refresh commits
+- **THEN** the newer observation supersedes the older observation
+- **AND** cached selection state is invalidated after the refresh commit
+- **AND** the account is not selected
+
 #### Scenario: All accounts are locally capped
 
 - **GIVEN** every otherwise eligible account has limit state `reached` or `data_unavailable`
