@@ -240,23 +240,31 @@ class LiveUsageIngestor:
             )
 
         async with get_background_session() as session:
-            account_id = await UsageRepository(session).settle_live_account_snapshot(
+            usage_repo = UsageRepository(session)
+            settlement = await usage_repo.settle_live_account_snapshot(
                 account_id=item.account_id,
                 chatgpt_account_id=item.chatgpt_account_id,
                 windows=windows,
                 should_skip=lambda resolved: self._should_skip(resolved, snapshot),
             )
-        if account_id is None:
+        if settlement is None:
             return
+        account_id = settlement.account_id
         self._last_write[account_id] = (_fingerprint(snapshot), time.monotonic())
+        # Selection eligibility is a hard routing gate for accounts with an
+        # enabled usage policy, so their committed live observations must
+        # become visible immediately. Accounts without that policy do not need
+        # to churn the global selection cache on every serving-path snapshot.
+        if settlement.usage_limit_enabled:
+            get_account_selection_cache().invalidate()
         await self._invalidate_caches_throttled()
 
     async def _invalidate_caches_throttled(self) -> None:
-        # Invalidations are throttled, but every write must still be covered:
-        # a write inside the throttle window schedules one trailing
-        # invalidation at window expiry, so cached selection inputs and
-        # downstream x-codex-* headers are stale for at most the throttle
-        # interval rather than the header cache TTL.
+        # Header-cache invalidations are throttled, but every write must still
+        # be covered: a write inside the throttle window schedules one trailing
+        # invalidation at window expiry. Selection inputs for accounts with an
+        # enabled usage policy are invalidated synchronously above because
+        # routing eligibility cannot tolerate this throttle window.
         now = time.monotonic()
         remaining = _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS - (now - self._last_cache_invalidation)
         if remaining <= 0:
@@ -275,7 +283,6 @@ class LiveUsageIngestor:
 
     async def _invalidate_caches_now(self) -> None:
         self._last_cache_invalidation = time.monotonic()
-        get_account_selection_cache().invalidate()
         # Downstream x-codex-* headers are served from a TTL cache that only
         # the poller invalidates otherwise; drop it so clients see the live
         # values before the TTL expires.

@@ -30,11 +30,14 @@ from app.db.models import Account, AccountStatus, AdditionalUsageHistory, Sticky
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
+    SELECTION_STATE_CHANGED,
+    SELECTION_STATE_CHANGED_MESSAGE,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
     ProbeReservation,
 )
+from app.modules.proxy.account_cache import AccountSelectionCache
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.fair_share import (
     API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
@@ -78,6 +81,7 @@ class SelectionInputsProtocol(Protocol):
     error_code: str | None
     ignore_standard_quota_account_ids: frozenset[str]
     routing_policy_override: str | None
+    selection_cache_generation: int
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]: ...
@@ -92,6 +96,7 @@ SelectionInputsT = TypeVar("SelectionInputsT", bound=SelectionInputsProtocol)
 class StickySelectionOwner(Protocol):
     _runtime_lock: asyncio.Lock
     _repo_factory: ProxyRepoFactory
+    _selection_inputs_cache: AccountSelectionCache
 
     def _prepare_sticky_selection_states(
         self,
@@ -952,6 +957,38 @@ async def run_sticky_selection_path(
                     error_message=selection_inputs.error_message,
                     error_code=selection_inputs.error_code,
                 )
+            await asyncio.sleep(0)
+            continue
+        if (
+            selected_snapshot is not None
+            and owner._selection_inputs_cache.generation != selection_inputs.selection_cache_generation
+        ):
+            # Account or usage data changed after this attempt loaded its
+            # selection snapshot. The lease and any probe reservation are
+            # still provisional, and the sticky mutation has not been written
+            # yet, so discard the attempt and re-evaluate the hard gates from a
+            # fresh snapshot before publishing affinity or returning admission.
+            await owner.release_account_lease(selected_lease)
+            selected_lease = None
+            async with owner._runtime_lock:
+                owner._release_due_probe_reservation_locked(probe_reservation)
+            if attempt >= MAX_SELECTION_ATTEMPTS:
+                return _direct_error(
+                    account=None,
+                    error_message=SELECTION_STATE_CHANGED_MESSAGE,
+                    error_code=SELECTION_STATE_CHANGED,
+                )
+            selection_inputs = await load_selection_inputs()
+            if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                return _direct_error(
+                    account=None,
+                    error_message=selection_inputs.error_message,
+                    error_code=selection_inputs.error_code,
+                )
+            selected_snapshot = None
+            error_message = None
+            selected_states = []
+            selected_account_map = {}
             await asyncio.sleep(0)
             continue
         if (

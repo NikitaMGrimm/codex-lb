@@ -241,6 +241,7 @@ class _SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
+    selection_cache_generation: int = 0
     _runtime_account_by_id: dict[str, Account] | None = field(default=None, init=False, repr=False, compare=False)
 
     def runtime_account(self, account_id: str) -> Account | None:
@@ -608,11 +609,16 @@ class LoadBalancer:
         sticky_selection_may_resolve_owner = sticky_key is not None and sticky_kind == StickySessionKind.CODEX_SESSION
 
         async def load_selection_inputs() -> _SelectionInputs:
+            selection_cache_generation = self._selection_inputs_cache.generation
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
+            )
+            selection_inputs = replace(
+                selection_inputs,
+                selection_cache_generation=selection_cache_generation,
             )
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even
@@ -3038,6 +3044,7 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         quota_admitted_catalog_omission_account_ids=frozenset(
             selection_inputs.quota_admitted_catalog_omission_account_ids
         ),
+        selection_cache_generation=selection_inputs.selection_cache_generation,
     )
 
 
