@@ -447,26 +447,29 @@ async def update_account_usage_limit(
     _write_access=Depends(require_dashboard_write_access),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountUsageLimitUpdateResponse:
-    success = await context.service.set_usage_limit(
+    percent_was_provided = "percent" in payload.model_fields_set
+    configuration = await context.service.set_usage_limit(
         account_id,
         enabled=payload.enabled,
         percent=payload.percent,
+        update_percent=percent_was_provided,
     )
-    if not success:
+    if configuration is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     AuditService.log_async(
         "account_usage_limit_updated",
         actor_ip=request.client.host if request.client else None,
         details={
             "account_id": account_id,
-            "enabled": payload.enabled,
-            "percent": payload.percent,
+            "enabled": configuration.enabled,
+            "percent": configuration.percent,
+            "percent_was_provided": percent_was_provided,
         },
     )
     return AccountUsageLimitUpdateResponse(
         account_id=account_id,
-        enabled=payload.enabled,
-        percent=payload.percent,
+        enabled=configuration.enabled,
+        percent=configuration.percent,
     )
 
 

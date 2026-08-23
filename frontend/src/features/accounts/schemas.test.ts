@@ -95,6 +95,18 @@ describe("AccountSummarySchema", () => {
     expect(() =>
       AccountUsageLimitUpdateRequestSchema.parse({ enabled: true, percent: null }),
     ).toThrow();
+    expect(() =>
+      AccountUsageLimitUpdateRequestSchema.parse({ enabled: true }),
+    ).toThrow();
+  });
+
+  it("distinguishes an omitted retained percentage from explicit removal", () => {
+    expect(
+      AccountUsageLimitUpdateRequestSchema.parse({ enabled: false }),
+    ).toEqual({ enabled: false });
+    expect(
+      AccountUsageLimitUpdateRequestSchema.parse({ enabled: false, percent: null }),
+    ).toEqual({ enabled: false, percent: null });
   });
 });
 
