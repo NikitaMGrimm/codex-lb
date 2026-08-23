@@ -4836,6 +4836,117 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
     assert len(upstream.sent_text) == 1
 
 
+@pytest.mark.parametrize(
+    ("second_check", "expected_error_code"),
+    [
+        (AccountUsageLimitState.REACHED, "account_usage_limit_reached"),
+        (AccountUsageLimitState.DATA_UNAVAILABLE, "account_usage_limit_reached"),
+        (RuntimeError("usage database unavailable"), "account_usage_limit_authorization_failed"),
+    ],
+)
+def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_request(
+    app_instance,
+    monkeypatch,
+    second_check,
+    expected_error_code,
+) -> None:
+    release_first_response = threading.Event()
+
+    class _OverlappingUpstreamWebSocket(_FakeUpstreamWebSocket):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._receive_count = 0
+
+        async def receive(self) -> _FakeUpstreamMessage:
+            self._receive_count += 1
+            if self._receive_count == 1:
+                return _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {"type": "response.created", "response": {"id": "resp_ws_first", "status": "in_progress"}},
+                        separators=(",", ":"),
+                    ),
+                )
+            await asyncio.to_thread(release_first_response.wait)
+            return _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_ws_first",
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+
+    upstream = _OverlappingUpstreamWebSocket()
+    account = SimpleNamespace(id="acct_ws_usage_limit_read_failure")
+    authorization_checks = 0
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return account, upstream
+
+    async def check_account_usage_limit(self, account_id):
+        nonlocal authorization_checks
+        del self
+        assert account_id == account.id
+        authorization_checks += 1
+        if authorization_checks == 2:
+            if isinstance(second_check, Exception):
+                raise second_check
+            return second_check
+        return AccountUsageLimitState.DISABLED
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "check_account_usage_limit", check_account_usage_limit)
+
+    request = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": "turn",
+        "stream": True,
+    }
+    try:
+        with TestClient(app_instance) as client:
+            with client.websocket_connect("/v1/responses") as websocket:
+                websocket.send_text(json.dumps(request))
+                first_created = json.loads(websocket.receive_text())
+
+                websocket.send_text(json.dumps(request))
+                rejected = json.loads(websocket.receive_text())
+
+                assert first_created["type"] == "response.created"
+                assert rejected["type"] == "response.failed"
+                assert rejected["response"]["error"]["code"] == expected_error_code
+                assert len(upstream.sent_text) == 1
+                assert upstream.closed is False
+
+                release_first_response.set()
+                first_completed = json.loads(websocket.receive_text())
+                assert first_completed["type"] == "response.completed"
+                assert first_completed["response"]["id"] == "resp_ws_first"
+    finally:
+        release_first_response.set()
+
+
 def test_v1_responses_websocket_archives_multiplexed_upstream_frames_by_response_id(app_instance, monkeypatch):
     fake_upstream = _SequencedUpstreamWebSocket(
         [
