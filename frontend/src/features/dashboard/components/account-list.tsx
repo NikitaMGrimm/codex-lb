@@ -17,7 +17,7 @@ import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
-import { normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
+import { getAccountDisplayStatus, normalizeStatus, quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatDateTimeInline,
   formatPercentNullable,
@@ -167,7 +167,10 @@ function compareAccountsBySort(a: AccountSummary, b: AccountSummary, sort: Accou
       result = compareText(accountTitle(a), accountTitle(b));
       break;
     case "status":
-      result = compareText(normalizeStatus(a.status), normalizeStatus(b.status));
+      result = compareText(
+        getAccountDisplayStatus(a.status, a.usageLimitState),
+        getAccountDisplayStatus(b.status, b.usageLimitState),
+      );
       break;
     case "plan":
       result = compareText(formatSlug(a.planType), formatSlug(b.planType));
@@ -340,6 +343,7 @@ export function AccountList({
         </div>
         {sortedAccounts.map((account, index) => {
           const status = normalizeStatus(account.status);
+          const displayStatus = getAccountDisplayStatus(account.status, account.usageLimitState);
           const title = accountTitle(account);
           const emailSubtitle =
             account.displayName && account.displayName !== account.email
@@ -387,7 +391,7 @@ export function AccountList({
 	                  {showAccountId && emailSubtitle ? ` | ${t("dashboard.accountList.idShort", { id: compactId })}` : ""}
 	                </p>
               </div>
-              <StatusBadge status={status} />
+              <StatusBadge status={displayStatus} />
               <span className="text-xs text-muted-foreground">{formatSlug(account.planType)}</span>
               <AccountQuotaCells account={account} />
 	              <span className="font-medium tabular-nums">
