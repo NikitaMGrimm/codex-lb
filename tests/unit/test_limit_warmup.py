@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,7 +19,12 @@ pytestmark = pytest.mark.unit
 
 
 def _account(
-    account_id: str = "acc_1", *, enabled: bool = True, status: AccountStatus = AccountStatus.ACTIVE
+    account_id: str = "acc_1",
+    *,
+    enabled: bool = True,
+    status: AccountStatus = AccountStatus.ACTIVE,
+    usage_limit_enabled: bool = False,
+    usage_limit_percent: float | None = None,
 ) -> Account:
     return Account(
         id=account_id,
@@ -32,6 +38,8 @@ def _account(
         status=status,
         deactivation_reason=None,
         limit_warmup_enabled=enabled,
+        usage_limit_enabled=usage_limit_enabled,
+        usage_limit_percent=usage_limit_percent,
     )
 
 
@@ -425,7 +433,7 @@ async def test_streaming_limit_warmup_sender_passes_resolved_route(monkeypatch: 
         endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
     )
     calls: dict[str, Any] = {}
-    sender = StreamingLimitWarmupSender(cast(Any, _WarmupAccountsRepo()))
+    sender = StreamingLimitWarmupSender(cast(Any, _WarmupAccountsRepo(account=account)))
 
     async def ensure_fresh(target: Account) -> Account:
         return target
@@ -517,6 +525,86 @@ async def test_streaming_limit_warmup_sender_rechecks_account_after_auth(
 
 
 @pytest.mark.asyncio
+async def test_streaming_limit_warmup_sender_rechecks_usage_limit_before_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = utcnow()
+    reset_at = int(now.replace(tzinfo=timezone.utc).timestamp()) + 3600
+    account = _account(usage_limit_enabled=True, usage_limit_percent=50.0)
+    repo = _WarmupAccountsRepo(account=account)
+    usage_repo = SimpleNamespace(
+        latest_by_account=AsyncMock(
+            side_effect=[
+                {account.id: _usage(account.id, used_percent=10.0, reset_at=reset_at, recorded_at=now)},
+                {
+                    account.id: _usage(
+                        account.id,
+                        used_percent=75.0,
+                        reset_at=reset_at,
+                        window="secondary",
+                        recorded_at=now,
+                    )
+                },
+                {},
+            ]
+        )
+    )
+    sender = StreamingLimitWarmupSender(cast(Any, repo))
+
+    async def ensure_fresh(target: Account) -> Account:
+        return target
+
+    async def resolve_route(_account: Account) -> None:
+        return None
+
+    async def stream(*_args: object, **_kwargs: object):
+        raise AssertionError("stream_responses must not run for a usage-limited account")
+        yield ""
+
+    monkeypatch.setattr(sender._auth_manager, "ensure_fresh", ensure_fresh)
+    monkeypatch.setattr(sender, "_resolve_upstream_route", resolve_route)
+    monkeypatch.setattr(limit_warmup_service, "UsageRepository", lambda _session: usage_repo)
+    monkeypatch.setattr(limit_warmup_service, "stream_responses", stream)
+
+    result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
+
+    assert result.error_code == "account_usage_limit_reached"
+    assert repo.fresh_reads == 3
+    assert usage_repo.latest_by_account.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_streaming_limit_warmup_sender_fails_closed_without_usable_usage_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account(usage_limit_enabled=True, usage_limit_percent=50.0)
+    repo = _WarmupAccountsRepo(account=account)
+    usage_repo = SimpleNamespace(latest_by_account=AsyncMock(side_effect=[{}, {}, {}]))
+    sender = StreamingLimitWarmupSender(cast(Any, repo))
+
+    async def ensure_fresh(target: Account) -> Account:
+        return target
+
+    async def resolve_route(_account: Account) -> None:
+        return None
+
+    async def stream(*_args: object, **_kwargs: object):
+        raise AssertionError("stream_responses must not run without usable current usage data")
+        yield ""
+
+    monkeypatch.setattr(sender._auth_manager, "ensure_fresh", ensure_fresh)
+    monkeypatch.setattr(sender, "_resolve_upstream_route", resolve_route)
+    monkeypatch.setattr(limit_warmup_service, "UsageRepository", lambda _session: usage_repo)
+    monkeypatch.setattr(limit_warmup_service, "stream_responses", stream)
+
+    result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
+
+    assert result.error_code == "account_usage_limit_reached"
+    assert result.success is False
+    assert usage_repo.latest_by_account.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_streaming_limit_warmup_sender_resolves_route_with_owned_repo_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -532,7 +620,7 @@ async def test_streaming_limit_warmup_sender_resolves_route_with_owned_repo_fact
 
     def repo_factory() -> _WarmupAccountsRepoContext:
         calls["factory"] += 1
-        return _WarmupAccountsRepoContext(_WarmupAccountsRepo(owned_session))
+        return _WarmupAccountsRepoContext(_WarmupAccountsRepo(owned_session, account=account))
 
     sender = StreamingLimitWarmupSender(
         cast(Any, _WarmupAccountsRepo(primary_session)),
@@ -557,7 +645,7 @@ async def test_streaming_limit_warmup_sender_resolves_route_with_owned_repo_fact
     result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
 
     assert result.success is True
-    assert calls["factory"] == 1
+    assert calls["factory"] == 2
     assert calls["route_session"] is owned_session
     assert calls["route_session"] is not primary_session
 
@@ -572,7 +660,7 @@ async def test_streaming_limit_warmup_sender_returns_route_metadata(
         pool_id="pool_1",
         endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
     )
-    sender = StreamingLimitWarmupSender(cast(Any, _WarmupAccountsRepo()))
+    sender = StreamingLimitWarmupSender(cast(Any, _WarmupAccountsRepo(account=account)))
 
     async def ensure_fresh(target: Account) -> Account:
         return target
@@ -644,6 +732,8 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
     await service.run_after_usage_refresh(
         accounts=[account],
@@ -652,6 +742,8 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert len(sender.calls) == 1
@@ -659,6 +751,53 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     assert repo.rows[0].status == "succeeded"
     assert logs.logs[0]["source"] == "limit_warmup"
     assert logs.logs[0]["request_kind"] == "warmup"
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_blocks_reset_confirmed_warmup_planning() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    previous_reset_at = now_epoch - 60
+    current_reset_at = now_epoch + 300 * 60
+    account = _account(usage_limit_enabled=True, usage_limit_percent=50.0)
+    secondary_row = _usage(
+        account.id,
+        used_percent=75.0,
+        reset_at=now_epoch + 7 * 24 * 3600,
+        window="secondary",
+        recorded_at=now,
+    )
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=100.0,
+                reset_at=previous_reset_at,
+                recorded_at=now - timedelta(seconds=120),
+            )
+        },
+        before_secondary={},
+        after_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=0.0,
+                reset_at=current_reset_at,
+                recorded_at=now,
+            )
+        },
+        after_secondary={account.id: secondary_row},
+        usage_limit_secondary={account.id: secondary_row},
+        usage_limit_monthly={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
 
 
 @pytest.mark.asyncio
@@ -676,6 +815,8 @@ async def test_reset_warms_after_pre_reset_99_percent_usage() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert len(sender.calls) == 1
@@ -697,6 +838,8 @@ async def test_reset_warms_regardless_of_pre_reset_usage() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
@@ -733,6 +876,8 @@ async def test_early_reset_reanchor_uses_sampling_interval() -> None:
             )
         },
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
@@ -753,6 +898,8 @@ async def test_full_window_reset_warms_when_usage_was_already_zero() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=19_000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
@@ -773,6 +920,8 @@ async def test_sliding_reset_at_without_quota_recovery_does_not_warm() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1120)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -801,6 +950,8 @@ async def test_future_full_window_slide_without_quota_recovery_does_not_warm() -
             )
         },
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -837,6 +988,8 @@ async def test_stale_past_boundary_update_without_quota_recovery_does_not_warm()
             )
         },
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -877,6 +1030,8 @@ async def test_warmup_request_log_persists_route_metadata() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert logs.logs[0]["upstream_proxy_route_mode"] == "account_bound"
@@ -900,6 +1055,8 @@ async def test_warmup_sends_use_bounded_concurrency() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000) for account in accounts},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert len(sender.calls) == 6
@@ -923,6 +1080,8 @@ async def test_warmup_completion_failure_cancels_pending_sends() -> None:
             before_secondary={},
             after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000) for account in accounts},
             after_secondary={},
+            usage_limit_secondary={},
+            usage_limit_monthly={},
         )
 
     assert [row.status for row in repo.rows] == ["failed", "failed"]
@@ -945,6 +1104,8 @@ async def test_warmup_completion_failure_finalizes_same_batch_sends() -> None:
             before_secondary={},
             after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000) for account in accounts},
             after_secondary={},
+            usage_limit_secondary={},
+            usage_limit_monthly={},
         )
 
     statuses_by_account = {row.account_id: row.status for row in repo.rows}
@@ -983,6 +1144,8 @@ async def test_warmup_completion_failure_drains_finished_pending_sends(monkeypat
             before_secondary={},
             after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000) for account in accounts},
             after_secondary={},
+            usage_limit_secondary={},
+            usage_limit_monthly={},
         )
 
     statuses_by_account = {row.account_id: row.status for row in repo.rows}
@@ -1003,6 +1166,8 @@ async def test_disabled_or_account_opt_out_does_not_send() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
     account.limit_warmup_enabled = True
     await service.run_after_usage_refresh(
@@ -1012,6 +1177,8 @@ async def test_disabled_or_account_opt_out_does_not_send() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1032,6 +1199,8 @@ async def test_default_available_threshold_accepts_nonzero_reset_usage() -> None
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=1, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert len(sender.calls) == 1
@@ -1052,6 +1221,8 @@ async def test_min_available_quota_threshold_uses_remaining_percent() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=98, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
     await service.run_after_usage_refresh(
         accounts=[account],
@@ -1060,6 +1231,8 @@ async def test_min_available_quota_threshold_uses_remaining_percent() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=1, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert len(sender.calls) == 1
@@ -1080,6 +1253,8 @@ async def test_both_selected_windows_warm_primary_and_secondary_resets() -> None
         before_secondary={account.id: _usage(account.id, used_percent=100, reset_at=10_000, window="secondary")},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={account.id: _usage(account.id, used_percent=0, reset_at=20_000, window="secondary")},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini"), (account.id, "gpt-5.1-codex-mini")]
@@ -1104,6 +1279,8 @@ async def test_monthly_free_quota_reset_warms_and_records_monthly_window() -> No
         before_secondary={account.id: _usage(account.id, used_percent=100, reset_at=1000, window="monthly")},
         after_primary={},
         after_secondary={account.id: _usage(account.id, used_percent=0, reset_at=2000, window="monthly")},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
@@ -1135,6 +1312,8 @@ async def test_confirmed_paid_to_free_transition_warms_fresh_monthly_window() ->
                 recorded_at=refresh_started_at,
             )
         },
+        usage_limit_secondary={},
+        usage_limit_monthly={},
         previous_plan_types={account.id: "plus"},
         refresh_started_at=refresh_started_at,
     )
@@ -1194,6 +1373,8 @@ async def test_paid_to_free_transition_candidate_rejects_unsafe_evidence(
                 recorded_at=recorded_at,
             )
         },
+        usage_limit_secondary={},
+        usage_limit_monthly={},
         previous_plan_types={account.id: previous_plan_type},
         refresh_started_at=refresh_started_at,
     )
@@ -1228,6 +1409,8 @@ async def test_paid_to_free_transition_warmup_is_deduplicated_by_monthly_reset()
             before_secondary={},
             after_primary={},
             after_secondary=after_secondary,
+            usage_limit_secondary={},
+            usage_limit_monthly={},
             previous_plan_types={account.id: "pro"},
             refresh_started_at=refresh_started_at,
         )
@@ -1254,6 +1437,8 @@ async def test_long_window_warmup_ignores_cross_window_transition() -> None:
         before_secondary={account.id: _usage(account.id, used_percent=100, reset_at=1000, window="secondary")},
         after_primary={},
         after_secondary={account.id: _usage(account.id, used_percent=0, reset_at=2000, window="monthly")},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1276,6 +1461,8 @@ async def test_primary_warmup_accepts_legacy_null_window_transition() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
@@ -1296,6 +1483,8 @@ async def test_unsafe_account_state_does_not_send() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1320,6 +1509,8 @@ async def test_auto_model_unavailable_records_skipped_attempt(monkeypatch) -> No
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1421,6 +1612,8 @@ async def test_staggered_idle_warmup_disabled_by_default_does_not_prestart_idle_
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1446,6 +1639,8 @@ async def test_staggered_idle_warmup_blocks_outside_account_slot(monkeypatch) ->
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1473,6 +1668,8 @@ async def test_staggered_idle_warmup_prestarts_once_per_cycle(monkeypatch) -> No
             before_secondary={},
             after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
             after_secondary={},
+            usage_limit_secondary={},
+            usage_limit_monthly={},
         )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
@@ -1507,6 +1704,8 @@ async def test_staggered_idle_cohort_does_not_widen_candidate_evaluation(monkeyp
             )
         },
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
         refresh_started_at=now,
     )
 
@@ -1544,6 +1743,8 @@ async def test_staggered_idle_warmup_skips_when_reset_at_is_missing(monkeypatch)
             )
         },
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1581,6 +1782,8 @@ async def test_staggered_idle_warmup_skips_long_nonstandard_windows(monkeypatch)
             )
         },
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1610,6 +1813,8 @@ async def test_staggered_idle_warmup_ignores_selected_reset_windows(monkeypatch)
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
@@ -1641,6 +1846,8 @@ async def test_staggered_idle_warmup_requires_unused_primary_window(monkeypatch)
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=10, reset_at=18_000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1673,6 +1880,8 @@ async def test_staggered_idle_warmup_accepts_upstream_idle_floor(monkeypatch) ->
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
@@ -1704,6 +1913,8 @@ async def test_staggered_idle_warmup_dedupes_across_reset_at_jitter(monkeypatch)
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_000, recorded_at=now)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert len(sender.calls) == 1
@@ -1717,6 +1928,8 @@ async def test_staggered_idle_warmup_dedupes_across_reset_at_jitter(monkeypatch)
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=18_001, recorded_at=now)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     # Should NOT create a second attempt — the persisted first reset is within
@@ -1747,6 +1960,8 @@ async def test_staggered_idle_warmup_dedupe_has_no_minute_boundary(monkeypatch) 
             before_secondary={},
             after_primary={account.id: _usage(account.id, used_percent=1.0, reset_at=reset_at, recorded_at=now)},
             after_secondary={},
+            usage_limit_secondary={},
+            usage_limit_monthly={},
         )
 
     assert len(sender.calls) == 1
@@ -1773,6 +1988,8 @@ async def test_regular_warmup_ignores_reset_at_jitter(monkeypatch) -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=45.0, reset_at=1783829222)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1795,6 +2012,8 @@ async def test_regular_warmup_dedupes_same_reset_across_after_reset_at_jitter() 
             before_secondary={},
             after_primary={account.id: _usage(account.id, used_percent=0.0, reset_at=reset_at)},
             after_secondary={},
+            usage_limit_secondary={},
+            usage_limit_monthly={},
         )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
@@ -1819,6 +2038,8 @@ async def test_regular_warmup_boundary_59_seconds_rejected(monkeypatch) -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0.0, reset_at=1059)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == []
@@ -1843,6 +2064,8 @@ async def test_regular_warmup_boundary_60_seconds_accepted(monkeypatch) -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0.0, reset_at=1060)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert len(sender.calls) == 1
@@ -1867,6 +2090,8 @@ async def test_staggered_idle_warmup_catches_slot_between_refresh_ticks(monkeypa
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000, recorded_at=now)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
         refresh_started_at=now - timedelta(seconds=5),
         usage_refresh_interval_seconds=120,
     )
@@ -1893,6 +2118,8 @@ async def test_staggered_idle_warmup_catches_slot_during_long_refresh(monkeypatc
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=18_000, recorded_at=now)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
         refresh_started_at=datetime.fromtimestamp(5995, tz=timezone.utc).replace(tzinfo=None),
         usage_refresh_interval_seconds=60,
     )
@@ -1926,6 +2153,8 @@ async def test_staggered_idle_warmup_requires_current_refresh_sample(monkeypatch
             )
         },
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
         refresh_started_at=now,
     )
 
@@ -1958,6 +2187,8 @@ async def test_staggered_idle_warmup_rejects_stale_entry_from_prior_cycle(monkey
             )
         },
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
         refresh_started_at=None,
         usage_refresh_interval_seconds=120,
     )
@@ -1992,6 +2223,8 @@ async def test_recent_attempt_cooldown_does_not_block_distinct_reset() -> None:
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=3000)},
         after_secondary={},
+        usage_limit_secondary={},
+        usage_limit_monthly={},
     )
 
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
