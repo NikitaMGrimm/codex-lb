@@ -27,6 +27,7 @@ For an account with an enabled maximum usage policy, the selector MUST evaluate 
 Each newly admitted logical HTTP bridge turn MUST re-evaluate its continuity-pinned account through the same standard usage-limit policy, including when a reused bridge retains its stream lease and when an idle bridge would otherwise reacquire that lease. A policy denial MUST occur before the new turn is queued or sent, MUST use the `account_usage_limit_reached` response contract, and MUST retire the bridge after already-admitted turns drain without rebinding or disrupting their ownership and settlement. If the pinned account no longer exists or becomes administratively unavailable, admission MUST fail closed with the established bridge continuity-lost response and retire the bridge without creating a new runtime lease for that owner.
 
 Each newly admitted `response.create` on an existing proxy WebSocket MUST re-evaluate the socket-pinned account through the same standard usage-limit policy. A `reached` or `data_unavailable` result MUST reject only the new frame with `account_usage_limit_reached` before upstream dispatch, without disrupting already-admitted responses on the shared socket.
+If the final policy read fails, the new frame MUST fail closed with `account_usage_limit_authorization_failed` before upstream dispatch, without retiring the shared upstream or disrupting already-admitted responses. Cancellation MUST continue to propagate.
 
 #### Scenario: Equality reaches the limit
 
@@ -72,6 +73,15 @@ Each newly admitted `response.create` on an existing proxy WebSocket MUST re-eva
 - **WHEN** the client submits a new `response.create` frame
 - **THEN** the new turn fails with `previous_response_owner_unavailable` before upstream dispatch
 - **AND** already-admitted work on the socket remains uninterrupted
+
+#### Scenario: Reused WebSocket policy authorization fails
+
+- **GIVEN** an existing proxy WebSocket has an already-admitted response in flight
+- **AND** the final usage-limit policy read for a new `response.create` fails
+- **WHEN** the new frame is authorized
+- **THEN** only the new frame fails with `account_usage_limit_authorization_failed`
+- **AND** the new frame is not sent upstream
+- **AND** the already-admitted response completes without the shared upstream being retired
 
 #### Scenario: Fresh weekly shape supersedes elapsed monthly telemetry
 
