@@ -81,6 +81,7 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_display_label_for_quota_key,
     get_additional_quota_routing_policy,
 )
+from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import AdditionalUsageRepositoryPort, UsageUpdater
 
@@ -824,8 +825,8 @@ class AccountsService:
         primary_entry = await self._usage_repo.latest_entry_for_account(account_id, window="primary")
         secondary_entry = await self._usage_repo.latest_entry_for_account(account_id, window="secondary")
         return (
-            primary_entry.used_percent if primary_entry is not None else None,
-            secondary_entry.used_percent if secondary_entry is not None else None,
+            usage_history_to_window_row(primary_entry).used_percent if primary_entry is not None else None,
+            usage_history_to_window_row(secondary_entry).used_percent if secondary_entry is not None else None,
         )
 
     async def _send_probe_request(

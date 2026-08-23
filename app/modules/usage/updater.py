@@ -716,7 +716,7 @@ class UsageUpdater:
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         snapshot_windows: list[UsageWindowWrite] = []
 
-        if primary is not None:
+        if primary is not None and (primary.used_percent is not None or account.usage_limit_enabled):
             snapshot_windows.append(
                 _standard_usage_window_write(
                     window="primary",
@@ -728,7 +728,7 @@ class UsageUpdater:
                 )
             )
 
-        if secondary is not None:
+        if secondary is not None and (secondary.used_percent is not None or account.usage_limit_enabled):
             snapshot_windows.append(
                 _standard_usage_window_write(
                     window="secondary",
@@ -737,7 +737,7 @@ class UsageUpdater:
                 )
             )
 
-        if monthly is not None:
+        if monthly is not None and (monthly.used_percent is not None or account.usage_limit_enabled):
             snapshot_windows.append(
                 _standard_usage_window_write(
                     window="monthly",
