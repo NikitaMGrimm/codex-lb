@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 import type { AccountSummary } from "@/features/dashboard/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
+  getAccountDisplayStatus,
   normalizeStatus,
   quotaBarColor,
   quotaBarTrack,
@@ -88,6 +89,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
   const blurred = usePrivacyStore((s) => s.blurred);
   const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
   const status = normalizeStatus(account.status);
+  const badgeStatus = getAccountDisplayStatus(account.status, account.usageLimitState);
   const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
   const secondaryRemaining = account.usage?.secondaryRemainingPercent ?? null;
   const monthlyRemaining = account.usage?.monthlyRemainingPercent ?? null;
@@ -158,7 +160,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
             </p>
           ) : null}
         </div>
-        <StatusBadge status={status} />
+        <StatusBadge status={badgeStatus} />
       </div>
 
       {/* Quota bars */}
