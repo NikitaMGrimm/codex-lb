@@ -144,6 +144,7 @@ export function AccountsPage() {
     getErrorMessageOrNull(usageLimitMutation.error) ||
     getErrorMessageOrNull(exportAuthMutation.error) ||
     getErrorMessageOrNull(updateMutation.error) ||
+    getErrorMessageOrNull(accountsQuery.error) ||
     getErrorMessageOrNull(settingsQuery.error) ||
     getErrorMessageOrNull(upstreamProxyQuery.error) ||
     getErrorMessageOrNull(accountBindingMutation.error) ||

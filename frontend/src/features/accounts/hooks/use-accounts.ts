@@ -24,6 +24,7 @@ import {
 } from "@/features/accounts/api";
 import type {
   AccountRoutingPolicy,
+  AccountSummary,
   AccountUsageLimitUpdateRequest,
   AccountUsageResetConsumeResponse,
 } from "@/features/accounts/schemas";
@@ -212,6 +213,27 @@ export function useAccountMutations() {
       update: AccountUsageLimitUpdateRequest;
     }) => updateAccountUsageLimit(accountId, update),
     onSuccess: async (data) => {
+      queryClient.setQueryData<{ accounts: AccountSummary[] }>(
+        ["accounts", "list"],
+        (current) =>
+          current
+            ? {
+                ...current,
+                accounts: current.accounts.map((account) =>
+                  account.accountId === data.accountId
+                    ? {
+                        ...account,
+                        usageLimitEnabled: data.enabled,
+                        usageLimitPercent: data.percent,
+                        usageLimitState: data.enabled
+                          ? account.usageLimitState
+                          : "disabled",
+                      }
+                    : account,
+                ),
+              }
+            : current,
+      );
       if (data.percent === null) {
         toast.success(t("accounts.toasts.usageLimitRemoved"));
       } else {
