@@ -4,7 +4,7 @@
 
 ### Requirement: Accounts have a reversible maximum-usage policy
 
-Each account SHALL support an optional maximum standard-quota used percentage greater than 0 and at most 100, plus an enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling a configured policy SHALL retain its percentage for later re-enablement, while removing the policy SHALL clear the percentage and disable it. The API MUST reject an enabled policy without a percentage and MUST reject percentages outside the supported range.
+Each account SHALL support an optional maximum standard-quota used percentage greater than 0 and at most 100, plus an enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling a configured policy SHALL retain its percentage for later re-enablement, while removing the policy SHALL clear the percentage and disable it. For a disabled update, the API MUST retain the latest stored percentage when the percentage field is omitted, clear it when the field is explicitly `null`, and replace it when a numeric value is supplied. The API MUST reject an enabled policy without an explicitly supplied percentage, MUST reject an enabled policy with a `null` percentage, and MUST reject percentages outside the supported range.
 
 #### Scenario: Operator temporarily disables a configured limit
 
@@ -12,6 +12,14 @@ Each account SHALL support an optional maximum standard-quota used percentage gr
 - **WHEN** the operator disables the policy without removing it
 - **THEN** the account retains 10 percent as its configured value
 - **AND** routing does not apply that policy until it is re-enabled
+
+#### Scenario: Stale dashboard disables without reverting a newer percentage
+
+- **GIVEN** a dashboard loaded a configured maximum of 10 percent
+- **AND** another client changes the stored maximum to 20 percent
+- **WHEN** the stale dashboard disables the policy while omitting the percentage field
+- **THEN** the policy is disabled
+- **AND** the stored maximum remains 20 percent
 
 #### Scenario: Operator removes a configured limit
 

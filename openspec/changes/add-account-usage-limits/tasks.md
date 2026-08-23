@@ -9,3 +9,4 @@
 - [x] 7. Document configuring and interpreting per-account usage limits in the routing guide.
 - [x] 8. Run focused backend/frontend, migration, precision, telemetry-freshness, error-precedence, continuity, and warmup regressions plus lint, formatting, type, architecture, and OpenSpec checks.
 - [x] 9. Resolve final review findings for warmup spec ownership, opportunistic error precedence, dashboard blocked-state display, and accessible percentage validation.
+- [x] 10. Make disable-retain atomic across the account API and dashboard, with stale-client regressions.

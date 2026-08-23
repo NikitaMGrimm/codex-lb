@@ -74,10 +74,12 @@ export function AccountUsageLimitControl({
               checked={usageLimitEnabled}
               disabled={disabled}
               onCheckedChange={(enabled) =>
-                onChange(account.accountId, {
-                  enabled,
-                  percent: configuredPercent,
-                })
+                onChange(
+                  account.accountId,
+                  enabled
+                    ? { enabled: true, percent: configuredPercent }
+                    : { enabled: false },
+                )
               }
             />
           </div>

@@ -47,7 +47,7 @@ from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.deletion import request_account_deletion_run
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import AccountsRepository, AccountUsageLimitConfiguration
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAdditionalWindow,
@@ -687,13 +687,15 @@ class AccountsService:
         *,
         enabled: bool,
         percent: float | None,
-    ) -> bool:
+        update_percent: bool,
+    ) -> AccountUsageLimitConfiguration | None:
         result = await self._repo.update_usage_limit(
             account_id,
             enabled=enabled,
             percent=percent,
+            update_percent=update_percent,
         )
-        if result:
+        if result is not None:
             get_account_selection_cache().invalidate(propagate=False)
             await bump_cache_invalidation_local(NAMESPACE_ACCOUNT_SELECTION)
         return result

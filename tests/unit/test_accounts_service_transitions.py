@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from app.db.models import AccountStatus
+from app.modules.accounts.repository import AccountUsageLimitConfiguration
 from app.modules.accounts.service import AccountsService, AccountStateTransitionError
 
 pytestmark = pytest.mark.unit
@@ -86,20 +87,27 @@ async def test_set_usage_limit_invalidates_local_and_peer_selection_caches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = AsyncMock()
-    repo.update_usage_limit.return_value = True
+    configuration = AccountUsageLimitConfiguration(enabled=True, percent=10.0)
+    repo.update_usage_limit.return_value = configuration
     cache = Mock()
     bump = AsyncMock()
     monkeypatch.setattr("app.modules.accounts.service.get_account_selection_cache", lambda: cache)
     monkeypatch.setattr("app.modules.accounts.service.bump_cache_invalidation_local", bump)
     service = AccountsService(repo=repo)
 
-    result = await service.set_usage_limit(_ACCOUNT_ID, enabled=True, percent=10.0)
+    result = await service.set_usage_limit(
+        _ACCOUNT_ID,
+        enabled=True,
+        percent=10.0,
+        update_percent=True,
+    )
 
-    assert result is True
+    assert result == configuration
     repo.update_usage_limit.assert_awaited_once_with(
         _ACCOUNT_ID,
         enabled=True,
         percent=10.0,
+        update_percent=True,
     )
     cache.invalidate.assert_called_once_with(propagate=False)
     bump.assert_awaited_once_with("account_selection")

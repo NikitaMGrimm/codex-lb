@@ -96,7 +96,10 @@ async def test_import_invalid_json_returns_400(async_client):
 
 
 @pytest.mark.asyncio
-async def test_account_usage_limit_can_be_set_disabled_retained_and_removed(async_client, db_setup):
+async def test_account_usage_limit_stale_disable_retains_latest_value_and_explicit_null_removes(
+    async_client,
+    db_setup,
+):
     account = _make_account("acc_usage_limit_api", "usage-limit-api@example.com")
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(account)
@@ -118,18 +121,26 @@ async def test_account_usage_limit_can_be_set_disabled_retained_and_removed(asyn
     assert summary["usageLimitPercent"] == 10.0
     assert summary["usageLimitState"] == "data_unavailable"
 
+    newer_value = await async_client.put(
+        f"/api/accounts/{account.id}/usage-limit",
+        json={"enabled": True, "percent": 20},
+    )
+    assert newer_value.status_code == 200
+
+    # A dashboard tab that loaded 10% before the newer write toggles only the
+    # enabled flag. Omitting percent must retain the authoritative 20% value.
     disabled = await async_client.put(
         f"/api/accounts/{account.id}/usage-limit",
-        json={"enabled": False, "percent": 10},
+        json={"enabled": False},
     )
     assert disabled.status_code == 200
     assert disabled.json()["enabled"] is False
-    assert disabled.json()["percent"] == 10.0
+    assert disabled.json()["percent"] == 20.0
 
     listed = await async_client.get("/api/accounts")
     summary = next(item for item in listed.json()["accounts"] if item["accountId"] == account.id)
     assert summary["usageLimitEnabled"] is False
-    assert summary["usageLimitPercent"] == 10.0
+    assert summary["usageLimitPercent"] == 20.0
     assert summary["usageLimitState"] == "disabled"
 
     removed = await async_client.put(
@@ -194,7 +205,7 @@ async def test_account_summary_reports_reached_and_available_usage_limit_states(
 @pytest.mark.parametrize(
     "payload",
     [
-        {"enabled": False},
+        {"enabled": True},
         {"enabled": True, "percent": None},
         {"enabled": True, "percent": 0},
         {"enabled": True, "percent": 100.01},
