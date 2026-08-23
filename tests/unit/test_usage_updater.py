@@ -963,7 +963,7 @@ async def test_snapshot_crossing_enabled_usage_limit_invalidates_selection_cache
 
 
 @pytest.mark.asyncio
-async def test_snapshot_below_enabled_usage_limit_keeps_selection_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_snapshot_below_enabled_usage_limit_invalidates_selection_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     account = _make_account("acc_limit_cache_keep", "workspace_limit_cache_keep")
     account.usage_limit_enabled = True
     account.usage_limit_percent = 50.0
@@ -991,7 +991,46 @@ async def test_snapshot_below_enabled_usage_limit_keeps_selection_cache(monkeypa
     result = await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
 
     assert result.usage_written is True
-    assert invalidations == []
+    assert invalidations == [True]
+
+
+@pytest.mark.asyncio
+async def test_present_window_without_used_percent_persists_no_data_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _make_account("acc_limit_no_data", "workspace_limit_no_data")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 50.0
+    repo = StubUsageRepository(return_rows=True)
+    updater = UsageUpdater(repo)
+
+    async def _fetch_usage(**kwargs: object) -> UsagePayload:
+        del kwargs
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(
+                    used_percent=None,
+                    reset_at=int(time.time()) + 3600,
+                    limit_window_seconds=300,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
+
+    result = await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
+
+    assert result.usage_written is True
+    assert len(repo.snapshot_calls) == 1
+    assert repo.snapshot_calls[0].windows == (
+        UsageWindowWrite(
+            window="primary",
+            used_percent=0.0,
+            reset_at=None,
+            window_minutes=None,
+        ),
+    )
 
 
 @pytest.mark.asyncio

@@ -35,7 +35,6 @@ from app.modules.accounts.background_repository import BackgroundAccountsReposit
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
-from app.modules.usage.mappers import evaluate_account_usage_limit
 from app.modules.usage.plan_downgrade_observations import (
     InMemoryPlanDowngradeObservationStore,
     PlanDowngradeObservationStorePort,
@@ -717,36 +716,33 @@ class UsageUpdater:
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         snapshot_windows: list[UsageWindowWrite] = []
 
-        if primary and primary.used_percent is not None:
+        if primary is not None:
             snapshot_windows.append(
-                UsageWindowWrite(
+                _standard_usage_window_write(
                     window="primary",
-                    used_percent=float(primary.used_percent),
-                    reset_at=_reset_at(primary.reset_at, primary.reset_after_seconds, now_epoch),
-                    window_minutes=_window_minutes(primary.limit_window_seconds),
+                    usage_window=primary,
+                    now_epoch=now_epoch,
                     credits_has=credits_has,
                     credits_unlimited=credits_unlimited,
                     credits_balance=credits_balance,
                 )
             )
 
-        if secondary and secondary.used_percent is not None:
+        if secondary is not None:
             snapshot_windows.append(
-                UsageWindowWrite(
+                _standard_usage_window_write(
                     window="secondary",
-                    used_percent=float(secondary.used_percent),
-                    reset_at=_reset_at(secondary.reset_at, secondary.reset_after_seconds, now_epoch),
-                    window_minutes=_window_minutes(secondary.limit_window_seconds),
+                    usage_window=secondary,
+                    now_epoch=now_epoch,
                 )
             )
 
-        if monthly and monthly.used_percent is not None:
+        if monthly is not None:
             snapshot_windows.append(
-                UsageWindowWrite(
+                _standard_usage_window_write(
                     window="monthly",
-                    used_percent=float(monthly.used_percent),
-                    reset_at=_reset_at(monthly.reset_at, monthly.reset_after_seconds, now_epoch),
-                    window_minutes=_window_minutes(monthly.limit_window_seconds),
+                    usage_window=monthly,
+                    now_epoch=now_epoch,
                     credits_has=credits_has,
                     credits_unlimited=credits_unlimited,
                     credits_balance=credits_balance,
@@ -759,10 +755,10 @@ class UsageUpdater:
         )
         usage_written = any(_usage_entry_written(entry) for entry in entries)
         await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
-        if usage_written and _snapshot_blocks_usage_limit(account, entries):
-            # Routing evaluates operator caps from cached selection inputs;
-            # a write that lands on a blocking observation must invalidate
-            # immediately instead of waiting out the selection-cache TTL.
+        if usage_written and account.usage_limit_enabled:
+            # A fresh observation can either block an account or make a
+            # previously blocked account eligible again. Do not leave either
+            # transition hidden behind the selection-cache TTL.
             get_account_selection_cache().invalidate()
         return AccountRefreshResult(usage_written=usage_written)
 
@@ -1111,16 +1107,36 @@ def _usage_entry_written(entry: UsageHistory | None) -> bool:
     return entry is not None
 
 
-def _snapshot_blocks_usage_limit(account: Account, entries: list[UsageHistory]) -> bool:
-    """Return whether freshly written standard rows block an operator cap."""
-    by_window = {entry.window: entry for entry in entries}
-    return evaluate_account_usage_limit(
-        account,
-        primary=by_window.get("primary"),
-        secondary=by_window.get("secondary"),
-        monthly=by_window.get("monthly"),
-        refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
-    ).blocks_account_use
+def _standard_usage_window_write(
+    *,
+    window: str,
+    usage_window: UsageWindow,
+    now_epoch: int,
+    credits_has: bool | None = None,
+    credits_unlimited: bool | None = None,
+    credits_balance: float | None = None,
+) -> UsageWindowWrite:
+    used_percent = usage_window.used_percent
+    if used_percent is None:
+        # UsageHistory.used_percent is non-nullable. Persist the established
+        # no-data placeholder shape so this successful fetch supersedes an
+        # older measured row while hard usage limits still fail closed.
+        return UsageWindowWrite(
+            window=window,
+            used_percent=0.0,
+            credits_has=credits_has,
+            credits_unlimited=credits_unlimited,
+            credits_balance=credits_balance,
+        )
+    return UsageWindowWrite(
+        window=window,
+        used_percent=float(used_percent),
+        reset_at=_reset_at(usage_window.reset_at, usage_window.reset_after_seconds, now_epoch),
+        window_minutes=_window_minutes(usage_window.limit_window_seconds),
+        credits_has=credits_has,
+        credits_unlimited=credits_unlimited,
+        credits_balance=credits_balance,
+    )
 
 
 def _window_has_available_quota(window: UsageWindow) -> bool:
