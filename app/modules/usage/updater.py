@@ -35,6 +35,7 @@ from app.modules.accounts.background_repository import BackgroundAccountsReposit
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
+from app.modules.usage.mappers import evaluate_account_usage_limit
 from app.modules.usage.plan_downgrade_observations import (
     InMemoryPlanDowngradeObservationStore,
     PlanDowngradeObservationStorePort,
@@ -758,6 +759,11 @@ class UsageUpdater:
         )
         usage_written = any(_usage_entry_written(entry) for entry in entries)
         await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
+        if usage_written and _snapshot_blocks_usage_limit(account, entries):
+            # Routing evaluates operator caps from cached selection inputs;
+            # a write that lands on a blocking observation must invalidate
+            # immediately instead of waiting out the selection-cache TTL.
+            get_account_selection_cache().invalidate()
         return AccountRefreshResult(usage_written=usage_written)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
@@ -1103,6 +1109,18 @@ def _clean_optional(value: str | None) -> str | None:
 
 def _usage_entry_written(entry: UsageHistory | None) -> bool:
     return entry is not None
+
+
+def _snapshot_blocks_usage_limit(account: Account, entries: list[UsageHistory]) -> bool:
+    """Return whether freshly written standard rows block an operator cap."""
+    by_window = {entry.window: entry for entry in entries}
+    return evaluate_account_usage_limit(
+        account,
+        primary=by_window.get("primary"),
+        secondary=by_window.get("secondary"),
+        monthly=by_window.get("monthly"),
+        refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
+    ).blocks_account_use
 
 
 def _window_has_available_quota(window: UsageWindow) -> bool:

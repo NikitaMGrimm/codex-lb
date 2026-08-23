@@ -27,7 +27,7 @@ from app.modules.rate_limit_reset_credits.store import (
     RateLimitResetCreditsStore,
     get_rate_limit_reset_credits_store,
 )
-from app.modules.usage.mappers import usage_history_to_window_row
+from app.modules.usage.mappers import evaluate_account_usage_limit, usage_history_to_window_row
 
 _ACCOUNT_ROUTING_POLICIES = frozenset({"burn_first", "normal", "preserve"})
 _RESET_CREDITS_INELIGIBLE_STATUSES = frozenset(
@@ -117,6 +117,13 @@ def _account_to_summary(
     effective_primary_usage, effective_secondary_usage = _effective_usage_windows(
         primary_usage,
         secondary_usage,
+    )
+    usage_limit_state = evaluate_account_usage_limit(
+        account,
+        primary=primary_usage,
+        secondary=secondary_usage,
+        monthly=monthly_usage,
+        refresh_interval_seconds=_usage_refresh_interval_seconds(),
     )
 
     if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
@@ -265,6 +272,9 @@ def _account_to_summary(
         plan_type=plan_type,
         status=effective_status.value,
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
+        usage_limit_enabled=bool(account.usage_limit_enabled),
+        usage_limit_percent=account.usage_limit_percent,
+        usage_limit_state=usage_limit_state,
         security_work_authorized=bool(account.security_work_authorized),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,
