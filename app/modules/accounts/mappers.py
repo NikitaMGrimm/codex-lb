@@ -162,11 +162,12 @@ def _account_to_summary(
     status_seed = account.status
     allow_missing_runtime_reset_recovery = False
     long_quota_usage = monthly_usage or effective_secondary_usage
+    long_quota_used_percent = _normalize_used_percent(long_quota_usage)
     long_quota_available = (
         long_quota_usage is not None
         and _usage_entry_is_recent_enough(long_quota_usage.recorded_at)
-        and long_quota_usage.used_percent is not None
-        and float(long_quota_usage.used_percent) < 100.0
+        and long_quota_used_percent is not None
+        and float(long_quota_used_percent) < 100.0
     )
     if usage_core.capacity_for_plan(plan_type, "primary") == 0.0:
         primary_window_minutes = (
@@ -496,7 +497,7 @@ def _token_expiry(token: str | None) -> datetime | None:
 def _normalize_used_percent(entry: UsageHistory | None) -> float | None:
     if not entry:
         return None
-    return entry.used_percent
+    return usage_history_to_window_row(entry).used_percent
 
 
 def _extract_credit_status(

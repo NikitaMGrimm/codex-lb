@@ -1196,6 +1196,41 @@ async def test_trends_by_bucket_uses_latest_sample_window_metadata(db_setup):
 
 
 @pytest.mark.asyncio
+async def test_trends_by_bucket_excludes_no_data_placeholders(db_setup):
+    recorded_at = datetime(2026, 1, 1, 12, 0, 0)
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        repo = UsageRepository(session)
+        await accounts_repo.upsert(_make_account("acc_placeholder_trend"))
+        await repo.add_entry(
+            "acc_placeholder_trend",
+            40.0,
+            window="primary",
+            reset_at=9999,
+            window_minutes=300,
+            recorded_at=recorded_at,
+        )
+        await repo.add_entry(
+            "acc_placeholder_trend",
+            0.0,
+            window="primary",
+            reset_at=None,
+            window_minutes=None,
+            recorded_at=recorded_at + timedelta(minutes=5),
+        )
+
+        trends = await repo.trends_by_bucket(
+            since=recorded_at - timedelta(minutes=1),
+            bucket_seconds=86400,
+            window="primary",
+        )
+
+    assert len(trends) == 1
+    assert trends[0].samples == 1
+    assert trends[0].avg_used_percent == pytest.approx(40.0)
+
+
+@pytest.mark.asyncio
 async def test_trends_by_bucket_sqlite_avoids_window_function_for_latest_metadata(db_setup):
     recorded_at = datetime(2026, 1, 1, 12, 0, 0)
     statements: list[str] = []

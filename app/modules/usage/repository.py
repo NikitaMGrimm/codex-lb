@@ -1159,7 +1159,14 @@ class UsageRepository:
             bucket_expr = sqlalchemy_cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
         bucket_col = bucket_expr.label("bucket_epoch")
 
-        conditions: list = [UsageHistory.recorded_at >= since]
+        conditions: list = [
+            UsageHistory.recorded_at >= since,
+            or_(
+                UsageHistory.used_percent != 0.0,
+                UsageHistory.reset_at.is_not(None),
+                UsageHistory.window_minutes > 0,
+            ),
+        ]
         if window:
             conditions.append(_window_clause(window))
         if account_id:

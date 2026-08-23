@@ -2350,8 +2350,8 @@ def _state_from_account(
     long_window_quota_available = (
         effective_secondary_entry is not None
         and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
-        and effective_secondary_entry.used_percent is not None
-        and float(effective_secondary_entry.used_percent) < 100.0
+        and secondary_used is not None
+        and float(secondary_used) < 100.0
     )
     effective_blocked_at = float(account.blocked_at) if account.blocked_at is not None else runtime.blocked_at
 
@@ -2462,8 +2462,8 @@ def _state_from_account(
         and effective_blocked_at is None
         and effective_secondary_entry is not None
         and _usage_entry_is_recent_enough(effective_secondary_entry.recorded_at)
-        and effective_secondary_entry.used_percent is not None
-        and float(effective_secondary_entry.used_percent) < 100.0
+        and secondary_used is not None
+        and float(secondary_used) < 100.0
         and effective_secondary_entry.reset_at is not None
         and float(effective_secondary_entry.reset_at) > effective_runtime_reset
     ):
@@ -2633,7 +2633,7 @@ def _normalize_usage_inputs(
     now_epoch: int,
 ) -> _NormalizedUsageInputs:
     """Normalize persisted usage for routing and explicit probe settlement."""
-    primary_used = primary_entry.used_percent if primary_entry else None
+    primary_used = usage_history_to_window_row(primary_entry).used_percent if primary_entry else None
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None
     effective_secondary_entry = secondary_entry
@@ -2654,7 +2654,9 @@ def _normalize_usage_inputs(
         primary_reset = None
         primary_window_minutes = None
 
-    secondary_used = effective_secondary_entry.used_percent if effective_secondary_entry else None
+    secondary_used = (
+        usage_history_to_window_row(effective_secondary_entry).used_percent if effective_secondary_entry else None
+    )
     secondary_reset = effective_secondary_entry.reset_at if effective_secondary_entry else None
 
     # Expired rows describe prior windows. Zero derived values without
@@ -2863,18 +2865,20 @@ def _rate_limited_freshness_entry(
     # still at 100%. While the primary sample still claims an active window,
     # or omits reset metadata entirely, its freshness keeps gating recovery.
     primary_window_expired = primary_entry.reset_at is not None and float(primary_entry.reset_at) <= time.time()
-    long_window_available = long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
+    long_window_used_percent = usage_history_to_window_row(long_window_entry).used_percent
+    long_window_available = long_window_used_percent is not None and float(long_window_used_percent) < 100.0
     if primary_window_expired and long_window_available and long_window_entry.recorded_at > primary_entry.recorded_at:
         return long_window_entry
     return primary_entry
 
 
 def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None) -> bool:
+    used_percent = usage_history_to_window_row(entry).used_percent if entry is not None else None
     return (
         entry is not None
         and _usage_entry_is_recent_enough(entry.recorded_at)
-        and entry.used_percent is not None
-        and float(entry.used_percent) < 100.0
+        and used_percent is not None
+        and float(used_percent) < 100.0
     )
 
 

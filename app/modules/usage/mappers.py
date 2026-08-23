@@ -10,8 +10,10 @@ so that ``app/core/`` does not need to depend on ``app/db/models``.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
+from app.core import usage as usage_core
 from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
 from app.core.usage.types import UsageWindowRow
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
@@ -23,13 +25,16 @@ def usage_history_to_window_row(entry: UsageHistory | AdditionalUsageHistory) ->
     All fields map by name. Callers that need a ``UsageWindowRow`` from a
     usage row should route through this helper.
     """
-    return UsageWindowRow(
+    row = UsageWindowRow(
         account_id=entry.account_id,
         used_percent=entry.used_percent,
         reset_at=entry.reset_at,
         window_minutes=entry.window_minutes,
         recorded_at=entry.recorded_at,
     )
+    if isinstance(entry, UsageHistory) and float(entry.used_percent) == 0.0 and usage_core.is_no_data_placeholder(row):
+        return replace(row, used_percent=None)
+    return row
 
 
 def evaluate_account_usage_limit(
