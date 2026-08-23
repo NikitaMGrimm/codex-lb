@@ -961,6 +961,33 @@ async def test_present_window_without_used_percent_persists_no_data_placeholder(
 
 
 @pytest.mark.asyncio
+async def test_disabled_limit_does_not_persist_null_usage_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    account = _make_account("acc_no_limit_no_data", "workspace_no_limit_no_data")
+    repo = StubUsageRepository(return_rows=True)
+    updater = UsageUpdater(repo)
+
+    async def _fetch_usage(**kwargs: object) -> UsagePayload:
+        del kwargs
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(
+                    used_percent=None,
+                    reset_at=int(time.time()) + 3600,
+                    limit_window_seconds=300,
+                )
+            ),
+        )
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
+
+    result = await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
+
+    assert result.usage_written is False
+    assert repo.snapshot_calls[0].windows == ()
+
+
+@pytest.mark.asyncio
 async def test_snapshot_crossing_disabled_usage_limit_keeps_selection_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     account = _make_account("acc_limit_cache_off", "workspace_limit_cache_off")
     repo = StubUsageRepository(return_rows=True)

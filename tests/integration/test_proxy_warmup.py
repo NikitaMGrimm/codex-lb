@@ -399,6 +399,12 @@ async def test_warmup_immediately_observes_usage_refresh_transitions_for_account
     assert unknown.json()["skipped"] == [{"account_id": account_id, "reason": "account_usage_limit_reached"}]
     assert captured_models == [get_settings().warmup_model]
 
+    accounts_response = await async_client.get("/api/accounts")
+    assert accounts_response.status_code == 200
+    account_payload = next(item for item in accounts_response.json()["accounts"] if item["accountId"] == account_id)
+    assert account_payload["usage"]["primaryRemainingPercent"] is None
+    assert account_payload["usageLimitState"] == "data_unavailable"
+
 
 @pytest.mark.asyncio
 async def test_warmup_skips_account_without_current_standard_usage_data(async_client, monkeypatch):
