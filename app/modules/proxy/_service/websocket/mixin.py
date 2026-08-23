@@ -2466,7 +2466,26 @@ class _WebSocketMixin:
                         and _is_websocket_response_create(payload)
                     )
                     if is_response_create:
-                        usage_limit_state = await proxy._load_balancer.check_account_usage_limit(account.id)
+                        try:
+                            usage_limit_state = await proxy._load_balancer.check_account_usage_limit(account.id)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            _facade().logger.warning(
+                                "Failed to authorize websocket response against account usage limit "
+                                "account_id=%s request_id=%s",
+                                account.id,
+                                request_state.request_log_id or request_state.request_id,
+                                exc_info=True,
+                            )
+                            raise ProxyResponseError(
+                                503,
+                                openai_error(
+                                    "account_usage_limit_authorization_failed",
+                                    "Unable to verify account usage limit; retry later.",
+                                    error_type="server_error",
+                                ),
+                            )
                         if usage_limit_state is None:
                             raise _http_bridge_previous_response_owner_unavailable_error()
                         if usage_limit_state.blocks_account_use:
