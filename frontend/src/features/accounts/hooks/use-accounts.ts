@@ -225,9 +225,7 @@ export function useAccountMutations() {
                         ...account,
                         usageLimitEnabled: data.enabled,
                         usageLimitPercent: data.percent,
-                        usageLimitState: data.enabled
-                          ? account.usageLimitState
-                          : "disabled",
+                        usageLimitState: data.enabled ? "data_unavailable" : "disabled",
                       }
                     : account,
                 ),

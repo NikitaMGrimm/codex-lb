@@ -191,6 +191,14 @@ Account summaries SHALL expose the configured percentage, enabled flag, and eval
 - **THEN** dashboard account card and list surfaces display `Usage unavailable`
 - **AND** they do not display the account as `Active`
 
+#### Scenario: Evaluated-state refetch fails after enabling or editing a limit
+
+- **GIVEN** an operator successfully enables or edits an account usage limit
+- **AND** the required account-list refetch fails
+- **WHEN** the dashboard applies the successful mutation response
+- **THEN** the dashboard displays the enabled policy as `Usage unavailable`
+- **AND** it does not preserve a stale `Off` or `Active` state
+
 #### Scenario: Upstream account status takes precedence
 
 - **GIVEN** an account has reached its enabled maximum usage

@@ -62,6 +62,65 @@ describe("account usage limit flow", () => {
     await waitFor(() => {
       expect(accountListRequests).toBeGreaterThanOrEqual(2);
       expect(usageLimitSwitch).toBeChecked();
+      expect(screen.getByText("Usage unavailable · routing blocked")).toBeInTheDocument();
+      expect(screen.getByText("Forced account-list outage")).toBeInTheDocument();
+    });
+  });
+
+  it("does not preserve Active after lowering the limit when refetch fails", async () => {
+    const user = userEvent.setup({ delay: null });
+    const account = createAccountSummary({
+      accountId: "acc-lowered-usage-limit",
+      email: "lowered-usage-limit@example.com",
+      displayName: "Lowered Usage Limit Account",
+      usageLimitEnabled: true,
+      usageLimitPercent: 50,
+      usageLimitState: "available",
+    });
+    let accountListRequests = 0;
+
+    server.use(
+      http.get("/api/accounts", () => {
+        accountListRequests += 1;
+        if (accountListRequests === 1) {
+          return HttpResponse.json({ accounts: [account] });
+        }
+        return HttpResponse.json(
+          {
+            error: {
+              code: "forced_accounts_outage",
+              message: "Forced account-list outage",
+            },
+          },
+          { status: 500 },
+        );
+      }),
+      http.put("/api/accounts/:accountId/usage-limit", async ({ params, request }) => {
+        const payload = (await request.json()) as {
+          enabled: boolean;
+          percent?: number | null;
+        };
+        return HttpResponse.json({
+          accountId: String(params.accountId),
+          ...payload,
+        });
+      }),
+    );
+
+    window.history.pushState({}, "", "/accounts");
+    renderWithProviders(<App />);
+
+    const input = await screen.findByRole("spinbutton", {
+      name: "Maximum used percent",
+    });
+    await user.clear(input);
+    await user.type(input, "10");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(accountListRequests).toBeGreaterThanOrEqual(2);
+      expect(screen.getByText("10% maximum used · 90% reserved")).toBeInTheDocument();
+      expect(screen.getByText("Usage unavailable · routing blocked")).toBeInTheDocument();
       expect(screen.getByText("Forced account-list outage")).toBeInTheDocument();
     });
   });
