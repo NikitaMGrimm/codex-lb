@@ -828,7 +828,7 @@ class UsageRepository:
                         chatgpt_account_id,
                     )
 
-                if settlement is None or should_skip(settlement.account_id):
+                if settlement is None or (not settlement.usage_limit_enabled and should_skip(settlement.account_id)):
                     await self._session.rollback()
                     return None
 

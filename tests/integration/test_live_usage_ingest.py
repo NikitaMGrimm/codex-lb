@@ -210,7 +210,7 @@ async def test_live_ingestor_immediately_invalidates_selection_only_for_enabled_
 
 
 @pytest.mark.asyncio
-async def test_live_ingest_at_cap_immediately_changes_public_selection_inside_header_throttle(
+async def test_precise_live_usage_crossing_cap_immediately_changes_public_selection(
     monkeypatch: pytest.MonkeyPatch,
     db_setup,
 ) -> None:
@@ -218,20 +218,20 @@ async def test_live_ingest_at_cap_immediately_changes_public_selection_inside_he
     account_id = "acc_live_selection_public"
     account = _make_account(account_id, "live-selection-public@example.com")
     account.usage_limit_enabled = True
-    account.usage_limit_percent = 40.0
+    account.usage_limit_percent = 10.002
     now_epoch = naive_utc_to_epoch(utcnow())
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(account)
         await UsageRepository(session).add_entry(
             account_id,
-            30.0,
+            10.001,
             window="primary",
             reset_at=now_epoch + 3600,
             window_minutes=300,
         )
         await UsageRepository(session).add_entry(
             account_id,
-            30.0,
+            10.001,
             window="secondary",
             reset_at=now_epoch + 7 * 24 * 3600,
             window_minutes=10_080,
@@ -253,26 +253,36 @@ async def test_live_ingest_at_cap_immediately_changes_public_selection_inside_he
     assert admitted.account is not None
     assert admitted.account.id == account_id
 
-    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=60.0)
     ingestor._last_cache_invalidation = live_ingest.time.monotonic()
     try:
-        await ingestor._ingest(
-            live_ingest._QueuedSnapshot(
-                account_id=account_id,
-                chatgpt_account_id=None,
-                snapshot=LiveRateLimitSnapshot(
-                    primary=LiveUsageWindow(
-                        used_percent=40.0,
-                        window_minutes=300,
-                        reset_at=now_epoch + 3600,
-                    ),
-                    secondary=None,
-                    credits_has=None,
-                    credits_unlimited=None,
-                    credits_balance=None,
-                ),
-            )
+        below_limit = LiveRateLimitSnapshot(
+            primary=LiveUsageWindow(
+                used_percent=10.001,
+                window_minutes=300,
+                reset_at=now_epoch + 3600,
+            ),
+            secondary=None,
+            credits_has=None,
+            credits_unlimited=None,
+            credits_balance=None,
         )
+        ingestor._last_write[account_id] = (below_limit, live_ingest.time.monotonic())
+        ingestor.publish(
+            LiveRateLimitSnapshot(
+                primary=LiveUsageWindow(
+                    used_percent=10.003,
+                    window_minutes=300,
+                    reset_at=now_epoch + 3600,
+                ),
+                secondary=None,
+                credits_has=None,
+                credits_unlimited=None,
+                credits_balance=None,
+            ),
+            account_id=account_id,
+        )
+        await ingestor._ingest(ingestor._queue.get_nowait())
 
         assert selection_cache.generation == 1
         async with SessionLocal() as session:
@@ -281,7 +291,7 @@ async def test_live_ingest_at_cap_immediately_changes_public_selection_inside_he
                 window="primary",
             )
         assert latest_primary is not None
-        assert latest_primary.used_percent == pytest.approx(40.0)
+        assert latest_primary.used_percent == pytest.approx(10.003)
         denied = await balancer.select_account(routing_strategy="usage_weighted")
         assert denied.account is None
         assert denied.error_code == "account_usage_limit_reached"
