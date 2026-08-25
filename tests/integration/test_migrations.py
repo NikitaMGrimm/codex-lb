@@ -719,7 +719,8 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-usage-limits.sqlite'}"
     revision = "20260728_010000_add_account_usage_limits"
-    parent_revision = "20260816_000000_add_model_source_embeddings"
+    parent_revision = "20260812_120000_add_sticky_abandonment_scope"
+    merge_revision = "20260825_000000_merge_account_usage_limits_and_beta4_heads"
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
 
@@ -804,13 +805,13 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
     migration_state = inspect_migration_state(db_url)
-    assert migration_state.head_revision == revision
-    assert migration_state.current_revision == revision
+    assert migration_state.head_revision == merge_revision
+    assert migration_state.current_revision == merge_revision
     verification_engine = create_async_engine(db_url, future=True)
     try:
         async with verification_engine.connect() as conn:
             revision_rows = await conn.execute(text("SELECT version_num FROM alembic_version"))
-            assert [str(row[0]) for row in revision_rows.fetchall()] == [revision]
+            assert [str(row[0]) for row in revision_rows.fetchall()] == [merge_revision]
     finally:
         await verification_engine.dispose()
 
