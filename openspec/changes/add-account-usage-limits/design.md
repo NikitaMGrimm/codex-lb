@@ -48,7 +48,7 @@ Every synthetic warmup surface uses the same hard policy. The public `/v1/warmup
 
 ### D6: The guarantee is observation-bound
 
-Codex LB cannot know the upstream percentage cost of a request before sending it. The hard contract is therefore: once the latest current standard usage observation is at or above the cap, Codex LB never selects that account until the window resets, the telemetry becomes current below the cap, or the operator disables/removes the cap. The UI explains that delayed upstream reporting and in-flight requests can overshoot the displayed percentage.
+Codex LB cannot know the upstream percentage cost of a request before sending it. The hard contract is therefore: once the latest current standard usage observation is at or above the cap and the bounded selection-cache invalidation applies it, Codex LB never selects that account until the window resets, the telemetry becomes current below the cap, or the operator disables/removes the cap. Live observations use the existing five-second trailing invalidation bound so high-frequency telemetry cannot keep the global selection cache cold. The UI explains that delayed upstream reporting, this bounded propagation interval, and in-flight requests can overshoot the displayed percentage.
 
 ## Migration
 

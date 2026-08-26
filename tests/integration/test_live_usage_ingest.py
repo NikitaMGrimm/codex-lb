@@ -168,17 +168,15 @@ async def test_live_ingestor_invalidates_rate_limit_header_cache(monkeypatch, db
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("usage_limit_enabled", [True, False], ids=["enabled-policy", "disabled-policy"])
-async def test_live_ingestor_immediately_invalidates_selection_only_for_enabled_usage_policy(
+async def test_live_ingestor_usage_policy_selection_invalidation_uses_shared_throttle(
     monkeypatch: pytest.MonkeyPatch,
     db_setup,
-    usage_limit_enabled: bool,
 ) -> None:
     del db_setup
-    account_id = f"acc_live_selection_{usage_limit_enabled}"
-    account = _make_account(account_id, f"live-selection-{usage_limit_enabled}@example.com")
-    account.usage_limit_enabled = usage_limit_enabled
-    account.usage_limit_percent = 40.0 if usage_limit_enabled else None
+    account_id = "acc_live_selection_throttled"
+    account = _make_account(account_id, "live-selection-throttled@example.com")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 40.0
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(account)
 
@@ -190,7 +188,7 @@ async def test_live_ingestor_immediately_invalidates_selection_only_for_enabled_
         "get_rate_limit_headers_cache",
         lambda: SimpleNamespace(invalidate=header_invalidate),
     )
-    monkeypatch.setattr(live_ingest, "_CACHE_INVALIDATION_MIN_INTERVAL_SECONDS", 3600.0)
+    monkeypatch.setattr(live_ingest, "_CACHE_INVALIDATION_MIN_INTERVAL_SECONDS", 0.05)
 
     ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
     ingestor._last_cache_invalidation = live_ingest.time.monotonic()
@@ -203,14 +201,20 @@ async def test_live_ingestor_immediately_invalidates_selection_only_for_enabled_
             )
         )
 
-        assert selection_cache.generation == (1 if usage_limit_enabled else 0)
+        assert selection_cache.generation == 0
         header_invalidate.assert_not_awaited()
+        deadline = asyncio.get_event_loop().time() + 1.0
+        while selection_cache.generation == 0 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+
+        assert selection_cache.generation == 1
+        header_invalidate.assert_awaited_once()
     finally:
         await ingestor.stop()
 
 
 @pytest.mark.asyncio
-async def test_precise_live_usage_crossing_cap_immediately_changes_public_selection(
+async def test_precise_live_usage_crossing_cap_changes_selection_within_throttle_bound(
     monkeypatch: pytest.MonkeyPatch,
     db_setup,
 ) -> None:
@@ -245,7 +249,7 @@ async def test_precise_live_usage_crossing_cap_immediately_changes_public_select
         "get_rate_limit_headers_cache",
         lambda: SimpleNamespace(invalidate=header_invalidate),
     )
-    monkeypatch.setattr(live_ingest, "_CACHE_INVALIDATION_MIN_INTERVAL_SECONDS", 3600.0)
+    monkeypatch.setattr(live_ingest, "_CACHE_INVALIDATION_MIN_INTERVAL_SECONDS", 0.05)
     balancer = LoadBalancer(_proxy_repositories)
     balancer._selection_inputs_cache = selection_cache
 
@@ -284,7 +288,7 @@ async def test_precise_live_usage_crossing_cap_immediately_changes_public_select
         )
         await ingestor._ingest(ingestor._queue.get_nowait())
 
-        assert selection_cache.generation == 1
+        assert selection_cache.generation == 0
         async with SessionLocal() as session:
             latest_primary = await UsageRepository(session).latest_entry_for_account(
                 account_id,
@@ -292,10 +296,14 @@ async def test_precise_live_usage_crossing_cap_immediately_changes_public_select
             )
         assert latest_primary is not None
         assert latest_primary.used_percent == pytest.approx(10.003)
+        deadline = asyncio.get_event_loop().time() + 1.0
+        while selection_cache.generation == 0 and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert selection_cache.generation == 1
         denied = await balancer.select_account(routing_strategy="usage_weighted")
         assert denied.account is None
         assert denied.error_code == "account_usage_limit_reached"
-        header_invalidate.assert_not_awaited()
+        header_invalidate.assert_awaited_once()
     finally:
         await ingestor.stop()
 

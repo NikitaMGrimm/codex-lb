@@ -1,7 +1,7 @@
 """add per-account usage limits
 
 Revision ID: 20260728_010000_add_account_usage_limits
-Revises: 20260816_000000_add_model_source_embeddings
+Revises: 20260821_000000_add_retry_circuit_admission_generation
 Create Date: 2026-07-28
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260728_010000_add_account_usage_limits"
-down_revision = "20260816_000000_add_model_source_embeddings"
+down_revision = "20260821_000000_add_retry_circuit_admission_generation"
 branch_labels = None
 depends_on = None
 

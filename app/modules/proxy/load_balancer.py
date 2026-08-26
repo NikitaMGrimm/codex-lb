@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable
 from uuid import uuid4
@@ -84,6 +84,7 @@ from app.modules.proxy._load_balancer.model_eligibility import (
 from app.modules.proxy._load_balancer.model_eligibility import (
     _mapped_model_has_registry_entry as _mapped_model_has_registry_entry_impl,
 )
+from app.modules.proxy._load_balancer.selection_inputs import SelectionInputs as _SelectionInputs
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
@@ -213,56 +214,6 @@ class _AdditionalLimitFilterResult:
     latest_secondary: dict[str, AdditionalUsageHistory]
     error_code: str | None = None
     error_message: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _SelectionInputs(SelectionInputsProtocol):
-    accounts: list[Account]
-    latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
-    latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
-    latest_monthly: dict[str, UsageHistory]
-    # Ownership ambiguity is resolved before transient additional-quota,
-    # exclusion, runtime-health, budget, and account-cap filters. Keep that
-    # stronger candidate pool alongside the effective routing pool.
-    continuity_owner_candidates: list[Account] | None = None
-    # Sticky-row mutation is authorized by account assignment and security
-    # policy, before model/service-tier eligibility. Keep this separate from
-    # continuity ambiguity: a model-ineligible account can still own the raw
-    # row that this authenticated request is allowed to retire.
-    sticky_mutation_authority_account_ids: frozenset[str] | None = None
-    standard_latest_primary: dict[str, UsageHistory] = field(default_factory=dict)
-    standard_latest_secondary: dict[str, UsageHistory] = field(default_factory=dict)
-    quota_planner_settings: PlannerSettings = PlannerSettings()
-    runtime_accounts: list[Account] | None = None
-    error_message: str | None = None
-    error_code: str | None = None
-    ignore_standard_quota_account_ids: frozenset[str] = frozenset()
-    ignore_standard_quota_status: bool = False
-    persist_standard_quota_status: bool = True
-    routing_policy_override: str | None = None
-    quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
-    selection_cache_generation: int = 0
-    _runtime_account_by_id: dict[str, Account] | None = field(default=None, init=False, repr=False, compare=False)
-
-    def runtime_account(self, account_id: str) -> Account | None:
-        account_by_id = self._runtime_account_by_id
-        if account_by_id is None:
-            source_accounts = self.accounts if self.runtime_accounts is None else self.runtime_accounts
-            account_by_id = {account.id: account for account in source_accounts}
-            object.__setattr__(self, "_runtime_account_by_id", account_by_id)
-        return account_by_id.get(account_id)
-
-    @property
-    def effective_continuity_owner_candidates(self) -> list[Account]:
-        if self.continuity_owner_candidates is None:
-            return self.accounts
-        return self.continuity_owner_candidates
-
-    @property
-    def effective_sticky_mutation_authority_account_ids(self) -> frozenset[str]:
-        if self.sticky_mutation_authority_account_ids is None:
-            return frozenset(account.id for account in self.effective_continuity_owner_candidates)
-        return self.sticky_mutation_authority_account_ids
 
 
 def _required_continuity_owner_failure(
@@ -609,16 +560,11 @@ class LoadBalancer:
         sticky_selection_may_resolve_owner = sticky_key is not None and sticky_kind == StickySessionKind.CODEX_SESSION
 
         async def load_selection_inputs() -> _SelectionInputs:
-            selection_cache_generation = self._selection_inputs_cache.generation
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
-            )
-            selection_inputs = replace(
-                selection_inputs,
-                selection_cache_generation=selection_cache_generation,
             )
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even
@@ -3044,7 +2990,6 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         quota_admitted_catalog_omission_account_ids=frozenset(
             selection_inputs.quota_admitted_catalog_omission_account_ids
         ),
-        selection_cache_generation=selection_inputs.selection_cache_generation,
     )
 
 

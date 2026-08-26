@@ -30,8 +30,6 @@ from app.db.models import Account, AccountStatus, AdditionalUsageHistory, Sticky
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
-    SELECTION_STATE_CHANGED,
-    SELECTION_STATE_CHANGED_MESSAGE,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
@@ -81,7 +79,6 @@ class SelectionInputsProtocol(Protocol):
     error_code: str | None
     ignore_standard_quota_account_ids: frozenset[str]
     routing_policy_override: str | None
-    selection_cache_generation: int
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]: ...
@@ -925,6 +922,7 @@ async def run_sticky_selection_path(
             await asyncio.sleep(0)
             continue
 
+        pre_persist_cache_generation = owner._selection_inputs_cache.generation
         try:
             async with owner._repo_factory() as repos:
                 stale_account_ids = await owner._persist_selection_state(
@@ -961,7 +959,8 @@ async def run_sticky_selection_path(
             continue
         if (
             selected_snapshot is not None
-            and owner._selection_inputs_cache.generation != selection_inputs.selection_cache_generation
+            and owner._selection_inputs_cache.generation != pre_persist_cache_generation
+            and attempt < MAX_SELECTION_ATTEMPTS
         ):
             # Account or usage data changed after this attempt loaded its
             # selection snapshot. The lease and any probe reservation are
@@ -972,12 +971,6 @@ async def run_sticky_selection_path(
             selected_lease = None
             async with owner._runtime_lock:
                 owner._release_due_probe_reservation_locked(probe_reservation)
-            if attempt >= MAX_SELECTION_ATTEMPTS:
-                return _direct_error(
-                    account=None,
-                    error_message=SELECTION_STATE_CHANGED_MESSAGE,
-                    error_code=SELECTION_STATE_CHANGED,
-                )
             selection_inputs = await load_selection_inputs()
             if selection_inputs.error_code is not None and not selection_inputs.accounts:
                 return _direct_error(

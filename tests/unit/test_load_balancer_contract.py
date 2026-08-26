@@ -1366,7 +1366,7 @@ async def test_non_sticky_cache_generation_change_reselects_and_releases_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
-async def test_public_selection_rechecks_usage_limit_when_inputs_change_before_admission(
+async def test_public_selection_rechecks_usage_limit_when_inputs_change_during_persist(
     selection_cache: AccountSelectionCache,
     monkeypatch: pytest.MonkeyPatch,
     sticky: bool,
@@ -1380,44 +1380,35 @@ async def test_public_selection_rechecks_usage_limit_when_inputs_change_before_a
         selection_cache,
         primary={account.id: initial_usage},
     )
-    original_load = balancer._load_selection_inputs
-    first_inputs_loaded = asyncio.Event()
-    load_calls = 0
+    load_spy = AsyncMock(side_effect=balancer._load_selection_inputs)
+    persist_calls = 0
 
-    async def observe_load(*args: Any, **kwargs: Any) -> Any:
-        nonlocal load_calls
-        loaded = await original_load(*args, **kwargs)
-        load_calls += 1
-        if load_calls == 1:
-            first_inputs_loaded.set()
-        return loaded
+    async def cross_limit_during_first_persist(*_args: Any, **_kwargs: Any) -> set[str]:
+        nonlocal persist_calls
+        persist_calls += 1
+        if persist_calls == 1:
+            usage_repo.rows["primary"][account.id] = _usage_row(
+                81,
+                account.id,
+                window="primary",
+                used_percent=10.0,
+            )
+            selection_cache.invalidate()
+        return set()
 
     release_spy = AsyncMock(wraps=balancer.release_account_lease)
-    monkeypatch.setattr(balancer, "_load_selection_inputs", observe_load)
+    monkeypatch.setattr(balancer, "_load_selection_inputs", load_spy)
+    monkeypatch.setattr(balancer, "_persist_selection_state", cross_limit_during_first_persist)
     monkeypatch.setattr(balancer, "release_account_lease", release_spy)
 
-    await balancer._runtime_lock.acquire()
-    selection_task = asyncio.create_task(_select_with_lease(balancer, sticky=sticky))
-    try:
-        await asyncio.wait_for(first_inputs_loaded.wait(), timeout=1.0)
-        usage_repo.rows["primary"][account.id] = _usage_row(
-            81,
-            account.id,
-            window="primary",
-            used_percent=10.0,
-        )
-        selection_cache.invalidate()
-    finally:
-        balancer._runtime_lock.release()
-
-    selection = await asyncio.wait_for(selection_task, timeout=1.0)
+    selection = await asyncio.wait_for(_select_with_lease(balancer, sticky=sticky), timeout=1.0)
 
     assert selection.account is None
     assert selection.lease is None
     assert selection.error_code == "account_usage_limit_reached"
     # Sticky selection preserves its existing bounded retry behavior for a
     # typed selection denial; only the first attempt acquired a stale lease.
-    assert load_calls == (4 if sticky else 2)
+    assert load_spy.await_count == (4 if sticky else 2)
     release_spy.assert_awaited_once()
     release_call = release_spy.await_args
     assert release_call is not None
@@ -1453,11 +1444,15 @@ async def test_public_selection_bounds_continuous_input_generation_changes(
 
     selection = await asyncio.wait_for(_select_with_lease(balancer, sticky=sticky), timeout=1.0)
 
-    assert selection.account is None
-    assert selection.lease is None
-    assert selection.error_code == "selection_state_changed"
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.lease is not None
+    assert selection.error_code is None
     assert persist_calls == 4
     assert load_spy.await_count == 4
-    assert release_spy.await_count == 4
-    assert sticky_repo.account_id is None
+    assert release_spy.await_count == 3
+    assert sticky_repo.account_id == (account.id if sticky else None)
+    assert await balancer.account_pressure_snapshot(account.id) == (0, 1, 42.0)
+
+    await balancer.release_account_lease(selection.lease)
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
