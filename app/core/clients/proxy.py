@@ -2176,7 +2176,7 @@ def _is_upstream_edge_challenge(
     status: int | None,
     *,
     headers: Mapping[str, str] | None = None,
-    body: str | bytes | None = None,
+    body: str | bytes | bytearray | None = None,
 ) -> bool:
     """Return whether a 403 contains explicit browser/edge challenge evidence."""
 
@@ -2191,7 +2191,7 @@ def _is_upstream_edge_challenge(
         return False
     if "html" not in normalized_headers.get("content-type", ""):
         return False
-    if isinstance(body, bytes):
+    if isinstance(body, bytes | bytearray):
         body_text = body[: 16 * 1024].decode("utf-8", errors="replace")
     else:
         body_text = (body or "")[: 16 * 1024]
