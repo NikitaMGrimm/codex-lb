@@ -37,6 +37,7 @@ from app.core.clients.proxy import (
     CODEX_INSTALLATION_ID_HEADER,
     ProxyResponseError,
     _is_native_codex_request,
+    _is_upstream_edge_challenge,
     _normalize_non_native_upstream_fingerprint,
     filter_inbound_headers,
 )
@@ -963,6 +964,11 @@ async def _connect_upstream_websocket(
         ) from exc
     except InvalidStatus as exc:
         response = exc.response
+        is_edge_challenge = _is_upstream_edge_challenge(
+            response.status_code,
+            headers=response.headers,
+            body=response.body,
+        )
         if policy.credential_safe_connect_errors:
             status_code = response.status_code if 400 <= response.status_code <= 599 else 502
             payload = openai_error(
@@ -982,8 +988,12 @@ async def _connect_upstream_websocket(
             # at all. The sanitized code cannot carry that provenance: this
             # policy preserves the upstream body, so the same outage surfaces
             # as ``upstream_error`` or whatever code the edge returned.
-            # Credential-scoped rejections (401/403/429) stay account evidence.
-            failure_detail=(UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL if status_code >= 500 else None),
+            # Ordinary credential-scoped rejections (401/403/429) stay account
+            # evidence. A narrowly proven browser challenge is transport
+            # evidence because the same account remains usable over HTTP.
+            failure_detail=(
+                UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL if status_code >= 500 or is_edge_challenge else None
+            ),
         ) from exc
     except InvalidProxy as exc:
         message = (
