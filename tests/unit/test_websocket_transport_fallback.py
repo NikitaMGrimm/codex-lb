@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
+from multidict import CIMultiDict
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
@@ -798,7 +799,7 @@ async def test_direct_ordinary_403_stays_account_evidence(
 def test_edge_challenge_classifier_requires_explicit_evidence() -> None:
     assert proxy_module._is_upstream_edge_challenge(
         403,
-        headers={"cf-mitigated": "challenge", "content-type": "text/html"},
+        headers=CIMultiDict({"cf-mitigated": "challenge", "content-type": "text/html"}),
         body="<html>blocked</html>",
     )
     assert proxy_module._is_upstream_edge_challenge(
@@ -825,7 +826,7 @@ def test_auto_stream_falls_back_for_explicit_edge_challenge() -> None:
         (),
         status=403,
         message="<html><title>Just a moment...</title></html>",
-        headers={"cf-mitigated": "challenge", "content-type": "text/html"},
+        headers=CIMultiDict({"cf-mitigated": "challenge", "content-type": "text/html"}),
     )
 
     assert proxy_module._should_fallback_to_http_after_websocket_handshake_error("auto", exc)
