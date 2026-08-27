@@ -9,6 +9,10 @@ from typing import Any
 import anyio
 
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
+from app.modules.proxy._service.http_bridge.quarantine import (
+    _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    _quarantine_http_bridge_session,
+)
 from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import (
     _HTTPBridgeResponseCreateAttempt,
@@ -59,6 +63,34 @@ def _http_bridge_anchor_poison_detail(detail: str | None) -> str | None:
         return None
     aliased = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
     return _HTTP_BRIDGE_ANCHOR_POISON_DETAILS.get(aliased)
+
+
+def _http_bridge_effective_anchor_poison_threshold(configured: int) -> int:
+    """Cap the configured anchor-poison threshold at the circuit's own threshold.
+
+    Once the circuit opens it refuses the key for 60-600s per strike, so a
+    higher poison threshold cannot be reached at any useful rate; that
+    unreachability is issue #1830/#1852 itself. Capping it here also makes the
+    decision replica-safe. The quarantine armed at the opening is process-local,
+    so between the circuit threshold and a higher configured one the durable
+    anchor would survive for another worker to plan. Clearing no later than the
+    opening is what stops that. A configured value below the circuit threshold
+    is still honoured, since clearing earlier is always safe.
+    """
+    return max(1, min(configured, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD))
+
+
+def _http_bridge_poison_quarantine_minimum_seconds(cooldown_remaining: float) -> float:
+    """Keep a poison quarantine alive across the cooldown and its probe window.
+
+    The probe that has to be planned unanchored is only admitted once the
+    cooldown expires, and it may then be admitted anywhere inside the
+    half-open lease that follows. Quarantine's default TTL equals the maximum
+    cooldown, so at that cooldown both would lapse in the same instant and the
+    probe would be planned with the anchor the circuit opened on. This is the
+    same span the durable retry-circuit row already reserves for itself.
+    """
+    return max(0.0, cooldown_remaining) + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
 
 
 @dataclass(slots=True)
@@ -578,6 +610,37 @@ class _HTTPBridgeRetryCircuitMixin:
             )
             return False
 
+    async def _http_bridge_precreated_retry_block(
+        self: Any,
+        session: _HTTPBridgeSession,
+    ) -> tuple[float, str]:
+        """Return ``(seconds_blocked, reason)`` for a suppressed submission.
+
+        The cooldown is not always what is refusing the request: once it has
+        expired, the half-open lease keeps refusing everything except the one
+        admitted probe. Reporting the cooldown in that window advertises a
+        retry-after of ~1s while the caller is barred for the rest of the
+        lease, which turns a wedged key into a client retry storm.
+        """
+        if session.key.strength != "hard":
+            return 0.0, "none"
+
+        await self._load_http_bridge_retry_circuit(session)
+        now = time.monotonic()
+        async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(session.key)
+            if state is None:
+                return 0.0, "none"
+            cooldown_remaining = max(0.0, state.cooldown_until - now)
+            half_open_remaining = (
+                max(0.0, state.half_open_until - now)
+                if state.consecutive_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+                else 0.0
+            )
+        if half_open_remaining > cooldown_remaining:
+            return half_open_remaining, "hard_key_half_open"
+        return cooldown_remaining, "hard_key_cooldown"
+
     async def _http_bridge_precreated_retry_cooldown_seconds(self: Any, session: _HTTPBridgeSession) -> float:
         if session.key.strength != "hard":
             return 0.0
@@ -610,7 +673,18 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         detail: str,
         attempt: _HTTPBridgeResponseCreateAttempt | None = None,
+        terminal_pre_response_frame: bool = False,
     ) -> int | None:
+        """Count one hard-key failure against the retry circuit.
+
+        ``terminal_pre_response_frame`` is asserted only by the settlement path
+        for an upstream terminal frame that failed the request before any
+        response event. ``response.failed``/``response.incomplete`` mark the
+        attempt observed without counting a response event, so without that
+        assertion a native terminal envelope is rejected below as already
+        settled and never consumes a strike. The eventless retirement funnel
+        never asserts it, so its "upstream answered" guard is unchanged.
+        """
         detail = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
         if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
             return None
@@ -623,7 +697,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     attempt=scoped_attempt,
                     detail=detail,
                 )
-            if scoped_attempt.disarmed or scoped_attempt.response_observed:
+            if scoped_attempt.disarmed or (scoped_attempt.response_observed and not terminal_pre_response_frame):
                 return None
 
         await self._load_http_bridge_retry_circuit(session)
@@ -634,10 +708,15 @@ class _HTTPBridgeRetryCircuitMixin:
         now = time.monotonic()
         duplicate_attempt: _HTTPBridgeResponseCreateAttempt | None = None
         state: _HTTPBridgeRetryCircuitState | None = None
+        poison_class_failure = _http_bridge_anchor_poison_detail(detail) is not None
+        quarantine_poisoned_anchor = False
+        quarantine_cooldown_remaining = 0.0
         async with self._http_bridge_retry_circuit_lock:
             if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
                 duplicate_attempt = scoped_attempt
-            elif scoped_attempt is not None and (scoped_attempt.disarmed or scoped_attempt.response_observed):
+            elif scoped_attempt is not None and (
+                scoped_attempt.disarmed or (scoped_attempt.response_observed and not terminal_pre_response_frame)
+            ):
                 return None
             else:
                 state = self._http_bridge_retry_circuits.setdefault(
@@ -660,6 +739,14 @@ class _HTTPBridgeRetryCircuitMixin:
                     if detail == "clean_close":
                         backoff = min(backoff, clean_close_max_backoff)
                     state.cooldown_until = max(state.cooldown_until, now + backoff)
+                    # The probe admitted after this cooldown is planned before
+                    # it reaches the gate, so an anchor the circuit opened on
+                    # has to be suppressed at planning time. Quarantining the
+                    # key routes a full-resend probe through the existing
+                    # unanchored fresh path; delta-only payloads keep their
+                    # anchor there, because it is their only context.
+                    quarantine_poisoned_anchor = poison_class_failure
+                    quarantine_cooldown_remaining = max(0.0, state.cooldown_until - now)
                     if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
                         http_bridge_retry_circuit_total.labels(outcome="opened").inc()
                     logger.warning(
@@ -678,18 +765,75 @@ class _HTTPBridgeRetryCircuitMixin:
                 detail=detail,
             )
         assert state is not None
+        if quarantine_poisoned_anchor:
+            _quarantine_http_bridge_session(
+                self,
+                session,
+                reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+                minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(quarantine_cooldown_remaining),
+            )
         try:
             await self._persist_http_bridge_retry_circuit(session, state)
+            merged_cooldown_remaining = 0.0
+            merged_poison_opened = False
             async with self._http_bridge_retry_circuit_lock:
                 if self._http_bridge_retry_circuits.get(session.key) is state:
                     self._http_bridge_retry_circuit_loaded_keys.add(session.key)
                 consecutive_failures = state.consecutive_failures
+                # Replicas that each record their locally-first failure stay
+                # below the threshold under their own lock, and it is the
+                # durable merge that opens the circuit. Neither worker ever saw
+                # an open circuit above, so the quarantine decision has to be
+                # revisited against the merged state or the probe admitted
+                # after this cooldown is planned with the poisoned anchor.
+                #
+                # The merged cooldown can already have elapsed — another replica
+                # may have opened the circuit long enough ago that its deadline
+                # is in the past by the time this write returns. That key is at
+                # its threshold with no cooldown left, so the very next request
+                # is the half-open probe: it needs the quarantine most, not
+                # least. Track the opening itself, and let a zero remainder fall
+                # through to the bare half-open lease.
+                #
+                # This deliberately does not skip keys quarantined from the
+                # local opening. A local open arms the floor from its own
+                # backoff, which can be 60s, and the merge can then replace
+                # `cooldown_until` with a deadline up to 600s out. Re-arming is
+                # idempotent because the entry keeps the later of the two
+                # deadlines, so recomputing against the merged cooldown can only
+                # extend a floor that would otherwise expire mid-cooldown.
+                merged_poison_opened = poison_class_failure and consecutive_failures >= threshold
+                if merged_poison_opened:
+                    merged_cooldown_remaining = max(0.0, state.cooldown_until - time.monotonic())
+            if merged_poison_opened:
+                _quarantine_http_bridge_session(
+                    self,
+                    session,
+                    reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+                    minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(merged_cooldown_remaining),
+                )
             return consecutive_failures
         finally:
             if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_settled is not None:
                 scoped_attempt.retry_circuit_failure_settled.set()
 
-    async def _clear_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> None:
+    async def _clear_http_bridge_retry_circuit(
+        self: Any,
+        session: _HTTPBridgeSession,
+        *,
+        settle_unfenced: bool = False,
+    ) -> None:
+        """Settle a hard key's retry circuit.
+
+        ``settle_unfenced`` is asserted by callers that have removed the cause
+        of the circuit rather than merely outlived it. The version fence below
+        exists so a worker that observed nothing cannot clobber a row another
+        replica just wrote, but it also skips the durable delete whenever this
+        worker's own state has not been persisted yet. A circuit opened and
+        remediated in the same instant is exactly that case: the row survives,
+        the next load rehydrates it, and the key keeps cooling for a cause that
+        is gone.
+        """
         if session.key.strength != "hard":
             return
 
@@ -705,7 +849,7 @@ class _HTTPBridgeRetryCircuitMixin:
         # concurrently, so leave the durable row untouched when no state was
         # observed. Preserve the existing best-effort clear on read failures,
         # which is still useful for settling a row after a transient outage.
-        if durable_load_succeeded and (state is None or expected_updated_at_epoch is None):
+        if durable_load_succeeded and (state is None or (expected_updated_at_epoch is None and not settle_unfenced)):
             return
         try:
             # Clearing is idempotent and must be attempted even when the

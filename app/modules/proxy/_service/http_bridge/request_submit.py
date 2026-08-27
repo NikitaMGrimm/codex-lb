@@ -79,6 +79,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
+    _http_bridge_abandonment_strands_requests,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_key_strength,
@@ -948,16 +949,14 @@ class _HTTPBridgeRequestSubmitMixin:
             allow_operation_fenced_continuity_replay=allow_operation_fenced_continuity_replay,
         )
         if not retry_allowed:
-            retry_after_seconds = max(
-                1,
-                math.ceil(await self._http_bridge_precreated_retry_cooldown_seconds(session)),
-            )
+            block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
+            retry_after_seconds = max(1, math.ceil(block_seconds))
             _log_http_bridge_event(
                 "submit_retry_circuit_suppressed",
                 session.key,
                 account_id=session.account.id,
                 model=session.request_model,
-                detail="hard_key_cooldown",
+                detail=block_reason,
                 cache_key_family=session.key.affinity_kind,
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
@@ -965,7 +964,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 503,
                 openai_error(
                     "upstream_request_timeout",
-                    "HTTP responses session bridge is cooling down after repeated upstream timeouts; retry shortly.",
+                    "HTTP responses session bridge is recovering from repeated upstream failures; "
+                    f"retry after {retry_after_seconds}s.",
                 ),
                 retry_after_seconds=retry_after_seconds,
             )
@@ -2956,7 +2956,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 # failure. Without this, only the admission-waiter reader
                 # path could ever poison an anchor, and an anchored session
                 # failing without waiters cooled down forever (issue #1830).
-                durable_cleared = await _abandon_durable_http_bridge_continuity(self, session, detail=poison_detail)
+                durable_cleared = await _abandon_durable_http_bridge_continuity(
+                    self,
+                    session,
+                    detail=poison_detail,
+                    settle_circuit=_http_bridge_abandonment_strands_requests(retired_request_states),
+                )
                 if not durable_cleared and session.durable_session_id is not None:
                     # Keep failed waiterless clears visible in the same
                     # poison-clear telemetry the admission-waiter path emits;
