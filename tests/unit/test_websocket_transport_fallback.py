@@ -29,11 +29,13 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import aiohttp
 import pytest
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 
+import app.core.clients.proxy as proxy_module
 import app.core.clients.proxy_websocket as proxy_websocket_module
 import app.modules.proxy._service.http_bridge.streaming as http_bridge_streaming_module
 import app.modules.proxy._service.support as transport_health
@@ -751,6 +753,83 @@ async def test_direct_credential_handshake_rejection_stays_account_evidence(
 
     assert exc.failure_detail is None
     assert _classify(exc) is None
+
+
+@pytest.mark.asyncio
+async def test_direct_edge_challenge_is_transport_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exc = await _direct_connect_failure(
+        monkeypatch,
+        InvalidStatus(
+            Response(
+                403,
+                "Forbidden",
+                Headers({"Content-Type": "text/html; charset=UTF-8", "cf-mitigated": "challenge"}),
+                b"<html><title>Just a moment...</title></html>",
+            )
+        ),
+    )
+
+    assert exc.failure_detail == UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL
+    assert _classify(exc) is not None
+
+
+@pytest.mark.asyncio
+async def test_direct_ordinary_403_stays_account_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exc = await _direct_connect_failure(
+        monkeypatch,
+        InvalidStatus(
+            Response(
+                403,
+                "Forbidden",
+                Headers({"Content-Type": "application/json"}),
+                b'{"error":{"type":"permission_error","code":"forbidden"}}',
+            )
+        ),
+    )
+
+    assert exc.failure_detail is None
+    assert _classify(exc) is None
+
+
+def test_edge_challenge_classifier_requires_explicit_evidence() -> None:
+    assert proxy_module._is_upstream_edge_challenge(
+        403,
+        headers={"cf-mitigated": "challenge", "content-type": "text/html"},
+        body="<html>blocked</html>",
+    )
+    assert proxy_module._is_upstream_edge_challenge(
+        403,
+        headers={"server": "cloudflare", "content-type": "text/html"},
+        body="<html><title>Just a moment...</title></html>",
+    )
+    assert not proxy_module._is_upstream_edge_challenge(
+        403,
+        headers={"server": "nginx", "content-type": "text/html"},
+        body="<html><h1>403 Forbidden</h1></html>",
+    )
+    assert not proxy_module._is_upstream_edge_challenge(
+        403,
+        headers={"content-type": "application/json"},
+        body='{"error":{"type":"permission_error","code":"forbidden"}}',
+    )
+
+
+def test_auto_stream_falls_back_for_explicit_edge_challenge() -> None:
+    request_info = cast(Any, SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses"))
+    exc = aiohttp.WSServerHandshakeError(
+        request_info,
+        (),
+        status=403,
+        message="<html><title>Just a moment...</title></html>",
+        headers={"cf-mitigated": "challenge", "content-type": "text/html"},
+    )
+
+    assert proxy_module._should_fallback_to_http_after_websocket_handshake_error("auto", exc)
+    assert not proxy_module._should_fallback_to_http_after_websocket_handshake_error("websocket", exc)
 
 
 @pytest.mark.asyncio

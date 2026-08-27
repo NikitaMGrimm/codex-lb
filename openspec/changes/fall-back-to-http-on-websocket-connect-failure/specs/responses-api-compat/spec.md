@@ -7,10 +7,11 @@
 The direct upstream websocket open MUST stamp host-scoped transport
 provenance on the failures that prove the websocket transport itself did not
 come up: a connect timeout, an invalid handshake, a 5xx upgrade rejection,
+or a 403 carrying explicit Cloudflare/browser-challenge evidence,
 and a connect-phase network error other than host-wide network loss. It MUST
 NOT stamp that provenance on failures that are scoped to something narrower
-than the transport — credential-scoped handshake rejections (401, 403, 429
-and any other sub-5xx status), TLS verification failures, host-wide network
+than the transport — ordinary credential-scoped handshake rejections (401,
+403, 429 and any other sub-5xx status), TLS verification failures, host-wide network
 loss, and every routed-proxy open, which proves nothing beyond the health of
 one account's proxy endpoint.
 
@@ -58,6 +59,13 @@ retain the existing classify-penalize-failover behavior.
 - **WHEN** the upstream rejects the upgrade with HTTP 503 and an unstructured body, which the client converts to code `upstream_error`
 - **THEN** the failure carries websocket transport provenance
 - **AND** it surfaces without an account penalty despite not matching a websocket-specific error code
+
+#### Scenario: explicit edge challenge falls back without weakening ordinary 403 handling
+
+- **GIVEN** the direct upstream websocket handshake returns HTTP 403
+- **WHEN** the response carries `cf-mitigated: challenge`, or identifies Cloudflare HTML containing a known browser-challenge marker
+- **THEN** the failure carries websocket transport provenance and may use the safe HTTP fallback
+- **AND** a bare 403, a structured permission error, or a non-Cloudflare denial carries no transport provenance
 
 #### Scenario: routed handshake failure keeps account failover
 
