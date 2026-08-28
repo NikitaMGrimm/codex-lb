@@ -20,9 +20,12 @@ import {
   updateAccount,
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
+  updateAccountUsageLimit,
 } from "@/features/accounts/api";
 import type {
   AccountRoutingPolicy,
+  AccountSummary,
+  AccountUsageLimitUpdateRequest,
   AccountUsageResetConsumeResponse,
 } from "@/features/accounts/schemas";
 
@@ -201,6 +204,50 @@ export function useAccountMutations() {
     },
   });
 
+  const usageLimitMutation = useMutation({
+    mutationFn: ({
+      accountId,
+      update,
+    }: {
+      accountId: string;
+      update: AccountUsageLimitUpdateRequest;
+    }) => updateAccountUsageLimit(accountId, update),
+    onSuccess: async (data) => {
+      queryClient.setQueryData<{ accounts: AccountSummary[] }>(
+        ["accounts", "list"],
+        (current) =>
+          current
+            ? {
+                ...current,
+                accounts: current.accounts.map((account) =>
+                  account.accountId === data.accountId
+                    ? {
+                        ...account,
+                        usageLimitEnabled: data.enabled,
+                        usageLimitPercent: data.percent,
+                        usageLimitState: data.enabled ? "data_unavailable" : "disabled",
+                      }
+                    : account,
+                ),
+              }
+            : current,
+      );
+      if (data.percent === null) {
+        toast.success(t("accounts.toasts.usageLimitRemoved"));
+      } else {
+        toast.success(
+          data.enabled
+            ? t("accounts.toasts.usageLimitEnabled")
+            : t("accounts.toasts.usageLimitDisabled"),
+        );
+      }
+      await invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("accounts.toasts.usageLimitUpdateFailed"));
+    },
+  });
+
   const exportAuthMutation = useMutation({
     mutationFn: exportAccountAuth,
     onSuccess: () => {
@@ -253,6 +300,7 @@ export function useAccountMutations() {
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,
+    usageLimitMutation,
     updateMutation,
     resetCreditConsumeMutation,
   };

@@ -66,6 +66,12 @@ class UsageWindowWrite:
     credits_balance: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class LiveSnapshotSettlement:
+    account_id: str
+    usage_limit_enabled: bool
+
+
 class LiveSnapshotOwnerIdentityRelockError(RuntimeError):
     """The selected live-snapshot owner's identity changed twice."""
 
@@ -697,7 +703,7 @@ class UsageRepository:
         self,
         account_id: str | None,
         chatgpt_account_id: str | None,
-    ) -> str | None:
+    ) -> LiveSnapshotSettlement | None:
         locked_identities = (chatgpt_account_id,)
         fallback_identity = chatgpt_account_id
         relocked = False
@@ -713,7 +719,9 @@ class UsageRepository:
                 # deleted the local row but not committed yet.
                 observed = (
                     await self._session.execute(
-                        select(Account.id, Account.chatgpt_account_id).where(Account.id == account_id)
+                        select(Account.id, Account.chatgpt_account_id, Account.usage_limit_enabled).where(
+                            Account.id == account_id
+                        )
                     )
                 ).one_or_none()
                 if observed is not None:
@@ -723,7 +731,7 @@ class UsageRepository:
                     else:
                         locked = (
                             await self._session.execute(
-                                select(Account.id, Account.chatgpt_account_id)
+                                select(Account.id, Account.chatgpt_account_id, Account.usage_limit_enabled)
                                 .where(Account.id == account_id)
                                 .with_for_update(key_share=True)
                             )
@@ -732,7 +740,10 @@ class UsageRepository:
                             if locked.chatgpt_account_id and locked.chatgpt_account_id not in locked_identity_values:
                                 identity_to_relock = locked.chatgpt_account_id
                             else:
-                                return locked.id
+                                return LiveSnapshotSettlement(
+                                    account_id=locked.id,
+                                    usage_limit_enabled=bool(locked.usage_limit_enabled),
+                                )
 
             if identity_to_relock is not None:
                 if relocked:
@@ -750,13 +761,16 @@ class UsageRepository:
 
             if fallback_identity:
                 upstream_stmt = (
-                    select(Account.id)
+                    select(Account.id, Account.usage_limit_enabled)
                     .where(Account.chatgpt_account_id == fallback_identity)
                     .with_for_update(key_share=True)
                 )
-                matches = list((await self._session.execute(upstream_stmt)).scalars().all())
+                matches = list((await self._session.execute(upstream_stmt)).all())
                 if len(matches) == 1:
-                    return matches[0]
+                    return LiveSnapshotSettlement(
+                        account_id=matches[0].id,
+                        usage_limit_enabled=bool(matches[0].usage_limit_enabled),
+                    )
             return None
 
     async def settle_live_account_snapshot(
@@ -765,8 +779,8 @@ class UsageRepository:
         account_id: str | None,
         chatgpt_account_id: str | None,
         windows: Collection[UsageWindowWrite],
-        should_skip: Callable[[str], bool],
-    ) -> str | None:
+        should_skip: Callable[[str, bool], bool],
+    ) -> LiveSnapshotSettlement | None:
         """Resolve a live snapshot owner and atomically persist its windows."""
         if not windows:
             return None
@@ -781,34 +795,44 @@ class UsageRepository:
                     # waits until the snapshot commit, so the chosen FK owner
                     # cannot disappear between SELECT and INSERT.
                     await self._session.execute(text("BEGIN IMMEDIATE"))
-                    resolved_account_id = None
+                    settlement = None
                     if account_id is not None:
-                        resolved_account_id = await self._session.scalar(
-                            select(Account.id).where(Account.id == account_id)
-                        )
-                    if resolved_account_id is None and chatgpt_account_id:
+                        resolved = (
+                            await self._session.execute(
+                                select(Account.id, Account.usage_limit_enabled).where(Account.id == account_id)
+                            )
+                        ).one_or_none()
+                        if resolved is not None:
+                            settlement = LiveSnapshotSettlement(
+                                account_id=resolved.id,
+                                usage_limit_enabled=bool(resolved.usage_limit_enabled),
+                            )
+                    if settlement is None and chatgpt_account_id:
                         matches = list(
                             (
                                 await self._session.execute(
-                                    select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)
+                                    select(Account.id, Account.usage_limit_enabled).where(
+                                        Account.chatgpt_account_id == chatgpt_account_id
+                                    )
                                 )
-                            )
-                            .scalars()
-                            .all()
+                            ).all()
                         )
                         if len(matches) == 1:
-                            resolved_account_id = matches[0]
+                            settlement = LiveSnapshotSettlement(
+                                account_id=matches[0].id,
+                                usage_limit_enabled=bool(matches[0].usage_limit_enabled),
+                            )
                 else:
-                    resolved_account_id = await self._resolve_postgresql_live_snapshot_owner(
+                    settlement = await self._resolve_postgresql_live_snapshot_owner(
                         account_id,
                         chatgpt_account_id,
                     )
 
-                if resolved_account_id is None or should_skip(resolved_account_id):
+                if settlement is None or should_skip(settlement.account_id, settlement.usage_limit_enabled):
                     await self._session.rollback()
                     return None
 
-                entries = _account_snapshot_entries(resolved_account_id, windows)
+                entries = _account_snapshot_entries(settlement.account_id, windows)
                 # Telemetry write: this transaction only locks the owner and
                 # appends usage-history rows, so it may skip synchronous WAL
                 # flush just like add_account_snapshot().
@@ -818,7 +842,7 @@ class UsageRepository:
         except BaseException:
             await self._session.rollback()
             raise
-        return resolved_account_id
+        return settlement
 
     async def aggregate_since(
         self,
@@ -1159,7 +1183,14 @@ class UsageRepository:
             bucket_expr = sqlalchemy_cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
         bucket_col = bucket_expr.label("bucket_epoch")
 
-        conditions: list = [UsageHistory.recorded_at >= since]
+        conditions: list = [
+            UsageHistory.recorded_at >= since,
+            or_(
+                UsageHistory.used_percent != 0.0,
+                UsageHistory.reset_at.is_not(None),
+                UsageHistory.window_minutes > 0,
+            ),
+        ]
         if window:
             conditions.append(_window_clause(window))
         if account_id:

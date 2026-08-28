@@ -39,11 +39,13 @@ async def test_postgresql_settlement_lookups_compile_for_no_key_update(
     observed_result.one_or_none.return_value = MagicMock(
         id="acc_current",
         chatgpt_account_id="workspace-current",
+        usage_limit_enabled=True,
     )
     locked_result = MagicMock()
     locked_result.one_or_none.return_value = MagicMock(
         id="acc_current",
         chatgpt_account_id="workspace-current",
+        usage_limit_enabled=True,
     )
     session.execute = AsyncMock(side_effect=[observed_result, locked_result])
     session.add_all = MagicMock()
@@ -56,10 +58,12 @@ async def test_postgresql_settlement_lookups_compile_for_no_key_update(
         account_id="acc_stale",
         chatgpt_account_id="workspace-current",
         windows=[UsageWindowWrite(window="primary", used_percent=25.0)],
-        should_skip=lambda _account_id: False,
+        should_skip=lambda _account_id, _usage_limit_enabled: False,
     )
 
-    assert resolved == "acc_current"
+    assert resolved is not None
+    assert resolved.account_id == "acc_current"
+    assert resolved.usage_limit_enabled is True
     observed_stmt = session.execute.await_args_list[0].args[0]
     locked_stmt = session.execute.await_args_list[1].args[0]
     assert "FOR NO KEY UPDATE" not in str(observed_stmt.compile(dialect=postgresql.dialect()))
