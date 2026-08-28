@@ -2001,12 +2001,15 @@ class _HTTPBridgeStreamingMixin:
             return durable_full_resend_is_account_neutral
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
+            if not _http_bridge_owner_error_allows_account_neutral_replay(exc):
+                return False
+            return current_input_allows_account_neutral_replay()
+
+        def current_input_allows_account_neutral_replay() -> bool:
             nonlocal best_effort_owner_replay
             nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
 
-            if not _http_bridge_owner_error_allows_account_neutral_replay(exc):
-                return False
             if durable_full_resend_allows_account_neutral_replay():
                 return True
             if rewritten_file_account_id is not None:
@@ -2024,6 +2027,7 @@ class _HTTPBridgeStreamingMixin:
             event: str | None = None,
             detail: str | None = None,
             preserve_operation: bool = False,
+            failed_account_id: str | None = None,
         ) -> None:
             nonlocal account_neutral_recovery
             nonlocal affinity
@@ -2065,7 +2069,7 @@ class _HTTPBridgeStreamingMixin:
             prior_operation_persisted_response_id = (
                 request_state.operation_persisted_response_id if preserve_operation_identity else None
             )
-            failed_owner_id = request_state.preferred_account_id
+            failed_owner_id = failed_account_id or request_state.preferred_account_id
             if event is None:
                 event = (
                     "owner_unavailable_best_effort_replay"
@@ -3344,6 +3348,15 @@ class _HTTPBridgeStreamingMixin:
                 effective_payload.previous_response_id is not None
                 and _http_bridge_is_explicit_previous_response_rejection(exc)
             )
+            error_code, _error_message = _proxy_error_code_message(exc)
+            poisoned_owner_best_effort_replay = bool(
+                error_code == "stream_incomplete"
+                and effective_payload.previous_response_id is not None
+                and request_state.response_event_count == 0
+                and not request_state.downstream_visible
+                and request_state.replay_count == 0
+                and current_input_allows_account_neutral_replay()
+            )
             if explicit_previous_response_rejection and (
                 request_state.replay_count > 0
                 or request_state.response_event_count > 0
@@ -3398,6 +3411,7 @@ class _HTTPBridgeStreamingMixin:
                 not should_attempt_previous_response_recovery
                 and not should_rollover_after_context_overflow
                 and not should_attempt_context_overflow_fresh_turn_recovery
+                and not poisoned_owner_best_effort_replay
             ):
                 if is_context_overflow:
                     _log_http_bridge_event(
@@ -3420,7 +3434,25 @@ class _HTTPBridgeStreamingMixin:
                         "HTTP response recovery operation fence is unavailable; retry the request.",
                     ),
                 ) from exc
-            if should_attempt_context_overflow_fresh_turn_recovery:
+            if poisoned_owner_best_effort_replay:
+                failed_account_id = session.account.id
+                await self._reset_http_bridge_session_after_local_terminal_error(
+                    session,
+                    error_code="stream_incomplete",
+                    error_message="Upstream websocket closed before response.completed",
+                )
+                switch_to_account_neutral_replay(
+                    event="poisoned_owner_best_effort_replay",
+                    detail="outcome=current_input_without_owner_anchor_after_eventless_disconnect",
+                    failed_account_id=failed_account_id,
+                )
+                recovery_path = "poisoned_owner_best_effort_replay"
+                retry_payload = effective_payload
+                retry_previous_response_id = None
+                retry_request_stage = "poisoned_owner_recover"
+                retry_preferred_account_id = None
+                allow_previous_response_recovery_rebind = False
+            elif should_attempt_context_overflow_fresh_turn_recovery:
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     bridge_durable_recover_total.labels(path="context_overflow_fresh_turn").inc()
                 _log_http_bridge_event(
@@ -3711,6 +3743,7 @@ class _HTTPBridgeStreamingMixin:
                     "local_previous_response_error",
                     "local_previous_response_fresh_replay",
                     "local_previous_response_same_owner_fresh_replay",
+                    "poisoned_owner_best_effort_replay",
                 }
                 if recovery_path == "local_previous_response_error":
                     await reset_previous_response_recovery_operation_spool(

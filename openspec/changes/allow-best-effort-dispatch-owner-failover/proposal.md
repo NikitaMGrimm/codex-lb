@@ -12,7 +12,8 @@ the selected account fails before any output becomes visible.
 - Reuse verified HTTP-bridge full-history replay when a durable owner reaches
   its configured account usage limit.
 - As a final best-effort resume, discard an unavailable owner's stale response
-  anchor when the remaining current input is independently account-neutral.
+  anchor when the remaining current input is independently account-neutral,
+  including after its bridge disconnects without producing a response event.
 - Keep previous-response, turn-state, uploaded-file, and single-account
   ownership fail-closed.
 - Reuse the original client payload without adding configuration or storage.

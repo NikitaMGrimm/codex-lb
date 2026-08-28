@@ -24949,6 +24949,117 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_replays_plain_resume_after_eventless_owner_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "previous_response_id": "resp_old_owner",
+            "input": [{"role": "user", "content": "resend this message"}],
+        }
+    )
+    creation_calls: list[tuple[proxy_service._HTTPBridgeSessionKey, dict[str, Any]]] = []
+    streamed_payloads: list[dict[str, Any]] = []
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **kwargs: Any,
+    ) -> proxy_service._HTTPBridgeSession:
+        creation_calls.append((key, kwargs))
+        session = _make_bridge_session(key=key, key_value=key.affinity_key)
+        account_id = "acc-owner" if len(creation_calls) == 1 else "acc-next"
+        session.account = cast(Any, SimpleNamespace(id=account_id, status=AccountStatus.ACTIVE))
+        session.request_model = payload.model
+        return session
+
+    async def fake_stream_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        **_kwargs: Any,
+    ):
+        streamed_payloads.append(json.loads(text_data))
+        if len(streamed_payloads) == 1:
+            assert request_state.response_event_count == 0
+            raise ProxyResponseError(
+                502,
+                proxy_service.openai_error(
+                    "stream_incomplete",
+                    "Upstream websocket closed before response.completed",
+                ),
+            )
+        assert request_state.replay_count == 1
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-owner"))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+    reset_session = AsyncMock()
+    monkeypatch.setattr(service, "_reset_http_bridge_session_after_local_terminal_error", reset_session)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-turn-state": "turn-old-owner"},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert len(creation_calls) == 2
+    first_key, first_kwargs = creation_calls[0]
+    replay_key, replay_kwargs = creation_calls[1]
+    assert first_kwargs["previous_response_id"] == "resp_old_owner"
+    assert first_kwargs["preferred_account_id"] == "acc-owner"
+    assert is_http_bridge_account_neutral_replay(
+        kind=replay_key.affinity_kind,
+        key=replay_key.affinity_key,
+    )
+    assert replay_key != first_key
+    assert replay_kwargs["previous_response_id"] is None
+    assert replay_kwargs["preferred_account_id"] is None
+    assert replay_kwargs["durable_lookup"] is None
+    assert replay_kwargs["exclude_account_ids"] == {"acc-owner"}
+    assert "previous_response_id" not in streamed_payloads[1]
+    assert streamed_payloads[1]["input"] == [{"role": "user", "content": "resend this message"}]
+    reset_session.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_recovers_dead_owner_with_replayable_full_resend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

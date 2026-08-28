@@ -59,7 +59,10 @@ history is not available, the service MAY remove the stale previous-response
 anchor and replay only the remaining current input if that input is independently
 account-neutral. This best-effort path MUST exclude the unavailable owner and
 MUST NOT replay account-scoped files, conversation IDs, orphaned tool outputs,
-or response-owned items.
+or response-owned items. An owner bridge that closes with `stream_incomplete`
+before emitting any response event MAY be treated as unavailable for this path.
+The service MUST attempt that eventless-disconnect replay at most once per
+request and MUST NOT use it after downstream-visible output.
 
 #### Scenario: Plain resume continues without old context
 
@@ -75,3 +78,11 @@ or response-owned items.
 - **AND** its remaining input contains account-scoped or structurally incomplete items
 - **WHEN** the owner is unavailable
 - **THEN** the service does not move that input to another account
+
+#### Scenario: Eventless owner disconnect switches once
+
+- **GIVEN** a resume contains an owner-bound previous-response anchor and a plain current user message
+- **AND** the owner bridge closes with `stream_incomplete` before emitting a response event
+- **WHEN** another account is eligible
+- **THEN** the service removes the stale anchor, excludes the failed owner, and replays the current message once
+- **AND** a failure of that replacement does not trigger another server-side replay
