@@ -51,3 +51,27 @@ selection and MUST preserve all existing replay-safety rejection conditions.
 - **AND** the supplied history is not safe for fresh cross-account replay
 - **WHEN** local selection rejects the owner with `account_usage_limit_reached`
 - **THEN** the service returns that rejection without moving the continuation to another account
+
+### Requirement: Account-neutral current input may outlive a stale owner anchor
+
+When an unavailable owner prevents an HTTP-bridge resume and verified full
+history is not available, the service MAY remove the stale previous-response
+anchor and replay only the remaining current input if that input is independently
+account-neutral. This best-effort path MUST exclude the unavailable owner and
+MUST NOT replay account-scoped files, conversation IDs, orphaned tool outputs,
+or response-owned items.
+
+#### Scenario: Plain resume continues without old context
+
+- **GIVEN** a resume contains a stale owner-bound previous-response anchor
+- **AND** its remaining input is a plain user message
+- **WHEN** the owner is unavailable
+- **THEN** the service removes the stale anchor and selects another account
+- **AND** the replacement receives the current message without a promise that old context was retained
+
+#### Scenario: Owner-scoped current input remains blocked
+
+- **GIVEN** a resume contains a stale owner-bound previous-response anchor
+- **AND** its remaining input contains account-scoped or structurally incomplete items
+- **WHEN** the owner is unavailable
+- **THEN** the service does not move that input to another account

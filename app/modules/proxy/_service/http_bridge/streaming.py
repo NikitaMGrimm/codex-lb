@@ -1946,6 +1946,7 @@ class _HTTPBridgeStreamingMixin:
             else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
+        best_effort_owner_replay = False
         unanchored_fork_spill_attempted = False
         verified_stale_anchor_generation_captured = False
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
@@ -2000,15 +2001,28 @@ class _HTTPBridgeStreamingMixin:
             return durable_full_resend_is_account_neutral
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
-            return (
-                _http_bridge_owner_error_allows_account_neutral_replay(exc)
-                and durable_full_resend_allows_account_neutral_replay()
-            )
+            nonlocal best_effort_owner_replay
+            nonlocal durable_full_resend_fresh_payload
+            nonlocal durable_full_resend_is_account_neutral
+
+            if not _http_bridge_owner_error_allows_account_neutral_replay(exc):
+                return False
+            if durable_full_resend_allows_account_neutral_replay():
+                return True
+            if rewritten_file_account_id is not None:
+                return False
+            fresh_payload = _http_bridge_payload_without_previous_response_id(payload)
+            if not _http_bridge_payload_is_account_neutral_fresh_replay(fresh_payload):
+                return False
+            durable_full_resend_fresh_payload = fresh_payload
+            durable_full_resend_is_account_neutral = True
+            best_effort_owner_replay = True
+            return True
 
         def switch_to_account_neutral_replay(
             *,
-            event: str = "owner_unavailable_fresh_resend",
-            detail: str = "outcome=projected_plaintext_full_resend_without_anchor",
+            event: str | None = None,
+            detail: str | None = None,
             preserve_operation: bool = False,
         ) -> None:
             nonlocal account_neutral_recovery
@@ -2052,6 +2066,18 @@ class _HTTPBridgeStreamingMixin:
                 request_state.operation_persisted_response_id if preserve_operation_identity else None
             )
             failed_owner_id = request_state.preferred_account_id
+            if event is None:
+                event = (
+                    "owner_unavailable_best_effort_replay"
+                    if best_effort_owner_replay
+                    else "owner_unavailable_fresh_resend"
+                )
+            if detail is None:
+                detail = (
+                    "outcome=current_input_without_owner_anchor"
+                    if best_effort_owner_replay
+                    else "outcome=projected_plaintext_full_resend_without_anchor"
+                )
             _log_http_bridge_event(
                 event,
                 bridge_session_key,
@@ -2257,15 +2283,6 @@ class _HTTPBridgeStreamingMixin:
                             raise
                         continue
                     raise
-                _log_http_bridge_event(
-                    "owner_unavailable_fresh_resend",
-                    bridge_session_key,
-                    account_id=request_state.preferred_account_id,
-                    model=payload.model,
-                    detail="outcome=fresh_full_resend_without_anchor",
-                    cache_key_family=bridge_session_key.affinity_kind,
-                    model_class=_extract_model_class(payload.model) if payload.model else None,
-                )
                 switch_to_account_neutral_replay()
                 continue
             break

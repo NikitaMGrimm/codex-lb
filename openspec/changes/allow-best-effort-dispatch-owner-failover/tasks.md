@@ -10,6 +10,7 @@
 - [x] Cover nonportable image history, account failover, and sticky re-anchoring.
 - [x] Route a usage-limited durable owner through verified account-neutral full resend.
 - [x] Cover safe and unsafe full-history replay after a local usage-limit rejection.
+- [x] Resume account-neutral current input without an unavailable owner's stale anchor.
 
 ## 3. Verification
 

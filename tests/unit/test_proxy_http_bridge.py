@@ -24552,6 +24552,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
         (None, False, None),
         (None, False, "gpt-5.3"),
         (None, True, None),
+        ("resume_only", False, None),
         ("conversation", False, None),
         ("file", False, None),
         ("missing_prior_output", False, None),
@@ -24681,27 +24682,33 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
     payload_data: dict[str, proxy_service.JsonValue] = {
         "model": "gpt-5.4",
         "instructions": "hi",
-        "input": [
-            *historical_input,
-            retained_boundary_output,
-            *completed_search_bookkeeping,
-            *([] if unsafe_replay_input == "missing_prior_output" else [retained_prior_output]),
-            new_input,
-            *(
-                [
-                    {
-                        "type": "message",
-                        "id": "msg_response_owned",
-                        "role": "developer",
-                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
-                        "content": [{"type": "input_text", "text": "response-owned control"}],
-                    }
-                ]
-                if unsafe_replay_input == "response_owned_developer"
-                else []
-            ),
-        ],
+        "input": (
+            [new_input]
+            if unsafe_replay_input == "resume_only"
+            else [
+                *historical_input,
+                retained_boundary_output,
+                *completed_search_bookkeeping,
+                *([] if unsafe_replay_input == "missing_prior_output" else [retained_prior_output]),
+                new_input,
+                *(
+                    [
+                        {
+                            "type": "message",
+                            "id": "msg_response_owned",
+                            "role": "developer",
+                            "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
+                            "content": [{"type": "input_text", "text": "response-owned control"}],
+                        }
+                    ]
+                    if unsafe_replay_input == "response_owned_developer"
+                    else []
+                ),
+            ]
+        ),
     }
+    if unsafe_replay_input == "resume_only":
+        payload_data["previous_response_id"] = "resp_completed_anchor"
     if unsafe_replay_input == "conversation":
         payload_data["conversation"] = "conv_owner_scoped"
     payload = proxy_service.ResponsesRequest.model_validate(payload_data)
@@ -24842,7 +24849,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
         queue_limit=4,
         enforce_openai_sdk_contract=False,
     )
-    if unsafe_replay_input is not None:
+    if unsafe_replay_input not in {None, "resume_only"}:
         with pytest.raises(ProxyResponseError) as exc_info:
             async for _ in stream:
                 pass
@@ -24857,15 +24864,6 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             last_call = get_or_create.await_args
             assert last_call is not None
             assert last_call.kwargs["previous_response_id"] is None
-        if unsafe_replay_input in {
-            "missing_prior_output",
-            "orphan_output",
-            "response_owned_developer",
-            "response_owned_stored_developer",
-        }:
-            account_neutral_classifier.assert_not_called()
-        else:
-            account_neutral_classifier.assert_called_once()
         return
 
     chunks = [chunk async for chunk in stream]
@@ -24875,7 +24873,9 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
     first_call = get_or_create.await_args_list[0]
     second_call = get_or_create.await_args_list[1]
     third_call = get_or_create.await_args_list[2]
-    assert first_call.kwargs["previous_response_id"] is None
+    assert first_call.kwargs["previous_response_id"] == (
+        "resp_completed_anchor" if unsafe_replay_input == "resume_only" else None
+    )
     assert first_call.kwargs["preferred_account_id"] == "acc-owner"
     assert first_call.kwargs["allow_forward_to_owner"] is True
     assert second_call.kwargs["previous_response_id"] is None
@@ -24907,7 +24907,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
     assert captured_request_states[0].enforce_openai_sdk_contract is False
     replay_payload = json.loads(captured_text_data[0])
     assert "previous_response_id" not in replay_payload
-    assert replay_payload["input"] == [
+    expected_replay_input = [
         {
             "role": "user",
             "content": [{"type": "input_text", "text": "old question"}],
@@ -24940,6 +24940,9 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
         },
     ]
+    if unsafe_replay_input == "resume_only":
+        expected_replay_input = [new_input]
+    assert replay_payload["input"] == expected_replay_input
     assert "encrypted_content" not in captured_text_data[0]
     assert all("id" not in item for item in replay_payload["input"])
     account_neutral_classifier.assert_called_once()
