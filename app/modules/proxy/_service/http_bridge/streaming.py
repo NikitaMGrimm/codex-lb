@@ -2028,7 +2028,7 @@ class _HTTPBridgeStreamingMixin:
             task_link = f"codex://threads/{quote(thread_id, safe='')}"
 
             def with_continuity_notice(
-                replay_payload: ResponsesRequest,
+                replay_input: list[JsonValue],
                 *,
                 retained_history: bool,
             ) -> ResponsesRequest:
@@ -2045,11 +2045,16 @@ class _HTTPBridgeStreamingMixin:
                         f"Original Codex task: {task_link}. If Codex task-reading tools are available, "
                         "inspect that task before continuing; otherwise ask the user for missing context."
                     )
-                return replay_payload.model_copy(
-                    update={
-                        "conversation": None,
-                        "instructions": f"{replay_payload.instructions}\n\n{notice}",
-                        "previous_response_id": None,
+                # This is the deliberately lossy last-resort path. Build a
+                # genuinely fresh request instead of copying the original
+                # envelope: current Codex clients can carry account-owned or
+                # newly introduced top-level fields that must not prevent the
+                # portable input from moving to another account.
+                return ResponsesRequest.model_validate(
+                    {
+                        "model": payload.model,
+                        "instructions": f"{payload.instructions}\n\n{notice}",
+                        "input": replay_input,
                     }
                 )
 
@@ -2060,7 +2065,7 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if lossy_projection is not None:
                     lossy_payload = with_continuity_notice(
-                        payload.model_copy(update={"input": lossy_projection.input_items}),
+                        lossy_projection.input_items,
                         retained_history=True,
                     )
                     if _http_bridge_payload_is_account_neutral_fresh_replay(lossy_payload):
@@ -2097,7 +2102,7 @@ class _HTTPBridgeStreamingMixin:
                 return False
 
             latest_only_payload = with_continuity_notice(
-                payload.model_copy(update={"input": latest_user_input}),
+                latest_user_input,
                 retained_history=False,
             )
             if not _http_bridge_payload_is_account_neutral_fresh_replay(latest_only_payload):

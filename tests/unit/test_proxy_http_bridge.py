@@ -24983,6 +24983,8 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
             "model": "gpt-5.4",
             "instructions": "hi",
             "previous_response_id": "resp_old_owner",
+            "client_metadata": {"future_account_hint": "owner-scoped"},
+            "experimental_request_owner": "acc-owner",
             "input": [
                 *historical_items,
                 {"role": "user", "content": "continue and report progress"},
@@ -25074,6 +25076,8 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
     assert replay_kwargs["exclude_account_ids"] == {"acc-owner"}
     replay_payload = streamed_payloads[0]
     assert "previous_response_id" not in replay_payload
+    assert "client_metadata" not in replay_payload
+    assert "experimental_request_owner" not in replay_payload
     assert "codex://threads/01a048c7-382b-73d1-bf70-babf8f9cca71" in replay_payload["instructions"]
     assert replay_payload["input"][-1] == {
         "role": "user",
@@ -25086,9 +25090,7 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
         assert "id" not in replay_payload["input"][1]
         assert "reconstructed from client-supplied history" in replay_payload["instructions"]
     else:
-        assert replay_payload["input"] == [
-            {"role": "user", "content": "continue and report progress"}
-        ]
+        assert replay_payload["input"] == [{"role": "user", "content": "continue and report progress"}]
         assert "Only the newest portable user message is available" in replay_payload["instructions"]
 
 
