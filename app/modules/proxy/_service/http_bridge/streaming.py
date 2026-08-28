@@ -76,7 +76,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR,
     _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR,
     _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR,
+    _await_task_deferring_cancellation,
     _effective_http_bridge_idle_ttl_seconds,
+    _http_bridge_abandonment_may_settle_circuit,
+    _http_bridge_continuity_bound_without_safe_replay,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
@@ -115,7 +118,13 @@ from app.modules.proxy._service.http_bridge.owner_forwarding import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_quarantine_generation,
+    _http_bridge_session_key_poison_quarantined,
     _http_bridge_session_key_quarantined,
+)
+from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
+    _http_bridge_anchor_poison_detail,
+    _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
@@ -250,16 +259,8 @@ from app.modules.proxy.replay_safety import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
+
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
-
-
-def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
-    """Return whether retrying would require replaying an unsafe continuation."""
-    if request_state.previous_response_id is not None:
-        return not (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text)
-    return request_state.hard_continuity_anchor and not (
-        request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
-    )
 
 
 def _http_bridge_durable_recovery_predecessor_proven(request_state: _WebSocketRequestState) -> bool:
@@ -2828,6 +2829,39 @@ class _HTTPBridgeStreamingMixin:
         has_previous_response_id = (
             proxy_injected_previous_response_id or effective_payload.previous_response_id is not None
         )
+        if not has_previous_response_id and not _http_bridge_payload_looks_like_full_resend(effective_payload):
+            # A delta-only payload with no anchor anywhere relies on server
+            # memory this proxy may have just abandoned. When the key's
+            # poison quarantine is active — or the durable circuit row still
+            # records the poison episode, which is what another replica or a
+            # restarted worker sees — dispatching it unanchored would start a
+            # new conversation and silently drop the prior context, which
+            # the delta-only contract forbids. Fail closed instead so the
+            # client resends its full history.
+            unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+            if not unanchored_delta_poisoned:
+                await self._load_http_bridge_retry_circuit(session)
+                unanchored_delta_poisoned = _http_bridge_session_key_poison_quarantined(self, bridge_session_key)
+            if unanchored_delta_poisoned:
+                _log_http_bridge_event(
+                    "previous_response_poisoned_anchor_fail_fast",
+                    bridge_session_key,
+                    account_id=None,
+                    model=effective_payload.model,
+                    detail="outcome=unanchored_delta_fail_closed",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                    owner_check_applied=True,
+                )
+                raise ProxyResponseError(
+                    404,
+                    openai_error(
+                        "bridge_previous_response_not_found",
+                        "The conversation state this request relies on was abandoned "
+                        "after repeated upstream failures; resend the full "
+                        "conversation history or start a new conversation.",
+                    ),
+                )
         incoming_input = effective_payload.input
         stored_count = session.last_completed_input_count
         stored_fingerprint = session.last_completed_input_prefix_fingerprint
@@ -3498,6 +3532,58 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if retry_injected_input is not None:
                     retry_payload = retry_payload.model_copy(update={"input": retry_injected_input})
+                if explicit_previous_response_rejection and _http_bridge_session_key_poison_quarantined(
+                    self, bridge_session_key
+                ):
+                    # An explicit rejection alone does not prove the anchor is
+                    # dead: it can mean this session simply was not its owner,
+                    # which is why #1830's recovery rebinds and deliberately
+                    # retries the SAME anchor on the fresh session. Only once
+                    # the retry circuit has opened on repeated eventless
+                    # poison-class failures and quarantined the key is the
+                    # anchor proven dead rather than merely mis-bound. The
+                    # quarantine registry is shared with the wedged-reattach
+                    # and repeated-eventless fences, which say nothing about
+                    # the anchor, so this asks for the poison reason and not
+                    # merely for an active window.
+                    #
+                    # At that point re-attaching guarantees the retry repeats
+                    # the rejection — live, a reattach loop against a dead
+                    # anchor and a burst of client-visible 503s. But every
+                    # request shape that reaches this fallthrough has already
+                    # failed the proven full-resend and operation-fence
+                    # checks of the branches above, so its payload does not
+                    # retain the anchor's context: stripping the anchor here
+                    # would replay a delta-only continuation as a
+                    # context-free request, which the responses-api-compat
+                    # spec forbids ("a genuine delta-only continuation MUST
+                    # still receive the durable anchor"), and the durable
+                    # layer stores input fingerprints, not items, so the
+                    # proxy cannot rebuild the context either. The only
+                    # honest terminal is the upstream's own explicit
+                    # rejection: surface it, let the funnels settle the
+                    # circuit (an explicit rejection is not poison-class, so
+                    # this cannot re-open it), and leave recovery to the
+                    # client, which is the only party holding the history.
+                    _log_http_bridge_event(
+                        "previous_response_poisoned_anchor_fail_fast",
+                        bridge_session_key,
+                        account_id=None,
+                        model=effective_payload.model,
+                        detail="outcome=explicit_rejection_propagated",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                        owner_check_applied=True,
+                    )
+                    raise ProxyResponseError(
+                        exc.status_code if 400 <= exc.status_code < 500 else 404,
+                        openai_error(
+                            "bridge_previous_response_not_found",
+                            "The previous response referenced by this request no longer "
+                            "exists upstream; resend the full conversation history or "
+                            "start a new conversation.",
+                        ),
+                    ) from exc
                 retry_previous_response_id = request_state.previous_response_id
                 retry_request_stage = "reattach"
                 retry_preferred_account_id = request_state.preferred_account_id
@@ -4015,15 +4101,16 @@ class _HTTPBridgeStreamingMixin:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
                         previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
                     )
+                block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
+                suppressed_retry_after = max(1, math.ceil(max(block_seconds, retry_cooldown_seconds)))
                 raise ProxyResponseError(
                     503,
                     openai_error(
                         "upstream_request_timeout",
-                        "HTTP responses session bridge is cooling down after repeated upstream "
-                        "timeouts; retry shortly.",
+                        _http_bridge_retry_circuit_suppression_message(block_reason, suppressed_retry_after),
                         error_type="server_error",
                     ),
-                    retry_after_seconds=max(1, math.ceil(retry_cooldown_seconds)),
+                    retry_after_seconds=suppressed_retry_after,
                 )
             return format_sse_event(
                 cast(
@@ -4193,15 +4280,16 @@ class _HTTPBridgeStreamingMixin:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
                         previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
                     )
+                block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
+                suppressed_retry_after = max(1, math.ceil(max(block_seconds, initial_retry_cooldown_seconds)))
                 raise ProxyResponseError(
                     503,
                     openai_error(
                         "upstream_request_timeout",
-                        "HTTP responses session bridge is cooling down after repeated upstream "
-                        "timeouts; retry shortly.",
+                        _http_bridge_retry_circuit_suppression_message(block_reason, suppressed_retry_after),
                         error_type="server_error",
                     ),
-                    retry_after_seconds=max(1, math.ceil(initial_retry_cooldown_seconds)),
+                    retry_after_seconds=suppressed_retry_after,
                 )
             yield terminal_event
             return
@@ -4551,11 +4639,70 @@ class _HTTPBridgeStreamingMixin:
                                             if keepalive_event is not None:
                                                 yield keepalive_event
                                             continue
-                                        await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
-                                            session,
-                                            detail="stream_idle_timeout",
-                                            selection=timed_out_retry_circuit_attempt_selection,
+                                        idle_selection = timed_out_retry_circuit_attempt_selection
+
+                                        async def _idle_strike_and_clear() -> None:
+                                            from app.modules.proxy._service.http_bridge.upstream_events import (
+                                                _abandon_durable_http_bridge_continuity,
+                                            )
+
+                                            record_failure = (
+                                                self._record_http_bridge_retry_circuit_failure_for_attempt_selection
+                                            )
+                                            consecutive_failures = await record_failure(
+                                                session,
+                                                detail="stream_idle_timeout",
+                                                selection=idle_selection,
+                                            )
+                                            poison_detail = _http_bridge_anchor_poison_detail("stream_idle_timeout")
+                                            if poison_detail is None:
+                                                return
+                                            (
+                                                poison_episode,
+                                                poison_expected_anchor,
+                                            ) = await self._http_bridge_poison_anchor_clear_owed(
+                                                session,
+                                                consecutive_failures=consecutive_failures,
+                                                configured_threshold=getattr(
+                                                    _service_get_settings(),
+                                                    "http_responses_session_bridge_anchor_poison_failure_threshold",
+                                                    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
+                                                ),
+                                            )
+                                            if poison_episode is None:
+                                                return
+                                            async with session.pending_lock:
+                                                idle_pending_states = list(session.pending_requests)
+                                            durable_cleared = await _abandon_durable_http_bridge_continuity(
+                                                self,
+                                                session,
+                                                detail=poison_detail,
+                                                settle_circuit=_http_bridge_abandonment_may_settle_circuit(
+                                                    [request_state, *idle_pending_states]
+                                                ),
+                                                expected_continuity=poison_expected_anchor,
+                                            )
+                                            if durable_cleared:
+                                                await self._http_bridge_mark_poison_anchor_cleared(
+                                                    session, episode=poison_episode
+                                                )
+
+                                        # The terminal frame below ends this stream and the
+                                        # request detaches: a client disconnect cancelling the
+                                        # generator mid-consult would otherwise abort the only
+                                        # abandonment this opening gets, leaving the dead
+                                        # anchor stored past the process-local quarantine.
+                                        # Defer cancellation like the other funnels, then
+                                        # re-raise it.
+                                        idle_settlement_task = asyncio.create_task(
+                                            _idle_strike_and_clear(),
+                                            name=f"http-bridge-idle-poison-settlement-{session.durable_session_id}",
                                         )
+                                        _idle_result, idle_cancellation = await _await_task_deferring_cancellation(
+                                            idle_settlement_task
+                                        )
+                                        if idle_cancellation is not None:
+                                            raise idle_cancellation
                                         if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                             stream_idle_timeout_total.labels(surface="http_bridge").inc()
                                         logger.info(

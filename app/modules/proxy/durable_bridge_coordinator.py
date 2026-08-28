@@ -15,6 +15,7 @@ from app.db.models import HttpBridgeSessionState
 from app.db.session import close_session
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
+    REBIND_ANCHOR_UNFENCED,
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
     DurableBridgeOperationEventInput,
@@ -267,9 +268,9 @@ class DurableBridgeSessionCoordinator:
         session_key_value: str,
         api_key_id: str | None,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+    ) -> bool:
         async with self._session() as session:
-            await DurableBridgeRepository(session).delete_retry_circuit(
+            return await DurableBridgeRepository(session).delete_retry_circuit(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
@@ -392,6 +393,8 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         account_id: str,
         clear_continuity: bool = False,
+        expected_latest_response_id: object = REBIND_ANCHOR_UNFENCED,
+        expected_latest_turn_state: object = REBIND_ANCHOR_UNFENCED,
     ) -> bool:
         del api_key_id
         async with self._session() as session:
@@ -401,7 +404,14 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
                 account_id=account_id,
                 clear_continuity=clear_continuity,
+                expected_latest_response_id=expected_latest_response_id,
+                expected_latest_turn_state=expected_latest_turn_state,
             )
+
+    async def session_latest_continuity(self, *, session_id: str) -> tuple[str | None, str | None] | None:
+        """Read the session's current continuity anchors for a fenced clear."""
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).latest_session_continuity(session_id=session_id)
 
     async def release_live_session(
         self,
