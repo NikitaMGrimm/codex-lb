@@ -501,7 +501,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return True
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
-        persisted_cooldown_until = now_monotonic + cooldown_remaining
+        persisted_cooldown_until = now_monotonic + cooldown_remaining if cooldown_remaining > 0.0 else 0.0
         arm_poison_quarantine = False
         poison_cooldown_remaining = 0.0
         async with self._http_bridge_retry_circuit_lock:
@@ -536,6 +536,8 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.poison_anchor_cleared = False
                 state.consecutive_failures = max(0, persisted.consecutive_failures)
                 state.cooldown_until = persisted_cooldown_until
+                if persisted_cooldown_until <= 0.0:
+                    state.half_open_until = 0.0
                 state.last_detail = persisted.last_detail
                 if state.consecutive_failures == 0:
                     # A zero-failure row is a durable reset: the episode the
