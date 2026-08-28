@@ -99,7 +99,7 @@ from app.modules.proxy.load_balancer import (
     _mapped_model_has_registry_entry,
 )
 from app.modules.proxy.repo_bundle import ProxyRepositories
-from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
 from app.modules.proxy.work_admission import AdmissionLease
 from app.modules.request_logs.repository import PreviousResponseOwnerRecord, RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -5595,6 +5595,7 @@ class _RepoContext:
         request_logs: _RequestLogsRecorder,
         *,
         accounts: Sequence[Account] = (),
+        sticky_owners: dict[tuple[str, StickySessionKind], str] | None = None,
     ) -> None:
         capability_lineage = AsyncMock(spec=CapabilityLineageRepository)
         capability_lineage.is_required.return_value = False
@@ -5605,11 +5606,53 @@ class _RepoContext:
         accounts_repository.get_by_id_fresh.side_effect = accounts_by_id.get
         usage_repository = AsyncMock(spec=UsageRepository)
         usage_repository.latest_by_account.return_value = {}
+        sticky_sessions = AsyncMock(spec=StickySessionsRepository)
+        if sticky_owners is not None:
+
+            async def get_sticky_owner(
+                key: str,
+                *,
+                kind: StickySessionKind,
+                **_kwargs: object,
+            ) -> StickyOwnerLookup:
+                return StickyOwnerLookup(
+                    account_id=sticky_owners.get((key, kind)),
+                    continuity_abandoned=False,
+                )
+
+            async def get_sticky_account_id(key: str, *, kind: StickySessionKind) -> str | None:
+                return sticky_owners.get((key, kind))
+
+            async def upsert_sticky(
+                key: str,
+                account_id: str,
+                *,
+                kind: StickySessionKind,
+            ) -> SimpleNamespace:
+                sticky_owners[(key, kind)] = account_id
+                return SimpleNamespace(key=key, account_id=account_id, kind=kind)
+
+            async def upsert_sticky_with_seed(
+                key: str,
+                account_id: str,
+                *,
+                kind: StickySessionKind,
+                seed_key: str,
+                seed_kind: StickySessionKind,
+            ) -> SimpleNamespace:
+                sticky_owners.setdefault((seed_key, seed_kind), account_id)
+                sticky_owners[(key, kind)] = account_id
+                return SimpleNamespace(key=key, account_id=account_id, kind=kind)
+
+            sticky_sessions.get_account_id_and_abandonment.side_effect = get_sticky_owner
+            sticky_sessions.get_account_id.side_effect = get_sticky_account_id
+            sticky_sessions.upsert.side_effect = upsert_sticky
+            sticky_sessions.upsert_with_seed_if_absent.side_effect = upsert_sticky_with_seed
         self._repos = ProxyRepositories(
             accounts=cast(AccountsRepository, accounts_repository),
             usage=cast(UsageRepository, usage_repository),
             request_logs=cast(RequestLogsRepository, request_logs),
-            sticky_sessions=cast(StickySessionsRepository, AsyncMock()),
+            sticky_sessions=cast(StickySessionsRepository, sticky_sessions),
             api_keys=cast(ApiKeysRepository, AsyncMock()),
             additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
             capability_lineage=capability_lineage,
@@ -5626,9 +5669,10 @@ def _repo_factory(
     request_logs: _RequestLogsRecorder,
     *,
     accounts: Sequence[Account] = (),
+    sticky_owners: dict[tuple[str, StickySessionKind], str] | None = None,
 ) -> proxy_service.ProxyRepoFactory:
     def factory() -> _RepoContext:
-        return _RepoContext(request_logs, accounts=accounts)
+        return _RepoContext(request_logs, accounts=accounts, sticky_owners=sticky_owners)
 
     return factory
 
@@ -17704,6 +17748,135 @@ async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(mo
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert [call["status"] for call in request_logs.calls] == ["error", "success"]
     assert request_logs.calls[0]["error_code"] == "stream_idle_timeout"
+
+
+@pytest.mark.asyncio
+async def test_image_first_turn_usage_limit_reselects_active_account_and_reanchors_thread(monkeypatch):
+    settings = _make_proxy_settings()
+    settings.sticky_threads_enabled = True
+    request_logs = _RequestLogsRecorder()
+    account_a = _make_account("acc_image_limit_owner")
+    account_b = _make_account("acc_image_limit_replacement")
+    process_session_id = "codex-process-image-failover"
+    thread_id = "codex-thread-image-failover"
+    headers = {"session_id": process_session_id, "thread-id": thread_id}
+    process_selection_key = proxy_affinity._codex_session_selection_key(process_session_id)
+    thread_selection_key = proxy_affinity._codex_backend_identity(headers).thread_selection_key
+    assert thread_selection_key is not None
+    sticky_owners = {
+        (process_selection_key, StickySessionKind.CODEX_SESSION): account_a.id,
+    }
+    service = proxy_service.ProxyService(
+        _repo_factory(
+            request_logs,
+            accounts=[account_a, account_b],
+            sticky_owners=sticky_owners,
+        )
+    )
+    service._load_balancer._selection_inputs_cache.invalidate()
+    original_select_account = service._load_balancer.select_account
+    selection_calls: list[tuple[set[str], str | None, str | None]] = []
+    stream_account_ids: list[str | None] = []
+    completed_count = 0
+
+    async def recording_select_account(**kwargs: object) -> AccountSelection:
+        selection = await original_select_account(**kwargs)
+        selection_calls.append(
+            (
+                set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set()),
+                selection.account.id if selection.account is not None else None,
+                selection.error_code,
+            )
+        )
+        return selection
+
+    async def fake_stream(
+        payload: ResponsesRequest,
+        request_headers: Mapping[str, str],
+        access_token: str,
+        account_id: str | None,
+        **kwargs: object,
+    ) -> AsyncIterator[str]:
+        nonlocal completed_count
+        del payload, request_headers, access_token
+        assert kwargs.get("upstream_stream_transport_override") == "http"
+        stream_account_ids.append(account_id)
+        if account_id == account_a.chatgpt_account_id:
+            yield (
+                'data: {"type":"response.failed","response":{"id":"resp_image_owner_limit",'
+                '"status":"failed","error":{"code":"usage_limit_reached",'
+                '"message":"The usage limit has been reached"},'
+                '"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}\n\n'
+            )
+            return
+        assert account_id == account_b.chatgpt_account_id
+        completed_count += 1
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_image_failover_ok_'
+            f'{completed_count}","status":"completed","usage":{{"input_tokens":1,'
+            '"output_tokens":1,"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", recording_select_account)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **_kwargs: account))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(return_value={"failure_class": "rate_limit"}))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "describe the image",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What is shown?"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+                    ],
+                }
+            ],
+            "stream": True,
+        }
+    )
+
+    async def run_turn(turn_payload: ResponsesRequest) -> list[str]:
+        return [
+            chunk
+            async for chunk in service._stream_with_retry(
+                turn_payload,
+                headers,
+                codex_session_affinity=True,
+                propagate_http_errors=False,
+                openai_cache_affinity=True,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                upstream_stream_transport_override="http",
+            )
+        ]
+
+    try:
+        first_turn = await run_turn(payload)
+        second_turn = await run_turn(payload.model_copy(deep=True))
+    finally:
+        service._load_balancer._selection_inputs_cache.invalidate()
+
+    assert all("usage_limit_reached" not in chunk for chunk in first_turn)
+    assert parse_sse_data_json(first_turn[-1])["type"] == "response.completed"
+    assert parse_sse_data_json(second_turn[-1])["type"] == "response.completed"
+    assert stream_account_ids == [
+        account_a.chatgpt_account_id,
+        account_b.chatgpt_account_id,
+        account_b.chatgpt_account_id,
+    ]
+    assert sticky_owners[(thread_selection_key, StickySessionKind.PROMPT_CACHE)] == account_b.id
+    assert any(
+        excluded == {account_a.id} and selected_account_id == account_b.id and error_code is None
+        for excluded, selected_account_id, error_code in selection_calls
+    )
 
 
 @pytest.mark.asyncio
