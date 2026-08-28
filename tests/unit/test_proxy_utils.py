@@ -4024,7 +4024,7 @@ def test_responses_request_contains_input_image_detects_supported_shapes() -> No
                 {
                     "role": "user",
                     "content": {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
-                }
+                },
             ],
         }
     )
@@ -4040,7 +4040,7 @@ def test_responses_request_contains_input_image_detects_supported_shapes() -> No
                         {"type": "input_text", "text": "tool saw an image"},
                         {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
                     ],
-                }
+                },
             ],
         }
     )
@@ -17751,7 +17751,7 @@ async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(mo
 
 
 @pytest.mark.asyncio
-async def test_image_first_turn_usage_limit_reselects_active_account_and_reanchors_thread(monkeypatch):
+async def test_nonportable_image_history_usage_limit_reselects_active_account_and_reanchors_thread(monkeypatch):
     settings = _make_proxy_settings()
     settings.sticky_threads_enabled = True
     request_logs = _RequestLogsRecorder()
@@ -17830,12 +17830,17 @@ async def test_image_first_turn_usage_limit_reselects_active_account_and_reancho
             "instructions": "describe the image",
             "input": [
                 {
+                    "type": "reasoning",
+                    "id": "rs_image_owner_history",
+                    "encrypted_content": "owner-scoped-history",
+                },
+                {
                     "role": "user",
                     "content": [
                         {"type": "input_text", "text": "What is shown?"},
                         {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
                     ],
-                }
+                },
             ],
             "stream": True,
         }

@@ -731,6 +731,27 @@ class _StreamingRetryMixin:
             )
             return True
 
+        def _release_dispatch_only_payload_owner(*, account_id: str, outcome: str) -> bool:
+            nonlocal affinity, payload_replay_required_account_id
+            if not (
+                payload_replay_required_account_id == account_id
+                and preferred_account_id is None
+                and not require_preferred_account
+                and file_preferred_account_id is None
+                and turn_state_owner_account_id is None
+                and routing_strategy != "single_account"
+            ):
+                return False
+            payload_replay_required_account_id = None
+            affinity = replace(affinity, reallocate_sticky=True)
+            logger.warning(
+                "cross_account_best_effort_replay request_id=%s outcome=%s account_id=%s",
+                request_id,
+                outcome,
+                account_id,
+            )
+            return True
+
         async def _stream_post_refresh_with_capacity_recovery(
             account: Account,
             *,
@@ -2360,10 +2381,15 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     excluded_account_ids.add(account.id)
-                                    _move_verified_fresh_replay_from_owner(
+                                    verified_replay_moved = _move_verified_fresh_replay_from_owner(
                                         account_id=account.id,
                                         outcome="owner_previsible_failure",
                                     )
+                                    if not verified_replay_moved:
+                                        _release_dispatch_only_payload_owner(
+                                            account_id=account.id,
+                                            outcome="owner_previsible_failure",
+                                        )
                                     break
                                 await proxy._handle_stream_error(
                                     account,
@@ -2500,10 +2526,15 @@ class _StreamingRetryMixin:
                         await _release_tracked_stream_lease(current_account_lease)
                         current_account_lease = None
                         excluded_account_ids.add(account.id)
-                    _move_verified_fresh_replay_from_owner(
+                    verified_replay_moved = _move_verified_fresh_replay_from_owner(
                         account_id=account.id,
                         outcome="owner_previsible_retryable_failure",
                     )
+                    if exc.exclude_account and not verified_replay_moved:
+                        _release_dispatch_only_payload_owner(
+                            account_id=account.id,
+                            outcome="owner_previsible_retryable_failure",
+                        )
                     continue
                 except _TerminalStreamError as exc:
                     health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
@@ -2964,10 +2995,15 @@ class _StreamingRetryMixin:
                                 last_transient_exc = retry_exc
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
-                                _move_verified_fresh_replay_from_owner(
+                                verified_replay_moved = _move_verified_fresh_replay_from_owner(
                                     account_id=account.id,
                                     outcome="owner_post_refresh_failure",
                                 )
+                                if not verified_replay_moved:
+                                    _release_dispatch_only_payload_owner(
+                                        account_id=account.id,
+                                        outcome="owner_post_refresh_failure",
+                                    )
                                 excluded_account_ids.add(account.id)
                                 continue
                             health_write_allowed = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
