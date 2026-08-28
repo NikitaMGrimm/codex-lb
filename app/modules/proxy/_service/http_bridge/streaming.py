@@ -568,6 +568,13 @@ def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str 
     return (str(code) if code is not None else None, str(message) if message is not None else None)
 
 
+def _http_bridge_owner_error_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
+    if _http_bridge_is_previous_response_owner_unavailable(exc):
+        return True
+    code, _message = _proxy_error_code_message(exc)
+    return exc.status_code == 503 and code == "account_usage_limit_reached"
+
+
 _HTTP_BRIDGE_AMBIGUOUS_RECOVERY_ERROR_CODES = frozenset(
     {
         "stream_incomplete",
@@ -1994,7 +2001,7 @@ class _HTTPBridgeStreamingMixin:
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
             return (
-                _http_bridge_is_previous_response_owner_unavailable(exc)
+                _http_bridge_owner_error_allows_account_neutral_replay(exc)
                 and durable_full_resend_allows_account_neutral_replay()
             )
 

@@ -27,3 +27,27 @@ single-account ownership, or after downstream-visible output.
 - **GIVEN** a request depends on a previous response, turn state, uploaded file, or single-account policy
 - **WHEN** its required account fails
 - **THEN** the service does not use dispatch-owner release to move the request to another account
+
+### Requirement: Verified full resend may replace a usage-limited durable owner
+
+When an HTTP-bridge continuation is bound to a durable owner that reaches its
+configured account usage limit before the current request is submitted, the
+service MUST use the existing account-neutral recovery path if and only if the
+client payload is a verified full resend that is safe for fresh cross-account
+replay. The service MUST exclude the usage-limited owner from replacement
+selection and MUST preserve all existing replay-safety rejection conditions.
+
+#### Scenario: Safe full history continues on another account
+
+- **GIVEN** an HTTP-bridge continuation is durably owned by one account
+- **AND** the client supplies verified account-neutral full history
+- **WHEN** local selection rejects the owner with `account_usage_limit_reached`
+- **THEN** the service removes owner affinity and continuity anchors from the projected replay
+- **AND** it excludes the usage-limited owner and selects another eligible account
+
+#### Scenario: Unsafe history remains on the owner
+
+- **GIVEN** an HTTP-bridge continuation is durably owned by one account
+- **AND** the supplied history is not safe for fresh cross-account replay
+- **WHEN** local selection rejects the owner with `account_usage_limit_reached`
+- **THEN** the service returns that rejection without moving the continuation to another account

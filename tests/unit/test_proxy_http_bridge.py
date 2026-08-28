@@ -24540,6 +24540,13 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("owner_failure_status", "owner_failure_code"),
+    [
+        (502, "previous_response_owner_unavailable"),
+        (503, "account_usage_limit_reached"),
+    ],
+)
+@pytest.mark.parametrize(
     ("unsafe_replay_input", "replace_retired_gate", "stored_model"),
     [
         (None, False, None),
@@ -24556,6 +24563,8 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
 )
 async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_when_owner_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
+    owner_failure_status: int,
+    owner_failure_code: str,
     unsafe_replay_input: str | None,
     replace_retired_gate: bool,
     stored_model: str | None,
@@ -24713,10 +24722,14 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
         model=stored_model,
     )
     owner_unavailable = ProxyResponseError(
-        502,
+        owner_failure_status,
         proxy_service.openai_error(
-            "previous_response_owner_unavailable",
-            "Previous response owner account is unavailable; retry later.",
+            owner_failure_code,
+            (
+                "Previous response owner account is unavailable; retry later."
+                if owner_failure_code == "previous_response_owner_unavailable"
+                else "All otherwise available accounts have reached their usage limit or lack current usage data"
+            ),
             error_type="server_error",
         ),
     )

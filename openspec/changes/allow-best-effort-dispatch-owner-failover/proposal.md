@@ -9,6 +9,8 @@ the selected account fails before any output becomes visible.
 
 - Release ownership created only by the failed dispatch before selecting the
   next account.
+- Reuse verified HTTP-bridge full-history replay when a durable owner reaches
+  its configured account usage limit.
 - Keep previous-response, turn-state, uploaded-file, and single-account
   ownership fail-closed.
 - Reuse the original client payload without adding configuration or storage.
