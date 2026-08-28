@@ -14,6 +14,9 @@ the selected account fails before any output becomes visible.
 - As a final best-effort resume, discard an unavailable owner's stale response
   anchor when the remaining current input is independently account-neutral,
   including after its bridge disconnects without producing a response event.
+- For Codex threads, preserve the greatest account-neutral projection of the
+  supplied history and fall back to an honest task deeplink plus the newest
+  portable user message when that projection is still unsafe.
 - Keep previous-response, turn-state, uploaded-file, and single-account
   ownership fail-closed.
 - Reuse the original client payload without adding configuration or storage.

@@ -7,6 +7,7 @@ import logging
 import math
 from collections.abc import AsyncGenerator, Callable
 from typing import Any, AsyncIterator, Mapping, TypeVar, cast
+from urllib.parse import quote
 from uuid import uuid4
 
 import anyio
@@ -2012,12 +2013,96 @@ class _HTTPBridgeStreamingMixin:
 
             if durable_full_resend_allows_account_neutral_replay():
                 return True
-            if rewritten_file_account_id is not None:
+            if rewritten_file_account_id is None:
+                fresh_payload = _http_bridge_payload_without_previous_response_id(payload)
+                if _http_bridge_payload_is_account_neutral_fresh_replay(fresh_payload):
+                    durable_full_resend_fresh_payload = fresh_payload
+                    durable_full_resend_is_account_neutral = True
+                    best_effort_owner_replay = True
+                    return True
+
+            thread_id = _codex_backend_identity(headers).thread_id
+            if thread_id is None:
                 return False
-            fresh_payload = _http_bridge_payload_without_previous_response_id(payload)
-            if not _http_bridge_payload_is_account_neutral_fresh_replay(fresh_payload):
+
+            task_link = f"codex://threads/{quote(thread_id, safe='')}"
+
+            def with_continuity_notice(
+                replay_payload: ResponsesRequest,
+                *,
+                retained_history: bool,
+            ) -> ResponsesRequest:
+                if retained_history:
+                    notice = (
+                        "Best-effort account switch: the earlier conversation was reconstructed from "
+                        "client-supplied history, but account-owned internal state may have been omitted. "
+                        f"Original Codex task: {task_link}."
+                    )
+                else:
+                    notice = (
+                        "Best-effort account switch: the earlier conversation could not be transferred. "
+                        "Only the newest portable user message is available. "
+                        f"Original Codex task: {task_link}. If Codex task-reading tools are available, "
+                        "inspect that task before continuing; otherwise ask the user for missing context."
+                    )
+                return replay_payload.model_copy(
+                    update={
+                        "conversation": None,
+                        "instructions": f"{replay_payload.instructions}\n\n{notice}",
+                        "previous_response_id": None,
+                    }
+                )
+
+            if isinstance(payload.input, list) and payload.input:
+                lossy_projection = project_responses_input_for_account_neutral_fresh_replay(
+                    cast(list[JsonValue], payload.input),
+                    stored_count=len(payload.input),
+                )
+                if lossy_projection is not None:
+                    lossy_payload = with_continuity_notice(
+                        payload.model_copy(update={"input": lossy_projection.input_items}),
+                        retained_history=True,
+                    )
+                    if _http_bridge_payload_is_account_neutral_fresh_replay(lossy_payload):
+                        durable_full_resend_fresh_payload = lossy_payload
+                        durable_full_resend_is_account_neutral = True
+                        best_effort_owner_replay = True
+                        return True
+
+            latest_user_input: list[JsonValue] | None = None
+            input_items = payload.input if isinstance(payload.input, list) else []
+            for item in reversed(input_items):
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item.get("role") != "user" or item_type not in (None, "message"):
+                    continue
+                content = item.get("content")
+                if isinstance(content, str) and content.strip():
+                    latest_user_input = [{"role": "user", "content": content}]
+                    break
+                if not isinstance(content, list):
+                    continue
+                text_parts: list[JsonValue] = []
+                for part in content:
+                    if not isinstance(part, dict) or part.get("type") not in {"input_text", "text"}:
+                        continue
+                    text = part.get("text")
+                    if isinstance(text, str) and text.strip():
+                        text_parts.append({"type": "input_text", "text": text})
+                if text_parts:
+                    latest_user_input = [{"role": "user", "content": text_parts}]
+                    break
+            if latest_user_input is None:
                 return False
-            durable_full_resend_fresh_payload = fresh_payload
+
+            latest_only_payload = with_continuity_notice(
+                payload.model_copy(update={"input": latest_user_input}),
+                retained_history=False,
+            )
+            if not _http_bridge_payload_is_account_neutral_fresh_replay(latest_only_payload):
+                return False
+            durable_full_resend_fresh_payload = latest_only_payload
             durable_full_resend_is_account_neutral = True
             best_effort_owner_replay = True
             return True

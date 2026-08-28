@@ -64,6 +64,16 @@ before emitting any response event MAY be treated as unavailable for this path.
 The service MUST attempt that eventless-disconnect replay at most once per
 request and MUST NOT use it after downstream-visible output.
 
+For a request carrying a Codex thread identifier, if the exact fresh replay is
+unsafe, the service MAY project the complete client-supplied history by removing
+known response-owned bookkeeping. If that projection remains unsafe, the
+service MAY replay only the newest portable user text. Both lossy paths MUST add
+an honest continuity notice containing the percent-encoded
+`codex://threads/<thread-id>` deeplink, MUST exclude the failed owner, and MUST
+omit account-scoped files, encrypted reasoning, response IDs, orphaned tool
+state, and other nonportable items. Requests without a Codex thread identifier
+MUST retain the existing fail-closed behavior.
+
 #### Scenario: Plain resume continues without old context
 
 - **GIVEN** a resume contains a stale owner-bound previous-response anchor
@@ -77,7 +87,23 @@ request and MUST NOT use it after downstream-visible output.
 - **GIVEN** a resume contains a stale owner-bound previous-response anchor
 - **AND** its remaining input contains account-scoped or structurally incomplete items
 - **WHEN** the owner is unavailable
-- **THEN** the service does not move that input to another account
+- **THEN** the service does not move those account-scoped items to another account
+- **AND** without a Codex thread identifier it does not move the request at all
+
+#### Scenario: Codex thread resumes with sanitized history
+
+- **GIVEN** a Codex thread resume supplies full history containing removable response-owned bookkeeping
+- **WHEN** the owner is unavailable and the projected history is account-neutral
+- **THEN** the service selects another account with the maximum portable projected history
+- **AND** it identifies the original task in an honest continuity notice
+
+#### Scenario: Codex thread falls back to its newest portable message
+
+- **GIVEN** a Codex thread resume contains history that remains unsafe after projection
+- **AND** its newest user message contains portable text
+- **WHEN** the owner is unavailable
+- **THEN** the service drops the unsafe history and sends only that portable text to another account
+- **AND** the continuity notice includes the original `codex://threads/<thread-id>` deeplink and states that history was not transferred
 
 #### Scenario: Eventless owner disconnect switches once
 

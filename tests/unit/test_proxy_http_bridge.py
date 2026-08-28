@@ -24949,6 +24949,150 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fallback_mode", ["sanitized_history", "latest_message"])
+async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_selection_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    fallback_mode: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    historical_items: list[proxy_service.JsonValue] = [
+        {"role": "user", "content": "old question"},
+        {
+            "type": "reasoning",
+            "id": "rs_owner",
+            "encrypted_content": "owner-scoped",
+            "summary": [],
+        },
+        {
+            "type": "message",
+            "id": "msg_owner",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "old answer"}],
+        },
+    ]
+    if fallback_mode == "latest_message":
+        historical_items.append(
+            {
+                "role": "user",
+                "content": [{"type": "input_file", "file_id": "file_owner"}],
+            }
+        )
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "previous_response_id": "resp_old_owner",
+            "input": [
+                *historical_items,
+                {"role": "user", "content": "continue and report progress"},
+            ],
+        }
+    )
+    owner_unavailable = ProxyResponseError(
+        502,
+        proxy_service.openai_error(
+            "previous_response_owner_unavailable",
+            "Previous response owner account is unavailable; retry later.",
+        ),
+    )
+    creation_calls: list[tuple[proxy_service._HTTPBridgeSessionKey, dict[str, Any]]] = []
+    streamed_payloads: list[dict[str, Any]] = []
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **kwargs: Any,
+    ) -> proxy_service._HTTPBridgeSession:
+        creation_calls.append((key, kwargs))
+        if len(creation_calls) == 1:
+            raise owner_unavailable
+        session = _make_bridge_session(key=key, key_value=key.affinity_key)
+        session.account = cast(Any, SimpleNamespace(id="acc-next", status=AccountStatus.ACTIVE))
+        session.request_model = payload.model
+        return session
+
+    async def fake_stream_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        text_data: str,
+        **_kwargs: Any,
+    ):
+        streamed_payloads.append(json.loads(text_data))
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-owner"))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"thread-id": "01a048c7-382b-73d1-bf70-babf8f9cca71"},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert len(creation_calls) == 2
+    replay_key, replay_kwargs = creation_calls[1]
+    assert is_http_bridge_account_neutral_replay(
+        kind=replay_key.affinity_kind,
+        key=replay_key.affinity_key,
+    )
+    assert replay_kwargs["previous_response_id"] is None
+    assert replay_kwargs["preferred_account_id"] is None
+    assert replay_kwargs["exclude_account_ids"] == {"acc-owner"}
+    replay_payload = streamed_payloads[0]
+    assert "previous_response_id" not in replay_payload
+    assert "codex://threads/01a048c7-382b-73d1-bf70-babf8f9cca71" in replay_payload["instructions"]
+    assert replay_payload["input"][-1] == {
+        "role": "user",
+        "content": "continue and report progress",
+    }
+    if fallback_mode == "sanitized_history":
+        assert len(replay_payload["input"]) == 3
+        assert replay_payload["input"][0] == {"role": "user", "content": "old question"}
+        assert replay_payload["input"][1]["role"] == "assistant"
+        assert "id" not in replay_payload["input"][1]
+        assert "reconstructed from client-supplied history" in replay_payload["instructions"]
+    else:
+        assert replay_payload["input"] == [
+            {"role": "user", "content": "continue and report progress"}
+        ]
+        assert "Only the newest portable user message is available" in replay_payload["instructions"]
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_replays_plain_resume_after_eventless_owner_disconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
