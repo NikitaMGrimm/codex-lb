@@ -17865,8 +17865,12 @@ async def test_image_first_turn_usage_limit_reselects_active_account_and_reancho
         service._load_balancer._selection_inputs_cache.invalidate()
 
     assert all("usage_limit_reached" not in chunk for chunk in first_turn)
-    assert parse_sse_data_json(first_turn[-1])["type"] == "response.completed"
-    assert parse_sse_data_json(second_turn[-1])["type"] == "response.completed"
+    first_terminal = parse_sse_data_json(first_turn[-1])
+    second_terminal = parse_sse_data_json(second_turn[-1])
+    assert first_terminal is not None
+    assert second_terminal is not None
+    assert first_terminal["type"] == "response.completed"
+    assert second_terminal["type"] == "response.completed"
     assert stream_account_ids == [
         account_a.chatgpt_account_id,
         account_b.chatgpt_account_id,

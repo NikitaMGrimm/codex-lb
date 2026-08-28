@@ -24474,7 +24474,6 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    await service._pin_file_account("file_from_other_account", "acc-file")
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
@@ -24530,6 +24529,7 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
             codex_idle_ttl_seconds=1800.0,
             max_sessions=8,
             queue_limit=4,
+            rewritten_file_account_id="acc-file",
         ):
             pass
 
@@ -29061,8 +29061,8 @@ async def test_http_bridge_retry_circuit_elapsed_durable_cooldown_does_not_burn_
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_retry_circuit_expiry_clears_loaded_local_deadline() -> None:
-    """A cooldown that expires after loading does not create a half-open lease."""
+async def test_http_bridge_retry_circuit_expiry_transitions_through_fresh_probe() -> None:
+    """A cooldown observed while active admits one fresh probe after expiry."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-circuit-expiry-transition")
     persisted = SimpleNamespace(
@@ -29084,13 +29084,14 @@ async def test_http_bridge_retry_circuit_expiry_clears_loaded_local_deadline() -
     persisted.cooldown_until_epoch = time.time() - 120.0
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
     assert state.cooldown_until == 0.0
-    assert state.half_open_until == 0.0
-    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    assert state.half_open_until > time.monotonic()
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+    assert state.half_open_until > time.monotonic()
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_retry_circuit_expiry_clears_lookup_failure_probe() -> None:
-    """An expired row clears a probe leased during a transient lookup failure."""
+async def test_http_bridge_retry_circuit_expiry_preserves_same_episode_probe() -> None:
+    """An expired row preserves the probe leased for the same durable episode."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-circuit-expiry-lookup-failure")
     persisted = SimpleNamespace(
@@ -29113,10 +29114,9 @@ async def test_http_bridge_retry_circuit_expiry_clears_lookup_failure_probe() ->
 
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
     assert state.half_open_until > time.monotonic()
-    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
     assert state.cooldown_until == 0.0
-    assert state.half_open_until == 0.0
-    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    assert state.half_open_until > time.monotonic()
 
 
 @pytest.mark.asyncio
@@ -34178,6 +34178,7 @@ async def test_merged_cooldown_drops_a_leftover_half_open_lease() -> None:
     assert allowed is True, "after the cooldown expires the key must admit a probe, not read the stale lease"
     assert state.cooldown_until == 0.0
     assert state.half_open_until > time.monotonic(), "the admitted probe arms a fresh half-open lease"
+    assert await service._http_bridge_precreated_retry_allowed(session) is False
 
 
 @pytest.mark.asyncio
