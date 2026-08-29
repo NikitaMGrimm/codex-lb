@@ -24953,10 +24953,12 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
     "fallback_mode",
     ["sanitized_history", "sanitized_history_without_lite_tools", "latest_message"],
 )
+@pytest.mark.parametrize("origin_closed", [False, True])
 async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_selection_failure(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     fallback_mode: str,
+    origin_closed: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     settings = _make_app_settings(http_responses_session_bridge_instance_id="bridge-instance")
@@ -25037,7 +25039,8 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
         latest_response_id="resp_old_owner",
         model="gpt-5.4",
     )
-    persist_rebind = AsyncMock(return_value=True)
+    persist_rebind = AsyncMock(return_value=not origin_closed)
+    persist_closed_rebind = AsyncMock(return_value=True)
 
     async def fake_get_or_create(
         key: proxy_service._HTTPBridgeSessionKey,
@@ -25084,6 +25087,7 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
         AsyncMock(return_value=durable_lookup),
     )
     monkeypatch.setattr(service._durable_bridge, "rebind_session_account", persist_rebind)
+    monkeypatch.setattr(service._durable_bridge, "rebind_closed_session_account", persist_closed_rebind)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-owner"))
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
@@ -25160,12 +25164,23 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
         expected_latest_response_id="resp_old_owner",
         expected_latest_turn_state=None,
     )
+    if origin_closed:
+        persist_closed_rebind.assert_awaited_once_with(
+            session_id="durable-best-effort-owner",
+            api_key_id=None,
+            owner_epoch=3,
+            expected_account_id="acc-owner",
+            account_id="acc-next",
+        )
+    else:
+        persist_closed_rebind.assert_not_awaited()
     assert "event=best_effort_replay_rejected" in caplog.text
     assert "replay_stage=current_input" in caplog.text
     expected_stage = "latest_message_with_lite_tools" if fallback_mode == "latest_message" else "sanitized_history"
     assert f"replay_stage={expected_stage}" in caplog.text
     assert "event=best_effort_rebind" in caplog.text
     assert "outcome=success" in caplog.text
+    assert f"path={'closed' if origin_closed else 'live'}" in caplog.text
 
 
 @pytest.mark.asyncio

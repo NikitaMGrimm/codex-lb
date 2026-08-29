@@ -167,7 +167,7 @@ def project_responses_input_for_account_neutral_fresh_replay(
     *,
     stored_count: int,
     preserve_developer_message_ids: bool = False,
-    omit_nonportable_additional_tools: bool = False,
+    project_nonportable_additional_tools: bool = False,
 ) -> AccountNeutralReplayProjection | None:
     """Remove known response-owned bookkeeping after durable prefix proof.
 
@@ -187,7 +187,7 @@ def project_responses_input_for_account_neutral_fresh_replay(
         projected_item = _project_account_neutral_replay_item(
             item,
             preserve_developer_message_ids=preserve_developer_message_ids,
-            omit_nonportable_additional_tools=omit_nonportable_additional_tools,
+            project_nonportable_additional_tools=project_nonportable_additional_tools,
         )
         if projected_item is not None:
             projected_items.append(projected_item)
@@ -230,7 +230,7 @@ def _project_account_neutral_replay_item(
     item: JsonValue,
     *,
     preserve_developer_message_ids: bool,
-    omit_nonportable_additional_tools: bool,
+    project_nonportable_additional_tools: bool,
 ) -> JsonValue | None:
     if not isinstance(item, dict):
         return item
@@ -245,11 +245,11 @@ def _project_account_neutral_replay_item(
     if item_type is not None and not isinstance(item_type, str):
         return item
     if (
-        omit_nonportable_additional_tools
+        project_nonportable_additional_tools
         and item_type == "additional_tools"
         and not _is_canonical_lite_tool_bundle(item)
     ):
-        return None
+        return _project_portable_lite_tool_bundle(item)
     if item_type == "reasoning" or (
         item_type in _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES and item.get("status") == "completed"
     ):
@@ -280,6 +280,30 @@ def _project_account_neutral_replay_item(
         if len(portable_output) != len(output):
             projected_item["output"] = portable_output or ""
     return projected_item
+
+
+def _project_portable_lite_tool_bundle(item: Mapping[str, JsonValue]) -> JsonValue | None:
+    """Retain safe Desktop tools when one declaration makes the bundle nonportable."""
+
+    tools = item.get("tools")
+    if item.get("role") != "developer" or not isinstance(tools, list):
+        return None
+    projected_tools: list[JsonValue] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        tool_type = tool.get("type")
+        if not isinstance(tool_type, str):
+            continue
+        allowed_fields = _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS.get(tool_type)
+        if allowed_fields is None:
+            continue
+        projected_tool = {key: value for key, value in tool.items() if key in allowed_fields}
+        if _tool_declaration_is_account_neutral(projected_tool):
+            projected_tools.append(projected_tool)
+    if not projected_tools:
+        return None
+    return {"type": "additional_tools", "role": "developer", "tools": projected_tools}
 
 
 def responses_input_items_are_self_contained_fresh_replay(input_items: list[JsonValue]) -> bool:

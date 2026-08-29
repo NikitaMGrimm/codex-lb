@@ -17,6 +17,8 @@ the selected account fails before any output becomes visible.
 - For Codex threads, preserve the greatest account-neutral projection of the
   supplied history and fall back to an honest task deeplink plus the newest
   portable user message when that projection is still unsafe.
+- Preserve portable Desktop tool declarations from a mixed Responses-Lite tool
+  bundle and rebind the durable task row to the replacement account.
 - Keep previous-response, turn-state, uploaded-file, and single-account
   ownership fail-closed.
 - Reuse the original client payload without adding configuration or storage.

@@ -1608,6 +1608,56 @@ async def test_durable_bridge_account_change_advances_epoch_to_fence_stale_relea
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_rebinds_only_released_anchor_free_session(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="thread_header",
+        session_key_value="thread-best-effort-rebind",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-owner",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=False,
+    )
+
+    wrong_owner = await coordinator.rebind_closed_session_account(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        owner_epoch=claimed.owner_epoch,
+        expected_account_id="acc-other",
+        account_id="acc-next",
+    )
+    rebound = await coordinator.rebind_closed_session_account(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        owner_epoch=claimed.owner_epoch,
+        expected_account_id="acc-owner",
+        account_id="acc-next",
+    )
+
+    async with async_session_factory() as session:
+        account_id = await session.scalar(
+            select(HttpBridgeSessionRecord.account_id).where(HttpBridgeSessionRecord.id == claimed.session_id)
+        )
+    assert wrong_owner is False
+    assert rebound is True
+    assert account_id == "acc-next"
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_forced_generation_advance_fences_same_account_stale_release(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

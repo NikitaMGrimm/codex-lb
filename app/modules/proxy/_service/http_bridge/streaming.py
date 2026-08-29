@@ -1952,6 +1952,7 @@ class _HTTPBridgeStreamingMixin:
         best_effort_replay_rejections: set[tuple[str, str]] = set()
         best_effort_origin_key: _HTTPBridgeSessionKey | None = None
         best_effort_origin_lookup: DurableBridgeLookup | None = None
+        best_effort_origin_rebound = False
         unanchored_fork_spill_attempted = False
         verified_stale_anchor_generation_captured = False
         verified_stale_anchor_circuit_key: _HTTPBridgeSessionKey | None = None
@@ -2063,6 +2064,9 @@ class _HTTPBridgeStreamingMixin:
                     notice = (
                         "Best-effort account switch: the earlier conversation was reconstructed from "
                         "client-supplied history, but account-owned internal state may have been omitted. "
+                        "Continue normally with the tools and workspace declared by this current request; "
+                        "inspect the current workspace when verification is needed instead of assuming it is "
+                        "unavailable. "
                         f"Original Codex task: {task_link}."
                     )
                 else:
@@ -2093,7 +2097,7 @@ class _HTTPBridgeStreamingMixin:
                 lossy_projection = project_responses_input_for_account_neutral_fresh_replay(
                     cast(list[JsonValue], payload.input),
                     stored_count=len(payload.input),
-                    omit_nonportable_additional_tools=True,
+                    project_nonportable_additional_tools=True,
                 )
                 if lossy_projection is not None:
                     projected_input = lossy_projection.input_items
@@ -2295,6 +2299,9 @@ class _HTTPBridgeStreamingMixin:
             file_required_preferred_account = False
 
         async def persist_best_effort_origin_account(replacement_session: _HTTPBridgeSession) -> None:
+            nonlocal best_effort_origin_rebound
+            if best_effort_origin_rebound:
+                return
             if best_effort_origin_lookup is None or best_effort_origin_key is None:
                 return
             current_instance = _service_get_settings().http_responses_session_bridge_instance_id
@@ -2324,12 +2331,27 @@ class _HTTPBridgeStreamingMixin:
             except Exception:
                 logger.warning("Failed to persist best-effort HTTP bridge account rebind", exc_info=True)
                 rebound = False
+            rebind_path = "live"
+            if not rebound:
+                try:
+                    rebound = await self._durable_bridge.rebind_closed_session_account(
+                        session_id=best_effort_origin_lookup.session_id,
+                        api_key_id=best_effort_origin_key.api_key_id,
+                        owner_epoch=best_effort_origin_lookup.owner_epoch,
+                        expected_account_id=best_effort_origin_lookup.account_id,
+                        account_id=replacement_session.account.id,
+                    )
+                except Exception:
+                    logger.warning("Failed to persist released best-effort HTTP bridge account rebind", exc_info=True)
+                    rebound = False
+                rebind_path = "closed"
+            best_effort_origin_rebound = rebound
             _log_http_bridge_event(
                 "best_effort_rebind",
                 best_effort_origin_key,
                 account_id=replacement_session.account.id,
                 model=payload.model,
-                detail=f"outcome={'success' if rebound else 'fenced'}",
+                detail=f"outcome={'success' if rebound else 'fenced'}, path={rebind_path}",
                 cache_key_family=best_effort_origin_key.affinity_kind,
                 model_class=_extract_model_class(payload.model) if payload.model else None,
                 owner_check_applied=True,
@@ -2730,6 +2752,7 @@ class _HTTPBridgeStreamingMixin:
                             raise
                         continue
                     break
+                await persist_best_effort_origin_account(session)
                 _record_bridge_reattach(
                     path=(
                         "owner_forward_fresh_replay"
@@ -2919,6 +2942,7 @@ class _HTTPBridgeStreamingMixin:
                             session.last_used_at = _service_time().monotonic()
                 return
         session = session_or_forward
+        await persist_best_effort_origin_account(session)
         if (
             # A quarantine-suppressed anchor (#1534) must not be rehydrated
             # into the session either: doing so would let the session-level
@@ -3908,6 +3932,7 @@ class _HTTPBridgeStreamingMixin:
                     break
             except BaseException:
                 raise
+            await persist_best_effort_origin_account(session)
             _record_bridge_reattach(path=recovery_path, outcome="success")
 
             local_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None

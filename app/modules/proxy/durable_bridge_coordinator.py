@@ -408,6 +408,24 @@ class DurableBridgeSessionCoordinator:
                 expected_latest_turn_state=expected_latest_turn_state,
             )
 
+    async def rebind_closed_session_account(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        owner_epoch: int,
+        expected_account_id: str | None,
+        account_id: str,
+    ) -> bool:
+        del api_key_id
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).rebind_closed_session_account(
+                session_id=session_id,
+                owner_epoch=owner_epoch,
+                expected_account_id=expected_account_id,
+                account_id=account_id,
+            )
+
     async def session_latest_continuity(self, *, session_id: str) -> tuple[str | None, str | None] | None:
         """Read the session's current continuity anchors for a fenced clear."""
         async with self._session() as session:

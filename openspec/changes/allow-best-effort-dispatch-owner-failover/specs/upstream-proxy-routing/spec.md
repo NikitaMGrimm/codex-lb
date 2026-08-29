@@ -74,6 +74,16 @@ omit account-scoped files, encrypted reasoning, response IDs, orphaned tool
 state, and other nonportable items. Requests without a Codex thread identifier
 MUST retain the existing fail-closed behavior.
 
+When a mixed Responses-Lite `additional_tools` bundle prevents the sanitized
+history from moving accounts, the projection MUST retain every independently
+account-neutral tool declaration and omit only declarations that remain
+account-scoped or unsupported. After a replacement account is selected, the
+service MUST persist that account on the original durable task row before
+streaming the replacement response. If the failed transport already released
+the row, that update MUST require the original owner epoch, original account,
+closed state, and empty continuity anchors so a concurrent successor cannot be
+overwritten.
+
 #### Scenario: Plain resume continues without old context
 
 - **GIVEN** a resume contains a stale owner-bound previous-response anchor
@@ -96,6 +106,22 @@ MUST retain the existing fail-closed behavior.
 - **WHEN** the owner is unavailable and the projected history is account-neutral
 - **THEN** the service selects another account with the maximum portable projected history
 - **AND** it identifies the original task in an honest continuity notice
+
+#### Scenario: Sanitized history retains portable Desktop tools
+
+- **GIVEN** a Codex thread resume contains a mixed Responses-Lite tool bundle
+- **AND** some declarations are account-neutral while others are not portable
+- **WHEN** sanitized history is selected on another account
+- **THEN** the replacement receives the account-neutral tool declarations
+- **AND** the nonportable declarations are omitted without discarding the portable tools or conversation history
+
+#### Scenario: Released task row follows the replacement account
+
+- **GIVEN** the failed owner bridge released its durable task row before best-effort replay selected a replacement
+- **AND** the row still has the original owner epoch and account with no continuity anchors
+- **WHEN** the replacement account is selected
+- **THEN** the service updates the closed row to that replacement account before response streaming
+- **AND** a claimed, re-anchored, or otherwise concurrently changed row is fenced from that update
 
 #### Scenario: Codex thread falls back to its newest portable message
 

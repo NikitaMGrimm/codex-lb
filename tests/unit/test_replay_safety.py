@@ -349,12 +349,15 @@ def test_account_neutral_replay_projection_normalizes_portable_desktop_history()
     assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is True
 
 
-def test_lossy_replay_projection_omits_only_nonportable_additional_tools() -> None:
+def test_lossy_replay_projection_retains_portable_tools_from_mixed_bundle() -> None:
     input_items: list[JsonValue] = [
         {
             "type": "additional_tools",
             "role": "developer",
-            "tools": [{"type": "mcp", "name": "codex_app__read_thread"}],
+            "tools": [
+                {"type": "mcp", "name": "codex_app__read_thread"},
+                {"type": "custom", "name": "exec", "defer_loading": True},
+            ],
         },
         {
             "type": "message",
@@ -377,13 +380,20 @@ def test_lossy_replay_projection_omits_only_nonportable_additional_tools() -> No
     lossy_projection = project_responses_input_for_account_neutral_fresh_replay(
         input_items,
         stored_count=len(input_items),
-        omit_nonportable_additional_tools=True,
+        project_nonportable_additional_tools=True,
     )
 
     assert strict_projection is not None
     assert responses_payload_is_account_neutral_fresh_replay({"input": strict_projection.input_items}) is False
     assert lossy_projection is not None
-    assert lossy_projection.input_items == input_items[1:]
+    assert lossy_projection.input_items == [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "exec"}],
+        },
+        *input_items[1:],
+    ]
     assert responses_payload_is_account_neutral_fresh_replay({"input": lossy_projection.input_items}) is True
 
 

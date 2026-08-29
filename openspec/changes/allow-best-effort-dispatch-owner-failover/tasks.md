@@ -13,6 +13,7 @@
 - [x] Resume account-neutral current input without an unavailable owner's stale anchor.
 - [x] Retry that current input once after an eventless owner-bridge disconnect.
 - [x] Preserve projected Codex thread history or fall back to a deeplink plus the newest portable message.
+- [x] Preserve portable Desktop tools from mixed bundles and rebind released task rows.
 
 ## 3. Verification
 

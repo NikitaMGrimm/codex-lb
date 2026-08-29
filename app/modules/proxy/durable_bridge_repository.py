@@ -1144,6 +1144,33 @@ class DurableBridgeRepository:
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 
+    async def rebind_closed_session_account(
+        self,
+        *,
+        session_id: str,
+        owner_epoch: int,
+        expected_account_id: str | None,
+        account_id: str,
+    ) -> bool:
+        """Move an already released, anchor-free session to its recovery account."""
+
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id.is_(None),
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                    HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
+                    HttpBridgeSessionRecord.account_id == expected_account_id,
+                    HttpBridgeSessionRecord.latest_response_id.is_(None),
+                    HttpBridgeSessionRecord.latest_turn_state.is_(None),
+                )
+                .values(account_id=account_id)
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
     async def release_session(
         self,
         *,
