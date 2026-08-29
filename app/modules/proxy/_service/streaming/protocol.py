@@ -14,6 +14,7 @@ class _StreamingServiceProtocol(Protocol):
     _load_balancer: Any
     _maybe_touch_api_key_reservation: Any
     _raise_for_unsupported_input_image_references: Any
+    _repo_factory: Any
     _release_unsettled_stream_api_key_usage: Any
     _resolve_file_account_for_responses: Any
     _resolve_compact_turn_state_owner: Any

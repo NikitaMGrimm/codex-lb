@@ -17889,6 +17889,119 @@ async def test_nonportable_image_history_usage_limit_reselects_active_account_an
 
 
 @pytest.mark.asyncio
+async def test_nonportable_image_quota_releases_dispatch_created_hard_turn_affinity(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    repo_context = _RepoContext(request_logs)
+    restore_if_current = cast(AsyncMock, repo_context._repos.sticky_sessions.restore_if_current)
+    restore_if_current.return_value = True
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, lambda: repo_context))
+    failed_account = _make_account("acc_image_hard_affinity_owner")
+    replacement_account = _make_account("acc_image_hard_affinity_replacement")
+    turn_state = "turn_0123456789abcdef0123456789abcdef"
+    headers = {"x-codex-turn-state": turn_state}
+    selection_calls: list[dict[str, object]] = []
+    streamed_account_ids: list[str | None] = []
+
+    async def fake_select_account(**kwargs: object) -> AccountSelection:
+        selection_calls.append(dict(kwargs))
+        assert kwargs.get("sticky_key") == turn_state
+        assert kwargs.get("sticky_kind") == StickySessionKind.CODEX_SESSION
+        if len(selection_calls) == 1:
+            return AccountSelection(account=failed_account, error_message=None)
+        assert kwargs.get("exclude_account_ids") == {failed_account.id}
+        assert kwargs.get("reallocate_sticky") is True
+        return AccountSelection(account=replacement_account, error_message=None)
+
+    async def fake_stream(
+        payload: ResponsesRequest,
+        request_headers: Mapping[str, str],
+        access_token: str,
+        account_id: str | None,
+        **kwargs: object,
+    ) -> AsyncIterator[str]:
+        del payload, request_headers, access_token
+        assert kwargs.get("upstream_stream_transport_override") == "http"
+        streamed_account_ids.append(account_id)
+        if account_id == failed_account.chatgpt_account_id:
+            yield (
+                'data: {"type":"response.failed","response":{"id":"resp_hard_owner_limit",'
+                '"status":"failed","error":{"code":"usage_limit_reached",'
+                '"message":"The usage limit has been reached"},'
+                '"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}\n\n'
+            )
+            return
+        assert account_id == replacement_account.chatgpt_account_id
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_hard_failover_ok",'
+            '"status":"completed","usage":{"input_tokens":1,"output_tokens":1,'
+            '"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(side_effect=fake_select_account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **_kwargs: account))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(return_value={"failure_class": "rate_limit"}))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "continue with tools and image context",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_image_hard_owner_history",
+                    "encrypted_content": "owner-scoped-history",
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Continue"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+                    ],
+                },
+            ],
+            "stream": True,
+        }
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            headers,
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert all("response.failed" not in chunk for chunk in chunks)
+    terminal = parse_sse_data_json(chunks[-1])
+    assert terminal is not None
+    assert terminal["type"] == "response.completed"
+    assert streamed_account_ids == [
+        failed_account.chatgpt_account_id,
+        replacement_account.chatgpt_account_id,
+    ]
+    restore_if_current.assert_awaited_once_with(
+        turn_state,
+        kind=StickySessionKind.CODEX_SESSION,
+        expected_account_id=failed_account.id,
+        restore_account_id=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_first_idle_timeout_surfaces_timeout_when_no_failover_candidate(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

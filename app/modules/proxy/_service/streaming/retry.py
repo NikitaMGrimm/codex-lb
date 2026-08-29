@@ -731,7 +731,12 @@ class _StreamingRetryMixin:
             )
             return True
 
-        def _release_dispatch_only_payload_owner(*, account_id: str, outcome: str) -> bool:
+        async def _release_dispatch_only_payload_owner(
+            *,
+            account_id: str,
+            outcome: str,
+            failure_class: str | None = None,
+        ) -> bool:
             nonlocal affinity, payload_replay_required_account_id
             if not (
                 payload_replay_required_account_id == account_id
@@ -742,6 +747,45 @@ class _StreamingRetryMixin:
                 and routing_strategy != "single_account"
             ):
                 return False
+            if failure_class == "rate_limit":
+                affinity_targets: list[tuple[str, str]] = []
+                if affinity.kind == StickySessionKind.CODEX_SESSION and affinity.selection_key is not None:
+                    affinity_targets.append((affinity.selection_key, "current"))
+                if (
+                    affinity.legacy_selection_key is not None
+                    and affinity.legacy_selection_key != affinity.selection_key
+                ):
+                    affinity_targets.append((affinity.legacy_selection_key, "legacy"))
+                if affinity_targets:
+                    try:
+                        async with proxy._repo_factory() as repos:
+                            for sticky_key, target in affinity_targets:
+                                released = await repos.sticky_sessions.restore_if_current(
+                                    sticky_key,
+                                    kind=StickySessionKind.CODEX_SESSION,
+                                    expected_account_id=account_id,
+                                    restore_account_id=None,
+                                )
+                                if released:
+                                    release_outcome = "released"
+                                else:
+                                    current_owner = await repos.sticky_sessions.get_account_id(
+                                        sticky_key,
+                                        kind=StickySessionKind.CODEX_SESSION,
+                                    )
+                                    release_outcome = "absent" if current_owner is None else "fenced"
+                                logger.info(
+                                    "dispatch_affinity_release request_id=%s target=%s outcome=%s",
+                                    request_id,
+                                    target,
+                                    release_outcome,
+                                )
+                    except Exception:
+                        logger.warning(
+                            "dispatch_affinity_release request_id=%s outcome=error",
+                            request_id,
+                            exc_info=True,
+                        )
             payload_replay_required_account_id = None
             affinity = replace(affinity, reallocate_sticky=True)
             logger.warning(
@@ -2386,9 +2430,10 @@ class _StreamingRetryMixin:
                                         outcome="owner_previsible_failure",
                                     )
                                     if not verified_replay_moved:
-                                        _release_dispatch_only_payload_owner(
+                                        await _release_dispatch_only_payload_owner(
                                             account_id=account.id,
                                             outcome="owner_previsible_failure",
+                                            failure_class=classified["failure_class"],
                                         )
                                     break
                                 await proxy._handle_stream_error(
@@ -2520,7 +2565,7 @@ class _StreamingRetryMixin:
                         require_security_work_authorized = True
                         last_security_work_retry_error = exc
                         continue
-                    await _handle_or_defer_keyed_stream_health(account, exc.error, exc.code)
+                    retryable_failure = await _handle_or_defer_keyed_stream_health(account, exc.error, exc.code)
                     last_retryable_stream_error = exc
                     if exc.exclude_account:
                         await _release_tracked_stream_lease(current_account_lease)
@@ -2531,9 +2576,10 @@ class _StreamingRetryMixin:
                         outcome="owner_previsible_retryable_failure",
                     )
                     if exc.exclude_account and not verified_replay_moved:
-                        _release_dispatch_only_payload_owner(
+                        await _release_dispatch_only_payload_owner(
                             account_id=account.id,
                             outcome="owner_previsible_retryable_failure",
+                            failure_class=retryable_failure["failure_class"],
                         )
                     continue
                 except _TerminalStreamError as exc:
@@ -3000,9 +3046,10 @@ class _StreamingRetryMixin:
                                     outcome="owner_post_refresh_failure",
                                 )
                                 if not verified_replay_moved:
-                                    _release_dispatch_only_payload_owner(
+                                    await _release_dispatch_only_payload_owner(
                                         account_id=account.id,
                                         outcome="owner_post_refresh_failure",
+                                        failure_class=classified["failure_class"],
                                     )
                                 excluded_account_ids.add(account.id)
                                 continue

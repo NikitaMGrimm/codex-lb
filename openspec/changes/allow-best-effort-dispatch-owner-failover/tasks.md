@@ -15,6 +15,7 @@
 - [x] Preserve projected Codex thread history or fall back to a deeplink plus the newest portable message.
 - [x] Preserve nested namespace, shell, and apply-patch Desktop tools from mixed bundles.
 - [x] Rebind released task rows under exact retained-anchor fences and clear stale continuity.
+- [x] CAS-release dispatch-created hard affinity after a pre-visible quota failure.
 
 ## 3. Verification
 

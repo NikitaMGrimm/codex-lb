@@ -13,6 +13,11 @@ account within the existing attempt and request budgets. The service MUST NOT
 apply this exception to previous-response, turn-state, uploaded-file, or
 single-account ownership, or after downstream-visible output.
 
+If the failed quota attempt provisionally persisted a hard Codex-session row
+for a synthesized turn state or compatibility key, the service MUST release
+that row only when it is still owned by the failed account before replacement
+selection. A concurrent rebind MUST be fenced from deletion.
+
 #### Scenario: Nonportable full history survives a pre-visible quota failure
 
 - **GIVEN** an unpinned client request contains history that is not provably account-neutral
@@ -27,6 +32,14 @@ single-account ownership, or after downstream-visible output.
 - **GIVEN** a request depends on a previous response, turn state, uploaded file, or single-account policy
 - **WHEN** its required account fails
 - **THEN** the service does not use dispatch-owner release to move the request to another account
+
+#### Scenario: Dispatch-created hard affinity releases after quota
+
+- **GIVEN** an unpinned nonportable request creates hard affinity while dispatching to one account
+- **AND** that account returns a quota failure before visible output
+- **WHEN** the hard row is still owned by the failed account
+- **THEN** the service atomically releases that row before replacement selection
+- **AND** it does not delete a row concurrently rebound to another account
 
 ### Requirement: Verified full resend may replace a usage-limited durable owner
 
