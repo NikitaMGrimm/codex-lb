@@ -167,6 +167,7 @@ def project_responses_input_for_account_neutral_fresh_replay(
     *,
     stored_count: int,
     preserve_developer_message_ids: bool = False,
+    omit_nonportable_additional_tools: bool = False,
 ) -> AccountNeutralReplayProjection | None:
     """Remove known response-owned bookkeeping after durable prefix proof.
 
@@ -186,6 +187,7 @@ def project_responses_input_for_account_neutral_fresh_replay(
         projected_item = _project_account_neutral_replay_item(
             item,
             preserve_developer_message_ids=preserve_developer_message_ids,
+            omit_nonportable_additional_tools=omit_nonportable_additional_tools,
         )
         if projected_item is not None:
             projected_items.append(projected_item)
@@ -228,6 +230,7 @@ def _project_account_neutral_replay_item(
     item: JsonValue,
     *,
     preserve_developer_message_ids: bool,
+    omit_nonportable_additional_tools: bool,
 ) -> JsonValue | None:
     if not isinstance(item, dict):
         return item
@@ -241,6 +244,12 @@ def _project_account_neutral_replay_item(
         return item
     if item_type is not None and not isinstance(item_type, str):
         return item
+    if (
+        omit_nonportable_additional_tools
+        and item_type == "additional_tools"
+        and not _is_canonical_lite_tool_bundle(item)
+    ):
+        return None
     if item_type == "reasoning" or (
         item_type in _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES and item.get("status") == "completed"
     ):

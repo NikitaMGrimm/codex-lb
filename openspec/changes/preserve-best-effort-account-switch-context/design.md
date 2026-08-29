@@ -37,7 +37,10 @@ broad task binding that later turns consult.
 - Rebuild the fallback envelope from safe fields, copying explicitly supplied
   top-level tool controls. For Responses-Lite, prefer the verified
   `additional_tools` plus adjacent developer message, then the bundle alone.
-  The canonical account-neutral classifier still validates the final body.
+  In the deliberately lossy sanitized-history stage, omit a nonportable
+  `additional_tools` bundle rather than allowing it to reject otherwise
+  portable history. The canonical account-neutral classifier still validates
+  the final body.
 - Keep the server-namespaced replay lane. Once that lane completes, compare and
   set the original durable row using its owner instance, owner epoch, and both
   captured anchors; on success, bind it to the replacement account and clear

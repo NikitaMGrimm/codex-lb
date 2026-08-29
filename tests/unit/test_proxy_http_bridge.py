@@ -24949,7 +24949,10 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fallback_mode", ["sanitized_history", "latest_message"])
+@pytest.mark.parametrize(
+    "fallback_mode",
+    ["sanitized_history", "sanitized_history_without_lite_tools", "latest_message"],
+)
 async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_selection_failure(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -24983,6 +24986,12 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
             "content": [{"type": "output_text", "text": "old answer"}],
         },
     ]
+    if fallback_mode == "sanitized_history_without_lite_tools":
+        historical_items[0] = {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "mcp", "name": "codex_app__read_thread"}],
+        }
     if fallback_mode == "latest_message":
         historical_items.append(
             {
@@ -24997,6 +25006,7 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
             "previous_response_id": "resp_old_owner",
             "client_metadata": {"future_account_hint": "owner-scoped"},
             "experimental_request_owner": "acc-owner",
+            "tools": [{"type": "custom", "name": "exec"}],
             "input": [
                 *historical_items,
                 {"role": "user", "content": "continue and report progress"},
@@ -25123,6 +25133,12 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
         assert replay_payload["input"][3]["role"] == "assistant"
         assert "id" not in replay_payload["input"][3]
         assert "reconstructed from client-supplied history" in replay_payload["instructions"]
+    elif fallback_mode == "sanitized_history_without_lite_tools":
+        assert len(replay_payload["input"]) == 3
+        assert replay_payload["input"][0] == {"role": "user", "content": "old question"}
+        assert replay_payload["input"][1]["role"] == "assistant"
+        assert "id" not in replay_payload["input"][1]
+        assert "reconstructed from client-supplied history" in replay_payload["instructions"]
     else:
         assert replay_payload["input"] == [
             historical_items[0],
@@ -25130,8 +25146,10 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
             {"role": "user", "content": "continue and report progress"},
         ]
         assert "Only the newest portable user message is available" in replay_payload["instructions"]
-    assert replay_payload["input"][0]["type"] == "additional_tools"
-    assert replay_payload["input"][0]["tools"] == [{"type": "custom", "name": "exec"}]
+    if fallback_mode != "sanitized_history_without_lite_tools":
+        assert replay_payload["input"][0]["type"] == "additional_tools"
+        assert replay_payload["input"][0]["tools"] == [{"type": "custom", "name": "exec"}]
+    assert replay_payload["tools"] == [{"type": "custom", "name": "exec"}]
     persist_rebind.assert_awaited_once_with(
         session_id="durable-best-effort-owner",
         api_key_id=None,
@@ -25144,7 +25162,7 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
     )
     assert "event=best_effort_replay_rejected" in caplog.text
     assert "replay_stage=current_input" in caplog.text
-    expected_stage = "sanitized_history" if fallback_mode == "sanitized_history" else "latest_message_with_lite_tools"
+    expected_stage = "latest_message_with_lite_tools" if fallback_mode == "latest_message" else "sanitized_history"
     assert f"replay_stage={expected_stage}" in caplog.text
     assert "event=best_effort_rebind" in caplog.text
     assert "outcome=success" in caplog.text

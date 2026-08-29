@@ -18,6 +18,11 @@ instruction, recovery MUST retain that portable prefix. Account-scoped files,
 images, response IDs, encrypted reasoning, and unknown metadata MUST NOT move
 to the replacement account.
 
+During the deliberately lossy sanitized-history stage, a nonportable
+`additional_tools` bundle MUST be omitted instead of rejecting otherwise
+portable conversation history. Explicitly supplied account-neutral top-level
+tools and the remaining portable history MUST be retained.
+
 After a fresh recovery response completes on a replacement account, the proxy
 MUST attempt to rebind the original locally owned durable logical task to that
 account. The write MUST compare the captured owner epoch and both captured
@@ -42,6 +47,14 @@ concurrently advanced row unchanged.
 - **WHEN** recovery retains only the newest portable user message
 - **THEN** the fresh request also retains that tool bundle and developer policy
 - **AND** it omits the account-scoped history
+
+#### Scenario: A nonportable tool bundle does not discard portable history
+
+- **GIVEN** client-supplied history is portable except for an `additional_tools`
+  bundle that cannot move between accounts
+- **WHEN** owner-loss recovery evaluates the sanitized-history stage
+- **THEN** it omits that bundle and retains the remaining portable conversation
+- **AND** it preserves valid top-level tools in the fresh request
 
 #### Scenario: Successful replacement owns later task continuity
 

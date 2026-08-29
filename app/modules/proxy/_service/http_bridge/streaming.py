@@ -2093,6 +2093,7 @@ class _HTTPBridgeStreamingMixin:
                 lossy_projection = project_responses_input_for_account_neutral_fresh_replay(
                     cast(list[JsonValue], payload.input),
                     stored_count=len(payload.input),
+                    omit_nonportable_additional_tools=True,
                 )
                 if lossy_projection is not None:
                     projected_input = lossy_projection.input_items
