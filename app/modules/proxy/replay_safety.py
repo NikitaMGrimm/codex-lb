@@ -22,6 +22,7 @@ _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset(
 )
 _INTERNAL_CHAT_MESSAGE_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
 _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"turn_id"})
+_PORTABLE_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"content_item_kinds", "create_time", "turn_id"})
 _ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
 _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS = {
     "custom": frozenset({"description", "format", "name", "type"}),
@@ -245,10 +246,30 @@ def _project_account_neutral_replay_item(
     ):
         return None
 
-    if "id" not in item:
-        return item
     projected_item = dict(item)
-    projected_item.pop("id")
+    projected_item.pop("id", None)
+    metadata = projected_item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
+    if isinstance(metadata, dict) and set(metadata) <= _PORTABLE_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS:
+        turn_id = metadata.get("turn_id")
+        if _is_nonblank_string(turn_id):
+            projected_item[_INTERNAL_CHAT_MESSAGE_METADATA_FIELD] = {"turn_id": turn_id}
+        else:
+            projected_item.pop(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD, None)
+
+    if item_type in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE and isinstance(projected_item.get("output"), list):
+        output = cast(list[JsonValue], projected_item["output"])
+        portable_output = [
+            part
+            for part in output
+            if not (
+                isinstance(part, dict)
+                and part.get("type") in {"input_text", "text"}
+                and isinstance(part.get("text"), str)
+                and not cast(str, part["text"]).strip()
+            )
+        ]
+        if len(portable_output) != len(output):
+            projected_item["output"] = portable_output or ""
     return projected_item
 
 

@@ -24951,11 +24951,23 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback_mode", ["sanitized_history", "latest_message"])
 async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_selection_failure(
+    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     fallback_mode: str,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    settings = _make_app_settings(http_responses_session_bridge_instance_id="bridge-instance")
     historical_items: list[proxy_service.JsonValue] = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "exec"}],
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "Use the supplied tools."}],
+        },
         {"role": "user", "content": "old question"},
         {
             "type": "reasoning",
@@ -25000,6 +25012,22 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
     )
     creation_calls: list[tuple[proxy_service._HTTPBridgeSessionKey, dict[str, Any]]] = []
     streamed_payloads: list[dict[str, Any]] = []
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-best-effort-owner",
+        canonical_kind="thread_header",
+        canonical_key="01a048c7-382b-73d1-bf70-babf8f9cca71",
+        api_key_scope="__anonymous__",
+        account_id="acc-owner",
+        owner_instance_id="bridge-instance",
+        owner_process_epoch=http_bridge_owner_process_epoch(),
+        owner_epoch=3,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id="resp_old_owner",
+        model="gpt-5.4",
+    )
+    persist_rebind = AsyncMock(return_value=True)
 
     async def fake_get_or_create(
         key: proxy_service._HTTPBridgeSessionKey,
@@ -25039,30 +25067,36 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
             ),
         ),
     )
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
-    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_request_targets",
+        AsyncMock(return_value=durable_lookup),
+    )
+    monkeypatch.setattr(service._durable_bridge, "rebind_session_account", persist_rebind)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-owner"))
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
 
-    chunks = [
-        chunk
-        async for chunk in service._stream_via_http_bridge(
-            payload,
-            headers={"thread-id": "01a048c7-382b-73d1-bf70-babf8f9cca71"},
-            codex_session_affinity=True,
-            propagate_http_errors=True,
-            openai_cache_affinity=True,
-            api_key=None,
-            api_key_reservation=None,
-            suppress_text_done_events=False,
-            idle_ttl_seconds=120.0,
-            codex_idle_ttl_seconds=1800.0,
-            max_sessions=8,
-            queue_limit=4,
-        )
-    ]
+    with caplog.at_level(logging.INFO):
+        chunks = [
+            chunk
+            async for chunk in service._stream_via_http_bridge(
+                payload,
+                headers={"thread-id": "01a048c7-382b-73d1-bf70-babf8f9cca71"},
+                codex_session_affinity=True,
+                propagate_http_errors=True,
+                openai_cache_affinity=True,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                idle_ttl_seconds=120.0,
+                codex_idle_ttl_seconds=1800.0,
+                max_sessions=8,
+                queue_limit=4,
+            )
+        ]
 
     assert chunks == ['data: {"type":"response.completed"}\n\n']
     assert len(creation_calls) == 2
@@ -25076,7 +25110,7 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
     assert replay_kwargs["exclude_account_ids"] == {"acc-owner"}
     replay_payload = streamed_payloads[0]
     assert "previous_response_id" not in replay_payload
-    assert "client_metadata" not in replay_payload
+    assert replay_payload.get("client_metadata", {}).get("future_account_hint") is None
     assert "experimental_request_owner" not in replay_payload
     assert "codex://threads/01a048c7-382b-73d1-bf70-babf8f9cca71" in replay_payload["instructions"]
     assert replay_payload["input"][-1] == {
@@ -25084,14 +25118,36 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
         "content": "continue and report progress",
     }
     if fallback_mode == "sanitized_history":
-        assert len(replay_payload["input"]) == 3
-        assert replay_payload["input"][0] == {"role": "user", "content": "old question"}
-        assert replay_payload["input"][1]["role"] == "assistant"
-        assert "id" not in replay_payload["input"][1]
+        assert len(replay_payload["input"]) == 5
+        assert replay_payload["input"][2] == {"role": "user", "content": "old question"}
+        assert replay_payload["input"][3]["role"] == "assistant"
+        assert "id" not in replay_payload["input"][3]
         assert "reconstructed from client-supplied history" in replay_payload["instructions"]
     else:
-        assert replay_payload["input"] == [{"role": "user", "content": "continue and report progress"}]
+        assert replay_payload["input"] == [
+            historical_items[0],
+            historical_items[1],
+            {"role": "user", "content": "continue and report progress"},
+        ]
         assert "Only the newest portable user message is available" in replay_payload["instructions"]
+    assert replay_payload["input"][0]["type"] == "additional_tools"
+    assert replay_payload["input"][0]["tools"] == [{"type": "custom", "name": "exec"}]
+    persist_rebind.assert_awaited_once_with(
+        session_id="durable-best-effort-owner",
+        api_key_id=None,
+        instance_id="bridge-instance",
+        owner_epoch=3,
+        account_id="acc-next",
+        clear_continuity=True,
+        expected_latest_response_id="resp_old_owner",
+        expected_latest_turn_state=None,
+    )
+    assert "event=best_effort_replay_rejected" in caplog.text
+    assert "replay_stage=current_input" in caplog.text
+    expected_stage = "sanitized_history" if fallback_mode == "sanitized_history" else "latest_message_with_lite_tools"
+    assert f"replay_stage={expected_stage}" in caplog.text
+    assert "event=best_effort_rebind" in caplog.text
+    assert "outcome=success" in caplog.text
 
 
 @pytest.mark.asyncio
