@@ -25088,6 +25088,8 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
     )
     monkeypatch.setattr(service._durable_bridge, "rebind_session_account", persist_rebind)
     monkeypatch.setattr(service._durable_bridge, "rebind_closed_session_account", persist_closed_rebind)
+    session_latest_continuity = AsyncMock(return_value=("resp_closed", "turn_closed"))
+    monkeypatch.setattr(service._durable_bridge, "session_latest_continuity", session_latest_continuity)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-owner"))
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
@@ -25171,9 +25173,13 @@ async def test_stream_via_http_bridge_best_effort_thread_resume_after_owner_sele
             owner_epoch=3,
             expected_account_id="acc-owner",
             account_id="acc-next",
+            expected_latest_response_id="resp_closed",
+            expected_latest_turn_state="turn_closed",
         )
+        session_latest_continuity.assert_awaited_once_with(session_id="durable-best-effort-owner")
     else:
         persist_closed_rebind.assert_not_awaited()
+        session_latest_continuity.assert_not_awaited()
     assert "event=best_effort_replay_rejected" in caplog.text
     assert "replay_stage=current_input" in caplog.text
     expected_stage = "latest_message_with_lite_tools" if fallback_mode == "latest_message" else "sanitized_history"

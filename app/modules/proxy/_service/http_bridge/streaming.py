@@ -2334,12 +2334,20 @@ class _HTTPBridgeStreamingMixin:
             rebind_path = "live"
             if not rebound:
                 try:
+                    current_continuity = await self._durable_bridge.session_latest_continuity(
+                        session_id=best_effort_origin_lookup.session_id
+                    )
+                    if current_continuity is None:
+                        raise RuntimeError("best-effort origin session disappeared before released rebind")
+                    current_response_id, current_turn_state = current_continuity
                     rebound = await self._durable_bridge.rebind_closed_session_account(
                         session_id=best_effort_origin_lookup.session_id,
                         api_key_id=best_effort_origin_key.api_key_id,
                         owner_epoch=best_effort_origin_lookup.owner_epoch,
                         expected_account_id=best_effort_origin_lookup.account_id,
                         account_id=replacement_session.account.id,
+                        expected_latest_response_id=current_response_id,
+                        expected_latest_turn_state=current_turn_state,
                     )
                 except Exception:
                     logger.warning("Failed to persist released best-effort HTTP bridge account rebind", exc_info=True)

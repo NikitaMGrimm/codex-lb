@@ -23,10 +23,26 @@ _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset(
 _INTERNAL_CHAT_MESSAGE_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
 _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"turn_id"})
 _PORTABLE_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"content_item_kinds", "create_time", "turn_id"})
-_ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
+_ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset(
+    {"apply_patch", "custom", "function", "namespace", "shell", "web_search", "web_search_preview"}
+)
 _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS = {
+    "apply_patch": frozenset({"allowed_callers", "type"}),
     "custom": frozenset({"description", "format", "name", "type"}),
-    "function": frozenset({"description", "name", "parameters", "strict", "type"}),
+    "function": frozenset(
+        {
+            "allowed_callers",
+            "defer_loading",
+            "description",
+            "name",
+            "output_schema",
+            "parameters",
+            "strict",
+            "type",
+        }
+    ),
+    "namespace": frozenset({"description", "name", "tools", "type"}),
+    "shell": frozenset({"allowed_callers", "environment", "type"}),
     "web_search": frozenset({"filters", "search_context_size", "type", "user_location"}),
     "web_search_preview": frozenset({"filters", "search_context_size", "type", "user_location"}),
 }
@@ -292,18 +308,37 @@ def _project_portable_lite_tool_bundle(item: Mapping[str, JsonValue]) -> JsonVal
     for tool in tools:
         if not isinstance(tool, dict):
             continue
-        tool_type = tool.get("type")
-        if not isinstance(tool_type, str):
-            continue
-        allowed_fields = _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS.get(tool_type)
-        if allowed_fields is None:
-            continue
-        projected_tool = {key: value for key, value in tool.items() if key in allowed_fields}
-        if _tool_declaration_is_account_neutral(projected_tool):
+        projected_tool = _project_account_neutral_tool_declaration(tool)
+        if projected_tool is not None:
             projected_tools.append(projected_tool)
     if not projected_tools:
         return None
     return {"type": "additional_tools", "role": "developer", "tools": projected_tools}
+
+
+def _project_account_neutral_tool_declaration(
+    tool: Mapping[str, JsonValue],
+) -> dict[str, JsonValue] | None:
+    tool_type = tool.get("type")
+    if not isinstance(tool_type, str):
+        return None
+    allowed_fields = _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS.get(tool_type)
+    if allowed_fields is None:
+        return None
+    projected_tool: dict[str, JsonValue] = {key: value for key, value in tool.items() if key in allowed_fields}
+    if tool_type == "namespace":
+        nested_tools = projected_tool.get("tools")
+        if not isinstance(nested_tools, list):
+            return None
+        projected_nested_tools: list[JsonValue] = [
+            projected
+            for nested in nested_tools
+            if isinstance(nested, dict) and (projected := _project_account_neutral_tool_declaration(nested)) is not None
+        ]
+        if not projected_nested_tools:
+            return None
+        projected_tool["tools"] = projected_nested_tools
+    return projected_tool if _tool_declaration_is_account_neutral(projected_tool) else None
 
 
 def responses_input_items_are_self_contained_fresh_replay(input_items: list[JsonValue]) -> bool:
@@ -874,9 +909,33 @@ def _tool_declaration_is_account_neutral(tool: Mapping[str, JsonValue]) -> bool:
         return False
     if tool.get("description") is not None and not isinstance(tool.get("description"), str):
         return False
+    allowed_callers = tool.get("allowed_callers")
+    if allowed_callers is not None and not (
+        isinstance(allowed_callers, list) and all(_is_nonblank_string(caller) for caller in allowed_callers)
+    ):
+        return False
+    if tool_type == "apply_patch":
+        return True
+    if tool_type == "shell":
+        environment = tool.get("environment")
+        return environment is None or isinstance(environment, dict)
+    if tool_type == "namespace":
+        nested_tools = tool.get("tools")
+        return (
+            _is_nonblank_string(tool.get("name"))
+            and isinstance(nested_tools, list)
+            and bool(nested_tools)
+            and all(
+                isinstance(nested_tool, dict) and _tool_declaration_is_account_neutral(nested_tool)
+                for nested_tool in nested_tools
+            )
+        )
     if tool_type == "function":
-        return (tool.get("parameters") is None or isinstance(tool.get("parameters"), dict)) and (
-            tool.get("strict") is None or isinstance(tool.get("strict"), bool)
+        return (
+            (tool.get("parameters") is None or isinstance(tool.get("parameters"), dict))
+            and (tool.get("output_schema") is None or isinstance(tool.get("output_schema"), dict))
+            and (tool.get("strict") is None or isinstance(tool.get("strict"), bool))
+            and (tool.get("defer_loading") is None or isinstance(tool.get("defer_loading"), bool))
         )
     if tool_type == "custom":
         return _custom_tool_format_is_account_neutral(tool.get("format"))

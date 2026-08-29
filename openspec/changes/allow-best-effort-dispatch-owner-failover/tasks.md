@@ -13,8 +13,9 @@
 - [x] Resume account-neutral current input without an unavailable owner's stale anchor.
 - [x] Retry that current input once after an eventless owner-bridge disconnect.
 - [x] Preserve projected Codex thread history or fall back to a deeplink plus the newest portable message.
-- [x] Preserve portable Desktop tools from mixed bundles and rebind released task rows.
+- [x] Preserve nested namespace, shell, and apply-patch Desktop tools from mixed bundles.
+- [x] Rebind released task rows under exact retained-anchor fences and clear stale continuity.
 
 ## 3. Verification
 
-- [x] Run the focused proxy regression, Ruff, and `git diff --check`.
+- [x] Run the focused proxy regression, Ruff, type checking, strict OpenSpec change validation, and `git diff --check`.

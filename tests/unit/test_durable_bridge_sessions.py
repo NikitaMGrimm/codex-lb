@@ -1608,7 +1608,7 @@ async def test_durable_bridge_account_change_advances_epoch_to_fence_stale_relea
 
 
 @pytest.mark.asyncio
-async def test_durable_bridge_rebinds_only_released_anchor_free_session(
+async def test_durable_bridge_rebinds_released_session_with_exact_retained_anchors(
     coordinator: DurableBridgeSessionCoordinator,
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:
@@ -1622,8 +1622,8 @@ async def test_durable_bridge_rebinds_only_released_anchor_free_session(
         account_id="acc-owner",
         model="gpt-5.4",
         service_tier=None,
-        latest_turn_state=None,
-        latest_response_id=None,
+        latest_turn_state="http_turn_owner",
+        latest_response_id="resp_owner",
         allow_takeover=True,
     )
     await coordinator.release_live_session(
@@ -1639,6 +1639,17 @@ async def test_durable_bridge_rebinds_only_released_anchor_free_session(
         owner_epoch=claimed.owner_epoch,
         expected_account_id="acc-other",
         account_id="acc-next",
+        expected_latest_response_id="resp_owner",
+        expected_latest_turn_state="http_turn_owner",
+    )
+    wrong_anchor = await coordinator.rebind_closed_session_account(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        owner_epoch=claimed.owner_epoch,
+        expected_account_id="acc-owner",
+        account_id="acc-next",
+        expected_latest_response_id="resp_stale",
+        expected_latest_turn_state="http_turn_owner",
     )
     rebound = await coordinator.rebind_closed_session_account(
         session_id=claimed.session_id,
@@ -1646,15 +1657,21 @@ async def test_durable_bridge_rebinds_only_released_anchor_free_session(
         owner_epoch=claimed.owner_epoch,
         expected_account_id="acc-owner",
         account_id="acc-next",
+        expected_latest_response_id="resp_owner",
+        expected_latest_turn_state="http_turn_owner",
     )
 
     async with async_session_factory() as session:
-        account_id = await session.scalar(
-            select(HttpBridgeSessionRecord.account_id).where(HttpBridgeSessionRecord.id == claimed.session_id)
+        record = await session.scalar(
+            select(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id == claimed.session_id)
         )
     assert wrong_owner is False
+    assert wrong_anchor is False
     assert rebound is True
-    assert account_id == "acc-next"
+    assert record is not None
+    assert record.account_id == "acc-next"
+    assert record.latest_response_id is None
+    assert record.latest_turn_state is None
 
 
 @pytest.mark.asyncio

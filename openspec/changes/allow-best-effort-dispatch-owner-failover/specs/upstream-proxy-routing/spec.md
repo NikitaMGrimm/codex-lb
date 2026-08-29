@@ -81,8 +81,9 @@ account-scoped or unsupported. After a replacement account is selected, the
 service MUST persist that account on the original durable task row before
 streaming the replacement response. If the failed transport already released
 the row, that update MUST require the original owner epoch, original account,
-closed state, and empty continuity anchors so a concurrent successor cannot be
-overwritten.
+closed state, and exact current continuity anchors; it MUST clear those anchors
+on success so a concurrent successor cannot be overwritten and stale owner
+state cannot fence the replacement.
 
 #### Scenario: Plain resume continues without old context
 
@@ -118,9 +119,9 @@ overwritten.
 #### Scenario: Released task row follows the replacement account
 
 - **GIVEN** the failed owner bridge released its durable task row before best-effort replay selected a replacement
-- **AND** the row still has the original owner epoch and account with no continuity anchors
+- **AND** the row still has the original owner epoch and account with the continuity anchors observed for the rebind
 - **WHEN** the replacement account is selected
-- **THEN** the service updates the closed row to that replacement account before response streaming
+- **THEN** the service updates the closed row to that replacement account and clears its old continuity anchors before response streaming
 - **AND** a claimed, re-anchored, or otherwise concurrently changed row is fenced from that update
 
 #### Scenario: Codex thread falls back to its newest portable message

@@ -416,6 +416,8 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         expected_account_id: str | None,
         account_id: str,
+        expected_latest_response_id: str | None,
+        expected_latest_turn_state: str | None,
     ) -> bool:
         del api_key_id
         async with self._session() as session:
@@ -424,6 +426,8 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
                 expected_account_id=expected_account_id,
                 account_id=account_id,
+                expected_latest_response_id=expected_latest_response_id,
+                expected_latest_turn_state=expected_latest_turn_state,
             )
 
     async def session_latest_continuity(self, *, session_id: str) -> tuple[str | None, str | None] | None:

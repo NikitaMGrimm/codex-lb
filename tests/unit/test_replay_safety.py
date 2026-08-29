@@ -357,6 +357,27 @@ def test_lossy_replay_projection_retains_portable_tools_from_mixed_bundle() -> N
             "tools": [
                 {"type": "mcp", "name": "codex_app__read_thread"},
                 {"type": "custom", "name": "exec", "defer_loading": True},
+                {
+                    "type": "namespace",
+                    "name": "workspace",
+                    "description": "Local workspace tools.",
+                    "tools": [
+                        {"type": "mcp", "name": "account_owned_tool"},
+                        {
+                            "type": "function",
+                            "name": "inspect",
+                            "parameters": {"type": "object"},
+                            "output_schema": {"type": "object"},
+                            "defer_loading": True,
+                        },
+                        {
+                            "type": "shell",
+                            "allowed_callers": ["direct", "code_mode"],
+                            "environment": {"type": "local"},
+                        },
+                        {"type": "apply_patch", "allowed_callers": ["direct"]},
+                    ],
+                },
             ],
         },
         {
@@ -390,7 +411,29 @@ def test_lossy_replay_projection_retains_portable_tools_from_mixed_bundle() -> N
         {
             "type": "additional_tools",
             "role": "developer",
-            "tools": [{"type": "custom", "name": "exec"}],
+            "tools": [
+                {"type": "custom", "name": "exec"},
+                {
+                    "type": "namespace",
+                    "name": "workspace",
+                    "description": "Local workspace tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "inspect",
+                            "parameters": {"type": "object"},
+                            "output_schema": {"type": "object"},
+                            "defer_loading": True,
+                        },
+                        {
+                            "type": "shell",
+                            "allowed_callers": ["direct", "code_mode"],
+                            "environment": {"type": "local"},
+                        },
+                        {"type": "apply_patch", "allowed_callers": ["direct"]},
+                    ],
+                },
+            ],
         },
         *input_items[1:],
     ]
