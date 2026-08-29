@@ -98,6 +98,15 @@ closed state, and exact current continuity anchors; it MUST clear those anchors
 on success so a concurrent successor cannot be overwritten and stale owner
 state cannot fence the replacement.
 
+If an already-running HTTP bridge receives a terminal account quota failure
+before any response event becomes visible, the service MAY consume the same
+prepared account-neutral projection once, exclude the failed account, clear
+the failed owner's response and turn-state anchors, and retry on a replacement
+account. This exception MUST require exactly one pending request, MUST preserve
+the durable operation fence across the account rebind, and MUST NOT apply to
+account-scoped files, partial visible responses, ambiguous disconnects, or a
+second replacement attempt.
+
 #### Scenario: Plain resume continues without old context
 
 - **GIVEN** a resume contains a stale owner-bound previous-response anchor
@@ -152,3 +161,12 @@ state cannot fence the replacement.
 - **WHEN** another account is eligible
 - **THEN** the service removes the stale anchor, excludes the failed owner, and replays the current message once
 - **AND** a failure of that replacement does not trigger another server-side replay
+
+#### Scenario: Running owner reaches quota before visible output
+
+- **GIVEN** an owner-bound Codex task has one request pending on its HTTP bridge
+- **AND** its client payload has a prepared account-neutral best-effort projection with no account-scoped file
+- **WHEN** the owner returns a terminal quota error before any response event is visible
+- **THEN** the service marks the failed durable attempt, clears the owner anchors, and retries the projection on another eligible account
+- **AND** it rebinds the task row and operation fence to that replacement account
+- **AND** it does not retry this request a second time

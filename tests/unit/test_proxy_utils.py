@@ -13332,6 +13332,116 @@ async def test_http_bridge_model_rejection_releases_old_account_create_lease_bef
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_owner_quota_uses_prepared_best_effort_replay(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_best_effort_quota_owner")
+    retry_precreated = AsyncMock(return_value=True)
+    handle_health = AsyncMock()
+    update_operation = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_handle_or_defer_precreated_stream_health", handle_health)
+    monkeypatch.setattr(service._durable_bridge, "update_operation", update_operation)
+
+    original_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "previous_response_id": "resp_best_effort_quota_owner",
+            "input": [
+                {"type": "reasoning", "id": "rs_owner", "encrypted_content": "owner-bound"},
+                {"role": "user", "content": "continue the task"},
+            ],
+        },
+        separators=(",", ":"),
+    )
+    replay_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "Best-effort account switch. Original Codex task: codex://threads/thread-1.",
+            "input": [{"role": "user", "content": "continue the task"}],
+        },
+        separators=(",", ":"),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_best_effort_quota",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        request_text=original_text,
+        previous_response_id="resp_best_effort_quota_owner",
+        preferred_account_id=account.id,
+        hard_continuity_anchor=True,
+        best_effort_quota_replay_text=replay_text,
+        best_effort_quota_replay_stage="latest_message",
+        operation_id="op_best_effort_quota",
+        operation_registered=True,
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("thread_header", "thread-1", None),
+        headers={"x-codex-turn-state": "turn_owner"},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=account,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        upstream_turn_state="turn_owner",
+        downstream_turn_state="turn_owner",
+        durable_session_id="durable-best-effort-quota",
+        durable_owner_epoch=7,
+    )
+    cast(Any, session.upstream).archive_received = MagicMock()
+    quota_error = {
+        "type": "error",
+        "status": 429,
+        "error": {
+            "type": "rate_limit_error",
+            "code": "usage_limit_reached",
+            "message": "The usage limit has been reached",
+        },
+    }
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(quota_error, separators=(",", ":")),
+    )
+
+    retry_precreated.assert_awaited_once_with(session)
+    handle_health.assert_awaited_once()
+    update_operation.assert_awaited_once_with(
+        operation_id="op_best_effort_quota",
+        session_id="durable-best-effort-quota",
+        instance_id=proxy_service.get_settings().http_responses_session_bridge_instance_id,
+        owner_epoch=7,
+        state="failed",
+        response_id=None,
+    )
+    assert request_state.request_text == replay_text
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.hard_continuity_anchor is False
+    assert request_state.best_effort_quota_replay_consumed is True
+    assert request_state.operation_rebind_required is True
+    assert request_state.excluded_account_ids == {account.id}
+    assert request_state.affinity_policy.reallocate_sticky is True
+    assert session.upstream_turn_state is None
+    assert session.downstream_turn_state is None
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_does_not_replay_id_bearing_account_model_failure(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_bridge_id_bearing_model_failure")
@@ -47980,6 +48090,56 @@ async def test_retry_http_bridge_precreated_request_keeps_operation_id_on_owner(
         "input": "portable user input",
         "client_metadata": {"codex_lb_operation_id": "op_bridge_owner"},
     }
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_allows_rebound_operation_to_move(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_bridge_operation_rebind")
+    request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"portable user input"}'
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_operation_rebind",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        transport="http",
+        request_text=request_text,
+        archive_request_id="archive_bridge_operation_rebind",
+        operation_id="op_bridge_rebind",
+        operation_rebind_required=True,
+    )
+    upstream = AsyncMock()
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("thread_header", "thread-operation-rebind", None),
+        headers={"x-codex-turn-state": "turn_operation_owner"},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.6-sol",
+        account=account,
+        upstream=upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+        upstream_turn_state="turn_operation_owner",
+        downstream_turn_state="turn_operation_owner",
+    )
+    reconnect = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+
+    reconnect.assert_awaited_once_with(session, request_state=request_state)
+    assert request_state.excluded_account_ids == {account.id}
+    assert request_state.preferred_account_id is None
+    assert session.upstream_turn_state is None
+    assert session.downstream_turn_state is None
+    upstream.send_text.assert_awaited_once()
 
 
 @pytest.mark.asyncio

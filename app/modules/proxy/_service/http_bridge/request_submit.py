@@ -3421,9 +3421,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 # codex_lb_operation_id after selection. Keep that operation
                 # identity on its owner unless a dedicated rebind path has
                 # already replaced the operation ID.
-                candidate_portable = request_state.operation_id is None and (
-                    _websocket_request_text_is_account_neutral_fresh_replay(candidate_text)
-                )
+                candidate_portable = (
+                    request_state.operation_id is None or request_state.operation_rebind_required
+                ) and _websocket_request_text_is_account_neutral_fresh_replay(candidate_text)
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None or request_text != candidate_text:
                     return False

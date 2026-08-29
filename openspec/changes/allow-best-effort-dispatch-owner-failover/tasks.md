@@ -16,6 +16,7 @@
 - [x] Preserve nested namespace, shell, and apply-patch Desktop tools from mixed bundles.
 - [x] Rebind released task rows under exact retained-anchor fences and clear stale continuity.
 - [x] CAS-release dispatch-created hard affinity after a pre-visible quota failure.
+- [x] Reuse the prepared best-effort projection when a running bridge owner reaches quota before visible output.
 
 ## 3. Verification
 

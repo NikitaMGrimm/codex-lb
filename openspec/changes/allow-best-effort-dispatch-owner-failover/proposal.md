@@ -19,6 +19,8 @@ the selected account fails before any output becomes visible.
   portable user message when that projection is still unsafe.
 - Preserve portable Desktop tool declarations from a mixed Responses-Lite tool
   bundle and rebind the durable task row to the replacement account.
+- Apply that prepared projection once when an already-running bridge owner
+  returns a terminal quota error before visible output.
 - Keep previous-response, turn-state, uploaded-file, and single-account
   ownership fail-closed.
 - Reuse the original client payload without adding configuration or storage.

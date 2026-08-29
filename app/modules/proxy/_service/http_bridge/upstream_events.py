@@ -102,6 +102,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _pop_terminal_websocket_request_state,
     _prepare_websocket_request_state_for_account_switch,
     _previous_response_id_from_not_found_message,
+    _refresh_websocket_request_input_fingerprint_from_text,
     _release_websocket_response_create_gate,
     _response_output_item_done_tool_call,
     _rewrite_websocket_continuity_corruption_event,
@@ -297,14 +298,16 @@ async def _update_http_bridge_operation_state(
     *,
     state: str,
     response_id: str | None = None,
-) -> None:
+) -> bool:
     """Persist operation outcome without allowing journaling to break streaming."""
     operation_id = getattr(request_state, "operation_id", None)
     session_id = getattr(session, "durable_session_id", None)
     owner_epoch = getattr(session, "durable_owner_epoch", None)
     update_operation = getattr(getattr(service, "_durable_bridge", None), "update_operation", None)
-    if not operation_id or session_id is None or owner_epoch is None or not callable(update_operation):
-        return
+    if not operation_id:
+        return True
+    if session_id is None or owner_epoch is None or not callable(update_operation):
+        return False
     try:
         marked = await update_operation(
             operation_id=operation_id,
@@ -322,6 +325,7 @@ async def _update_http_bridge_operation_state(
                 operation_id,
                 state,
             )
+        return bool(marked)
     except Exception:
         logger.warning(
             "Failed to persist HTTP bridge operation outcome operation_id=%s state=%s",
@@ -329,6 +333,7 @@ async def _update_http_bridge_operation_state(
             state,
             exc_info=True,
         )
+        return False
 
 
 def _http_bridge_operation_state_for_event(event_type: str | None) -> str | None:
@@ -2749,6 +2754,54 @@ class _HTTPBridgeUpstreamEventsMixin:
                 and status_request_state.preferred_account_id is not None
             ):
                 safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
+                best_effort_request_text = status_request_state.best_effort_quota_replay_text
+                use_best_effort_replay = bool(
+                    safe_request_text is None
+                    and isinstance(best_effort_request_text, str)
+                    and not status_request_state.best_effort_quota_replay_consumed
+                    and not status_request_state.file_required_preferred_account
+                    and status_request_state.response_event_count == 0
+                    and not status_request_state.downstream_visible
+                    and status_request_state.replay_count == 0
+                    and not has_other_pending_requests
+                )
+                if use_best_effort_replay:
+                    use_best_effort_replay = await _update_http_bridge_operation_state(
+                        self,
+                        session,
+                        status_request_state,
+                        state="failed",
+                    )
+                if use_best_effort_replay:
+                    assert isinstance(best_effort_request_text, str)
+                    status_request_state.best_effort_quota_replay_consumed = True
+                    status_request_state.request_text = best_effort_request_text
+                    status_request_state.previous_response_id = None
+                    status_request_state.preferred_account_id = None
+                    status_request_state.replay_required_account_id = None
+                    status_request_state.proxy_injected_previous_response_id = False
+                    status_request_state.hard_continuity_anchor = False
+                    status_request_state.fresh_upstream_request_text = None
+                    status_request_state.fresh_upstream_request_is_retry_safe = False
+                    status_request_state.responses_lite_model = (
+                        status_request_state.fresh_upstream_request_responses_lite_model
+                    )
+                    status_request_state.operation_rebind_required = status_request_state.operation_id is not None
+                    _refresh_websocket_request_input_fingerprint_from_text(status_request_state)
+                    safe_request_text = best_effort_request_text
+                    _log_http_bridge_event(
+                        "owner_quota_best_effort_replay",
+                        session.key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        detail=(
+                            "outcome=retry_without_owner_anchor, replay_stage="
+                            f"{status_request_state.best_effort_quota_replay_stage or 'unknown'}"
+                        ),
+                        cache_key_family=session.key.affinity_kind,
+                        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                        owner_check_applied=True,
+                    )
                 if safe_request_text is not None:
                     previous_upstream_turn_state = session.upstream_turn_state
                     previous_downstream_turn_state = session.downstream_turn_state

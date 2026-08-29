@@ -452,6 +452,10 @@ def _prepare_websocket_request_state_for_account_switch(*args: Any, **kwargs: An
     return _service_global("_prepare_websocket_request_state_for_account_switch")(*args, **kwargs)
 
 
+def _refresh_websocket_request_input_fingerprint_from_text(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_refresh_websocket_request_input_fingerprint_from_text")(*args, **kwargs)
+
+
 def _websocket_request_text_is_account_neutral_fresh_replay(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_websocket_request_text_is_account_neutral_fresh_replay")(*args, **kwargs)
 

@@ -1065,6 +1065,13 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Prepared while the complete client payload is still available. A
+    # terminal owner quota error may consume this once before any response
+    # event becomes visible, preserving the largest account-neutral history
+    # projection selected by the HTTP bridge's existing best-effort policy.
+    best_effort_quota_replay_text: str | None = None
+    best_effort_quota_replay_stage: str | None = None
+    best_effort_quota_replay_consumed: bool = False
     # Set only on the internally constructed one-shot request that replaces an
     # explicitly rejected stale anchor with a verified full-history payload.
     # It may bypass an older hard-key retry circuit without deleting that

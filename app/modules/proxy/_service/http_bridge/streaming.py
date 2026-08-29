@@ -3227,6 +3227,30 @@ class _HTTPBridgeStreamingMixin:
                 initial_handoff_session,
                 request_scope_id=initial_handoff_scope_id,
             )
+        request_state.file_required_preferred_account = file_required_preferred_account
+        if (
+            request_state.previous_response_id is not None
+            and request_state.preferred_account_id is not None
+            and not file_required_preferred_account
+            and current_input_allows_account_neutral_replay()
+        ):
+            best_effort_payload = durable_full_resend_fresh_payload
+            if best_effort_payload is not None:
+                prepared_replay_state, prepared_replay_text = self._prepare_http_bridge_request(
+                    best_effort_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    request_id=request_id,
+                    client_ip=client_ip,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    preserve_responses_lite_client_metadata=bridge_uses_responses_lite,
+                )
+                request_state.best_effort_quota_replay_text = prepared_replay_text
+                request_state.best_effort_quota_replay_stage = best_effort_replay_stage
+                request_state.fresh_upstream_request_responses_lite_model = (
+                    prepared_replay_state.responses_lite_model
+                )
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
             request_state=request_state,
@@ -3236,7 +3260,6 @@ class _HTTPBridgeStreamingMixin:
             downstream_turn_state=downstream_turn_state,
             request_deadline=request_deadline,
         )
-        request_state.file_required_preferred_account = file_required_preferred_account
         request_state.bridge_soft_capacity_reroute_allowed = (
             bridge_session_key.strength == "soft"
             and request_state.previous_response_id is None
