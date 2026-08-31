@@ -327,6 +327,12 @@ async def run_unbound_selection_path(
                     selected_snapshot.status = result.account.status
                     selected_snapshot.deactivation_reason = result.account.deactivation_reason
                     selected_snapshot.reset_at = selected_reset_at
+                    if probe_reservation is None:
+                        # The routing cursor is a local fairness hint, not part
+                        # of the durable admission transaction. Publish it
+                        # before persistence releases the lock so concurrent
+                        # round-robin selections cannot reuse this turn.
+                        owner._record_account_selection_locked(selected.id)
             elif result.account is None:
                 error_message = result.error_message
                 selection_error_code = result.error_code or selection_error_code
@@ -498,9 +504,6 @@ async def run_unbound_selection_path(
                 await asyncio.sleep(0)
                 continue
 
-        if selected_snapshot is not None and probe_reservation is None:
-            async with owner._runtime_lock:
-                owner._record_account_selection_locked(selected_snapshot.id)
         break
 
     return UnboundSelectionOutcome(

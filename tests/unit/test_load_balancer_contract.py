@@ -1644,5 +1644,9 @@ async def test_public_selection_bounds_continuous_input_generation_changes(
     assert load_spy.await_count == 4
     assert release_spy.await_count == 4
     assert sticky_repo.account_id is None
-    assert balancer._runtime[account.id].last_selected_at == original_last_selected_at
+    # The cursor is replica-local fairness state, so each locally admitted
+    # attempt consumes a turn even when a newer policy snapshot rejects it.
+    last_selected_at = balancer._runtime[account.id].last_selected_at
+    assert last_selected_at is not None
+    assert last_selected_at > original_last_selected_at
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)

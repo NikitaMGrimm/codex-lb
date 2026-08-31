@@ -857,11 +857,17 @@ async def run_sticky_selection_path(
                             selected.id,
                             kind=lease_kind,
                             estimated_tokens=estimated_lease_tokens,
-                            # Keep the reservation token intact until
-                            # persistence commits the recovery admission.
+                            # Record the ordinary selection exactly once below;
+                            # a recovery probe keeps its provisional token until
+                            # persistence commits the admission.
                             record_selection=False,
                             api_key_id=api_key_id,
                         )
+                    if not selected_reserved_probe:
+                        # The cursor is a local fairness hint. Publish it while
+                        # the lock is held so a concurrent new sticky session
+                        # cannot select from the same round-robin snapshot.
+                        owner._record_account_selection_locked(selected.id)
 
             if not probe_reservation_invalidated:
                 reserved_probe_admitted = selection_admitted and selected_reserved_probe
@@ -879,10 +885,8 @@ async def run_sticky_selection_path(
                         owner._sync_runtime_state(
                             account,
                             state,
-                            # A selected probe remains provisional through DB
-                            # persistence. Its reservation is committed below;
-                            # advancing last_selected_at here would make later
-                            # admission failures impossible to roll back.
+                            # Ordinary selections were recorded above; a probe
+                            # remains provisional until its reservation commits.
                             selected=False,
                         )
                     selected_states.append(state)
@@ -1194,9 +1198,6 @@ async def run_sticky_selection_path(
                     await owner.release_account_lease(selected_lease)
                     selected_lease = None
                     raise
-        if selected_snapshot is not None and not reserved_probe_admitted:
-            async with owner._runtime_lock:
-                owner._record_account_selection_locked(selected_snapshot.id)
         break
 
     return StickySelectionOutcome(
