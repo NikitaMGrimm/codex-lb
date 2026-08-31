@@ -13,6 +13,7 @@ from app.core.balancer import (
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
+    routing_eligible_states,
 )
 from app.db.models import Account, AccountStatus
 from app.modules.proxy._load_balancer.sticky_selection import (
@@ -22,7 +23,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _account_cap_error_message,
     _clone_account,
     _filter_recovery_probe_candidates,
-    _filter_states_for_account_caps,
+    _filter_states_for_usage_limit_and_account_caps,
     _probing_result_requires_recovery_reservation,
     _select_account_preferring_budget_safe,
 )
@@ -72,7 +73,8 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     concurrency_caps: AccountConcurrencyCaps
     redact_sensitive_details: bool
     selection_inputs: SelectionInputsT
-    reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
+    selection_inputs_generation: int
+    reload_inputs: Callable[[], Awaitable[tuple[SelectionInputsT, int]]]
     record_account_cap_rejection: AccountCapRejectionCallback
     allow_usage_exhaustion_error: bool = True
     api_key_id: str | None = None
@@ -96,6 +98,7 @@ async def run_unbound_selection_path(
     request: UnboundSelectionRequest[SelectionInputsT],
 ) -> UnboundSelectionOutcome[SelectionInputsT]:
     selection_inputs = request.selection_inputs
+    selection_inputs_generation = request.selection_inputs_generation
     prefer_earlier_reset_accounts = request.prefer_earlier_reset_accounts
     prefer_earlier_reset_window = request.prefer_earlier_reset_window
     routing_strategy = request.routing_strategy
@@ -160,20 +163,30 @@ async def run_unbound_selection_path(
                     now=datetime.now(timezone.utc),
                 )
             )
+            # Error-backoff peers stay counted in the fair-share pool: the
+            # selector can still admit them through controlled backoff
+            # fallback, so dropping them would disable the gate exactly
+            # when the whole pool is congested.
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
                 api_key_id=api_key_id,
                 lease_kind=lease_kind,
-                candidate_account_ids=[state.account_id for state in states],
+                candidate_account_ids=[
+                    state.account_id
+                    for state in routing_eligible_states(
+                        states, traffic_class=traffic_class, include_error_backoff=True
+                    )
+                ],
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
                 threshold_pct=fair_share_threshold_pct,
                 redact_sensitive_details=redact_sensitive_details,
             )
-            selection_states = _filter_states_for_account_caps(
+            selection_states, account_caps_exhausted = _filter_states_for_usage_limit_and_account_caps(
                 states,
                 lease_kind=lease_kind,
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
+                traffic_class=traffic_class,
             )
             if suppress_recovery_probe_candidates:
                 selection_states = _filter_recovery_probe_candidates(
@@ -186,7 +199,7 @@ async def run_unbound_selection_path(
                 selection_error_code = API_KEY_STREAM_FAIR_SHARE_ERROR_CODE
                 error_message = fair_share_denial_message(fair_share_denial)
                 result = SelectionResult(None, error_message)
-            elif not selection_states and states:
+            elif account_caps_exhausted:
                 selection_error_code = _account_cap_error_code(lease_kind)
                 selection_resets_at = None
                 error_message = _account_cap_error_message(lease_kind, caps)
@@ -216,6 +229,7 @@ async def run_unbound_selection_path(
                     allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                     usage_exhaustion_states=states,
                 )
+                selection_error_code = result.error_code
                 if (
                     result.account is None
                     and result.error_code is None
@@ -277,7 +291,7 @@ async def run_unbound_selection_path(
                         owner._sync_runtime_state(
                             account,
                             state,
-                            selected=(result.account is not None and state.account_id == result.account.account_id),
+                            selected=False,
                         )
                     selected_states.append(state)
 
@@ -306,7 +320,7 @@ async def run_unbound_selection_path(
                             # commit the admission. Recording selection
                             # here would make the CAS fail while still
                             # consuming the quiet interval.
-                            record_selection=not selected_reserved_probe,
+                            record_selection=False,
                             api_key_id=api_key_id,
                         )
                     selected_snapshot = _clone_account(selected)
@@ -326,7 +340,7 @@ async def run_unbound_selection_path(
             if attempt >= MAX_SELECTION_ATTEMPTS:
                 suppress_recovery_probe_candidates = True
                 attempt = 0
-                selection_inputs = await load_selection_inputs()
+                selection_inputs, selection_inputs_generation = await load_selection_inputs()
                 if selection_inputs.error_code is not None and not selection_inputs.accounts:
                     return _direct_error(
                         account=None,
@@ -335,7 +349,7 @@ async def run_unbound_selection_path(
                     )
                 await asyncio.sleep(0)
                 continue
-            selection_inputs = await load_selection_inputs()
+            selection_inputs, selection_inputs_generation = await load_selection_inputs()
             if selection_inputs.error_code is not None and not selection_inputs.accounts:
                 return _direct_error(
                     account=None,
@@ -354,8 +368,6 @@ async def run_unbound_selection_path(
             )
             for aid, runtime in owner._runtime.items()
         }
-        pre_persist_cache_generation = owner._selection_inputs_cache.generation
-
         try:
             async with owner._repo_factory() as repos:
                 stale_account_ids = await owner._persist_selection_state(
@@ -379,7 +391,7 @@ async def run_unbound_selection_path(
                 selected_snapshot = None
                 error_message = None
                 break
-            selection_inputs = await load_selection_inputs()
+            selection_inputs, selection_inputs_generation = await load_selection_inputs()
             if selection_inputs.error_code is not None and not selection_inputs.accounts:
                 return _direct_error(
                     account=None,
@@ -392,16 +404,17 @@ async def run_unbound_selection_path(
             selected_account_map = {}
             continue
 
-        if (
-            selected_snapshot is not None
-            and owner._selection_inputs_cache.generation != pre_persist_cache_generation
-            and attempt < MAX_SELECTION_ATTEMPTS
-        ):
+        if selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation:
             await owner.release_account_lease(selected_lease)
             selected_lease = None
             async with owner._runtime_lock:
                 owner._release_due_probe_reservation_locked(probe_reservation)
-            selection_inputs = await load_selection_inputs()
+            if attempt >= MAX_SELECTION_ATTEMPTS:
+                selected_snapshot = None
+                error_message = "Account selection changed during admission; retry the request"
+                selection_error_code = "account_selection_changed"
+                break
+            selection_inputs, selection_inputs_generation = await load_selection_inputs()
             if selection_inputs.error_code is not None and not selection_inputs.accounts:
                 return _direct_error(
                     account=None,
@@ -424,7 +437,7 @@ async def run_unbound_selection_path(
                 for account_id, before in pre_persist_runtime_state.items()
             )
             if runtime_recovered and attempt < MAX_SELECTION_ATTEMPTS:
-                selection_inputs = await load_selection_inputs()
+                selection_inputs, selection_inputs_generation = await load_selection_inputs()
                 if selection_inputs.error_code is not None and not selection_inputs.accounts:
                     return _direct_error(
                         account=None,
@@ -466,7 +479,7 @@ async def run_unbound_selection_path(
                 if attempt >= MAX_SELECTION_ATTEMPTS:
                     suppress_recovery_probe_candidates = True
                     attempt = 0
-                    selection_inputs = await load_selection_inputs()
+                    selection_inputs, selection_inputs_generation = await load_selection_inputs()
                     if selection_inputs.error_code is not None and not selection_inputs.accounts:
                         return _direct_error(
                             account=None,
@@ -475,7 +488,7 @@ async def run_unbound_selection_path(
                         )
                     await asyncio.sleep(0)
                     continue
-                selection_inputs = await load_selection_inputs()
+                selection_inputs, selection_inputs_generation = await load_selection_inputs()
                 if selection_inputs.error_code is not None and not selection_inputs.accounts:
                     return _direct_error(
                         account=None,
@@ -485,6 +498,9 @@ async def run_unbound_selection_path(
                 await asyncio.sleep(0)
                 continue
 
+        if selected_snapshot is not None and probe_reservation is None:
+            async with owner._runtime_lock:
+                owner._record_account_selection_locked(selected_snapshot.id)
         break
 
     return UnboundSelectionOutcome(

@@ -33,6 +33,7 @@ from app.core.clients.proxy_websocket import (
     WebsocketsUpstreamWebSocket,
 )
 from app.core.config.settings_cache import get_settings_cache
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
@@ -147,7 +148,11 @@ def _stub_request_logging(monkeypatch: pytest.MonkeyPatch) -> None:
         del self, kwargs
         return None
 
+    async def check_account_usage_limit_fresh(_self: object, _account_id: str) -> AccountUsageLimitState:
+        return AccountUsageLimitState.DISABLED
+
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "check_account_usage_limit_fresh", check_account_usage_limit_fresh)
 
 
 class _FakeUpstreamMessage:
@@ -4713,6 +4718,247 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
             },
         ],
     )
+
+
+@pytest.mark.parametrize(
+    ("blocked_state", "expected_error_code"),
+    [
+        (AccountUsageLimitState.REACHED, "account_usage_limit_reached"),
+        (AccountUsageLimitState.DATA_UNAVAILABLE, "account_usage_limit_reached"),
+        (None, "previous_response_owner_unavailable"),
+    ],
+)
+def test_v1_responses_websocket_revalidates_account_before_each_request(
+    app_instance,
+    monkeypatch,
+    blocked_state,
+    expected_error_code,
+):
+    upstream = _SequencedUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": "resp_ws_first", "status": "in_progress"}},
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_ws_first",
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ],
+        deferred_message_batches=[
+            [],
+            [
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {"type": "response.created", "response": {"id": "resp_ws_second", "status": "in_progress"}},
+                        separators=(",", ":"),
+                    ),
+                ),
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_ws_second",
+                                "status": "completed",
+                                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            ],
+        ],
+    )
+    account = SimpleNamespace(id="acct_ws_usage_limit")
+    usage_limit_state = AccountUsageLimitState.DISABLED
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return account, upstream
+
+    async def check_account_usage_limit_fresh(self, account_id):
+        del self
+        assert account_id == account.id
+        return usage_limit_state
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(
+        proxy_module.LoadBalancer,
+        "check_account_usage_limit_fresh",
+        check_account_usage_limit_fresh,
+    )
+
+    request = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": "turn",
+        "stream": True,
+    }
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            websocket.send_text(json.dumps(request))
+            first_events = [json.loads(websocket.receive_text()) for _ in range(2)]
+
+            usage_limit_state = blocked_state
+            websocket.send_text(json.dumps(request))
+            blocked = json.loads(websocket.receive_text())
+
+    assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
+    assert blocked["type"] == "response.failed"
+    assert blocked["response"]["error"]["code"] == expected_error_code
+    assert len(upstream.sent_text) == 1
+
+
+@pytest.mark.parametrize(
+    ("second_check", "expected_error_code"),
+    [
+        (AccountUsageLimitState.REACHED, "account_usage_limit_reached"),
+        (AccountUsageLimitState.DATA_UNAVAILABLE, "account_usage_limit_reached"),
+        (RuntimeError("usage database unavailable"), "account_usage_limit_authorization_failed"),
+    ],
+)
+def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_request(
+    app_instance,
+    monkeypatch,
+    second_check,
+    expected_error_code,
+) -> None:
+    release_first_response = threading.Event()
+
+    class _OverlappingUpstreamWebSocket(_FakeUpstreamWebSocket):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._receive_count = 0
+
+        async def receive(self) -> _FakeUpstreamMessage:
+            self._receive_count += 1
+            if self._receive_count == 1:
+                return _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {"type": "response.created", "response": {"id": "resp_ws_first", "status": "in_progress"}},
+                        separators=(",", ":"),
+                    ),
+                )
+            await asyncio.to_thread(release_first_response.wait)
+            return _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_ws_first",
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+
+    upstream = _OverlappingUpstreamWebSocket()
+    account = SimpleNamespace(id="acct_ws_usage_limit_read_failure")
+    authorization_checks = 0
+    failure_logs: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return account, upstream
+
+    async def check_account_usage_limit_fresh(self, account_id):
+        nonlocal authorization_checks
+        del self
+        assert account_id == account.id
+        authorization_checks += 1
+        if authorization_checks == 2:
+            if isinstance(second_check, Exception):
+                raise second_check
+            return second_check
+        return AccountUsageLimitState.DISABLED
+
+    async def record_connect_failure(self, **kwargs):
+        del self
+        failure_logs.append(kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_websocket_connect_failure", record_connect_failure)
+    monkeypatch.setattr(
+        proxy_module.LoadBalancer,
+        "check_account_usage_limit_fresh",
+        check_account_usage_limit_fresh,
+    )
+
+    request = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "input": "turn",
+        "stream": True,
+    }
+    try:
+        with TestClient(app_instance) as client:
+            with client.websocket_connect("/v1/responses") as websocket:
+                websocket.send_text(json.dumps(request))
+                first_created = json.loads(websocket.receive_text())
+
+                websocket.send_text(json.dumps(request))
+                rejected = json.loads(websocket.receive_text())
+
+                assert first_created["type"] == "response.created"
+                assert rejected["type"] == "response.failed"
+                assert rejected["response"]["error"]["code"] == expected_error_code
+                assert len(upstream.sent_text) == 1
+                assert upstream.closed is False
+                assert failure_logs[-1]["error_code"] == expected_error_code
+                assert failure_logs[-1]["account_id"] == account.id
+
+                release_first_response.set()
+                first_completed = json.loads(websocket.receive_text())
+                assert first_completed["type"] == "response.completed"
+                assert first_completed["response"]["id"] == "resp_ws_first"
+    finally:
+        release_first_response.set()
 
 
 def test_v1_responses_websocket_archives_multiplexed_upstream_frames_by_response_id(app_instance, monkeypatch):

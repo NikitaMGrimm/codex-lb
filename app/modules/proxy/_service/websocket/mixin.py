@@ -27,6 +27,7 @@ from app.core.balancer import (
     RoutingStrategy,
     failover_decision,
 )
+from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -201,6 +202,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_error_envelope as _http_bridge_previous_response_error_envelope,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_previous_response_owner_unavailable_error as _http_bridge_previous_response_owner_unavailable_error,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue as _http_bridge_request_counts_against_queue,
@@ -488,7 +492,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import AccountLease, AccountSelection, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
@@ -2559,12 +2563,17 @@ class _WebSocketMixin:
                     )
 
                 try:
-                    if (
+                    is_response_create = (
                         text_data is not None
                         and request_state is not None
                         and payload is not None
                         and account is not None
                         and _is_websocket_response_create(payload)
+                    )
+                    if (
+                        is_response_create
+                        and request_state is not None
+                        and account is not None
                         and request_state.account_response_create_lease is None
                     ):
                         # Account-cap spillover belongs to connect selection.
@@ -2582,11 +2591,10 @@ class _WebSocketMixin:
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease
                     if (
-                        text_data is not None
+                        is_response_create
+                        and text_data is not None
                         and request_state is not None
-                        and payload is not None
                         and account is not None
-                        and _is_websocket_response_create(payload)
                     ):
                         text_data = _websocket_text_with_account_installation_id(text_data, account)
                         if request_state.fresh_upstream_request_text is not None:
@@ -2599,12 +2607,11 @@ class _WebSocketMixin:
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
                     if (
-                        text_data is not None
+                        is_response_create
+                        and text_data is not None
                         and request_state is not None
-                        and payload is not None
                         and upstream_control is not None
                         and upstream_control.reconnect_requested
-                        and _is_websocket_response_create(payload)
                     ):
                         # Admission and account-cap waits can outlive a clean
                         # close observed by the upstream reader. Re-check at
@@ -2682,7 +2689,42 @@ class _WebSocketMixin:
                     if text_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):
-                            if account is None or not _bind_websocket_request_dispatch_owner(
+                            if account is None:
+                                raise _http_bridge_previous_response_owner_unavailable_error()
+                            try:
+                                usage_limit_state = await proxy._load_balancer.check_account_usage_limit_fresh(
+                                    account.id
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                _facade().logger.warning(
+                                    "Failed to authorize websocket response against account usage limit "
+                                    "account_id=%s request_id=%s",
+                                    account.id,
+                                    request_state.request_log_id or request_state.request_id,
+                                    exc_info=True,
+                                )
+                                raise ProxyResponseError(
+                                    503,
+                                    openai_error(
+                                        "account_usage_limit_authorization_failed",
+                                        "Unable to verify account usage limit; retry later.",
+                                        error_type="server_error",
+                                    ),
+                                )
+                            if usage_limit_state is None:
+                                raise _http_bridge_previous_response_owner_unavailable_error()
+                            if usage_limit_state.blocks_account_use:
+                                status_code, error_payload = selection_failure_response(
+                                    AccountSelection(
+                                        account=None,
+                                        error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+                                        error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+                                    )
+                                )
+                                raise ProxyResponseError(status_code, error_payload)
+                            if not _bind_websocket_request_dispatch_owner(
                                 request_state,
                                 account_id=account.id,
                                 exact_request_text=text_data,
@@ -2710,6 +2752,20 @@ class _WebSocketMixin:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
                             await _release_websocket_response_create_gate(request_state, response_create_gate)
+                        try:
+                            await proxy._write_websocket_connect_failure(
+                                account_id=account.id if account is not None else None,
+                                api_key=api_key,
+                                request_state=request_state,
+                                error_code=error_code or "upstream_error",
+                                error_message=error_message,
+                            )
+                        except Exception:
+                            _facade().logger.warning(
+                                "Failed to log websocket pre-dispatch rejection request_id=%s",
+                                request_state.request_log_id or request_state.request_id,
+                                exc_info=True,
+                            )
                         await proxy._emit_websocket_terminal_error(
                             websocket,
                             client_send_lock=client_send_lock,

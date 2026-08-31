@@ -25,6 +25,7 @@ from fastapi import WebSocket
 
 import app.modules.model_sources.selection as source_selection
 import app.modules.proxy._service.websocket.mixin as ws_mixin
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.model_sources.selection import (
     effective_model_for_api_key,
@@ -333,8 +334,9 @@ async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_source_guard_reuse")
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
+    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
     upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_turn_one"))
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -509,8 +511,9 @@ async def test_reuse_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPa
     catalog.install(monkeypatch)
 
     api_key = _alias_allowlist_api_key()
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_source_guard_alias")
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
+    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
     upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -723,8 +726,9 @@ async def test_reuse_guard_forwards_a_pinned_input_file_turn(db_setup, monkeypat
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_source_guard_file_pin")
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
+    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
     upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -777,8 +781,9 @@ async def test_reuse_guard_forwards_a_terminal_compaction_trigger_turn(
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_source_guard_compact")
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
+    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
     upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -1011,8 +1016,9 @@ async def test_reuse_guard_rejects_a_later_disabled_source_turn(monkeypatch: pyt
     catalog = _AliasSourceCatalog(set(), disabled_source_models={"qwen3.8-max"})
     catalog.install(monkeypatch)
 
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_source_guard_disabled_reuse")
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
+    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
     upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_turn_one"))
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
