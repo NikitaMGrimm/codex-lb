@@ -8,6 +8,12 @@ import {
   useAccounts,
   useAccountUsageResetCredits,
 } from "@/features/accounts/hooks/use-accounts";
+import type { AccountSummary } from "@/features/accounts/schemas";
+import type { DashboardOverview } from "@/features/dashboard/schemas";
+import {
+  createAccountSummary,
+  createDashboardOverview,
+} from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 
 function createTestQueryClient(): QueryClient {
@@ -28,6 +34,72 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useAccounts", () => {
+  it("reconciles usage-limit caches and waits only for the account list invalidation", async () => {
+    const queryClient = createTestQueryClient();
+    queryClient.setQueryDefaults(["dashboard"], { gcTime: Infinity });
+    let releaseInvalidation!: () => void;
+    const invalidation = new Promise<void>((resolve) => {
+      releaseInvalidation = () => resolve();
+    });
+    const neverSettles = new Promise<void>(() => {});
+    const invalidateSpy = vi
+      .spyOn(queryClient, "invalidateQueries")
+      .mockImplementation((filters) =>
+        filters?.queryKey?.[0] === "accounts" ? invalidation : neverSettles,
+      );
+    const { result } = renderHook(() => useAccounts(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
+    queryClient.setQueryData(
+      ["dashboard", "overview", "7d"],
+      createDashboardOverview({
+        accounts: [
+          createAccountSummary({
+            accountId: "acc_primary",
+            usageLimitEnabled: false,
+            usageLimitPercent: null,
+            usageLimitState: "disabled",
+          }),
+        ],
+      }),
+    );
+
+    const mutationPromise = result.current.usageLimitMutation.mutateAsync({
+      accountId: "acc_primary",
+      update: { enabled: true, percent: 10 },
+    });
+
+    await waitFor(() => expect(invalidateSpy).toHaveBeenCalled());
+    const accountsCache = queryClient.getQueryData<{ accounts: AccountSummary[] }>([
+      "accounts",
+      "list",
+    ]);
+    const dashboardCache = queryClient.getQueryData<DashboardOverview>([
+      "dashboard",
+      "overview",
+      "7d",
+    ]);
+    expect(accountsCache?.accounts[0]).toMatchObject({
+      accountId: "acc_primary",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "data_unavailable",
+    });
+    expect(dashboardCache?.accounts[0]).toMatchObject({
+      accountId: "acc_primary",
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "data_unavailable",
+    });
+    expect(result.current.usageLimitMutation.isPending).toBe(true);
+
+    releaseInvalidation();
+    await mutationPromise;
+    await waitFor(() => expect(result.current.usageLimitMutation.isPending).toBe(false));
+  });
+
   it("loads accounts and invalidates related queries after mutations", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
@@ -75,6 +147,15 @@ describe("useAccounts", () => {
       routingPolicy: "preserve",
     });
     expect(routingPolicyResult.routingPolicy).toBe("preserve");
+    const usageLimitResult = await result.current.usageLimitMutation.mutateAsync({
+      accountId: firstAccountId as string,
+      update: { enabled: true, percent: 10 },
+    });
+    expect(usageLimitResult).toEqual({
+      accountId: firstAccountId,
+      enabled: true,
+      percent: 10,
+    });
 
     const imported = await result.current.importMutation.mutateAsync(
       new File(["{}"], "auth.json", { type: "application/json" }),
