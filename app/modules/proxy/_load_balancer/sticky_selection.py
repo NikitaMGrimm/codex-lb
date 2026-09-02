@@ -25,6 +25,11 @@ from app.core.balancer import (
     routing_eligible_states,
     select_account,
 )
+from app.core.balancer.logic import (
+    ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+    ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+)
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
@@ -209,6 +214,13 @@ class StickySelectionOwner(Protocol):
     ) -> _StickySelectionOutcome: ...
 
     async def release_account_lease(self, lease: AccountLease | None) -> None: ...
+
+    async def check_account_usage_limit_fresh(self, account_id: str) -> AccountUsageLimitState | None: ...
+
+
+async def _final_attempt_usage_limit_blocks(owner: StickySelectionOwner, account_id: str) -> bool:
+    state = await owner.check_account_usage_limit_fresh(account_id)
+    return state is not None and state.blocks_account_use
 
 
 @dataclass(frozen=True, slots=True)
@@ -964,7 +976,24 @@ async def run_sticky_selection_path(
                 )
             await asyncio.sleep(0)
             continue
-        if selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation:
+        selection_generation_changed = (
+            selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation
+        )
+        final_attempt_usage_limit_blocked = False
+        if selection_generation_changed and attempt >= MAX_SELECTION_ATTEMPTS:
+            assert selected_snapshot is not None
+            try:
+                final_attempt_usage_limit_blocked = await _final_attempt_usage_limit_blocks(
+                    owner,
+                    selected_snapshot.id,
+                )
+            except BaseException:
+                await owner.release_account_lease(selected_lease)
+                selected_lease = None
+                async with owner._runtime_lock:
+                    owner._release_due_probe_reservation_locked(probe_reservation)
+                raise
+        if selection_generation_changed and (attempt < MAX_SELECTION_ATTEMPTS or final_attempt_usage_limit_blocked):
             # Account or usage data changed after this attempt loaded its
             # selection snapshot. The lease and any probe reservation are
             # still provisional, and the sticky mutation has not been written
@@ -974,10 +1003,10 @@ async def run_sticky_selection_path(
             selected_lease = None
             async with owner._runtime_lock:
                 owner._release_due_probe_reservation_locked(probe_reservation)
-            if attempt >= MAX_SELECTION_ATTEMPTS:
+            if final_attempt_usage_limit_blocked:
                 selected_snapshot = None
-                error_message = "Account selection changed during admission; retry the request"
-                selection_error_code = "account_selection_changed"
+                error_message = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
+                selection_error_code = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
                 break
             selection_inputs, selection_inputs_generation = await load_selection_inputs()
             if selection_inputs.error_code is not None and not selection_inputs.accounts:

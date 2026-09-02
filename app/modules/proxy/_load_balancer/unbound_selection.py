@@ -15,6 +15,10 @@ from app.core.balancer import (
     TrafficClass,
     routing_eligible_states,
 )
+from app.core.balancer.logic import (
+    ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+    ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+)
 from app.db.models import Account, AccountStatus
 from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
@@ -24,6 +28,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _clone_account,
     _filter_recovery_probe_candidates,
     _filter_states_for_usage_limit_and_account_caps,
+    _final_attempt_usage_limit_blocks,
     _probing_result_requires_recovery_reservation,
     _select_account_preferring_budget_safe,
 )
@@ -410,15 +415,32 @@ async def run_unbound_selection_path(
             selected_account_map = {}
             continue
 
-        if selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation:
+        selection_generation_changed = (
+            selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation
+        )
+        final_attempt_usage_limit_blocked = False
+        if selection_generation_changed and attempt >= MAX_SELECTION_ATTEMPTS:
+            assert selected_snapshot is not None
+            try:
+                final_attempt_usage_limit_blocked = await _final_attempt_usage_limit_blocks(
+                    owner,
+                    selected_snapshot.id,
+                )
+            except BaseException:
+                await owner.release_account_lease(selected_lease)
+                selected_lease = None
+                async with owner._runtime_lock:
+                    owner._release_due_probe_reservation_locked(probe_reservation)
+                raise
+        if selection_generation_changed and (attempt < MAX_SELECTION_ATTEMPTS or final_attempt_usage_limit_blocked):
             await owner.release_account_lease(selected_lease)
             selected_lease = None
             async with owner._runtime_lock:
                 owner._release_due_probe_reservation_locked(probe_reservation)
-            if attempt >= MAX_SELECTION_ATTEMPTS:
+            if final_attempt_usage_limit_blocked:
                 selected_snapshot = None
-                error_message = "Account selection changed during admission; retry the request"
-                selection_error_code = "account_selection_changed"
+                error_message = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
+                selection_error_code = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
                 break
             selection_inputs, selection_inputs_generation = await load_selection_inputs()
             if selection_inputs.error_code is not None and not selection_inputs.accounts:
