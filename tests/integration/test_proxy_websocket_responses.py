@@ -4889,6 +4889,8 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
     account = SimpleNamespace(id="acct_ws_usage_limit_read_failure")
     authorization_checks = 0
     failure_logs: list[dict[str, object]] = []
+    released_create_leases: list[object] = []
+    original_release_create_lease = proxy_module.ProxyService._release_request_state_account_response_create_lease
 
     class _FakeSettingsCache:
         async def get(self):
@@ -4919,11 +4921,22 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
         del self
         failure_logs.append(kwargs)
 
+    async def track_release_create_lease(self, request_state):
+        lease = request_state.account_response_create_lease
+        await original_release_create_lease(self, request_state)
+        if lease is not None:
+            released_create_leases.append(lease)
+
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_websocket_connect_failure", record_connect_failure)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_release_request_state_account_response_create_lease",
+        track_release_create_lease,
+    )
     monkeypatch.setattr(
         proxy_module.LoadBalancer,
         "check_account_usage_limit_fresh",
@@ -4952,6 +4965,7 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
                 assert upstream.closed is False
                 assert failure_logs[-1]["error_code"] == expected_error_code
                 assert failure_logs[-1]["account_id"] == account.id
+                assert len(released_create_leases) == 1
 
                 release_first_response.set()
                 first_completed = json.loads(websocket.receive_text())

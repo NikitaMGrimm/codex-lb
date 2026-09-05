@@ -2747,6 +2747,7 @@ class _WebSocketMixin:
                     error_type = error.type if error and error.type else "server_error"
                     if request_state is not None:
                         await proxy._release_websocket_request_state_reservation(request_state)
+                        await proxy._release_request_state_account_response_create_lease(request_state)
                         if request_state_registered:
                             async with pending_lock:
                                 if request_state in pending_requests:
