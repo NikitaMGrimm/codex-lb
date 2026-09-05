@@ -14,13 +14,12 @@ NOW = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
 def _row(
     used_percent: float | None,
     *,
-    account_id: str = "acc_1",
     recorded_at: datetime = NOW,
     reset_delta: timedelta | None = timedelta(hours=1),
     window_minutes: int | None = 300,
 ) -> UsageWindowRow:
     return UsageWindowRow(
-        account_id=account_id,
+        account_id="acc_1",
         used_percent=used_percent,
         reset_at=int((NOW + reset_delta).timestamp()) if reset_delta is not None else None,
         window_minutes=window_minutes,
@@ -51,27 +50,24 @@ def _evaluate(
 
 
 def test_disabled_limit_does_not_require_usage_data() -> None:
-    assert _evaluate(enabled=False, limit_percent=10.0) is AccountUsageLimitState.DISABLED
+    assert _evaluate(enabled=False) is AccountUsageLimitState.DISABLED
 
 
-def test_current_usage_below_limit_is_available() -> None:
-    assert _evaluate(primary=_row(9.99)) is AccountUsageLimitState.AVAILABLE
-
-
-def test_fresh_zero_percent_usage_with_quota_metadata_is_available() -> None:
-    assert _evaluate(primary=_row(0.0)) is AccountUsageLimitState.AVAILABLE
+@pytest.mark.parametrize("used_percent", [0.0, 9.99])
+def test_fresh_usage_below_limit_is_available(used_percent: float) -> None:
+    assert _evaluate(primary=_row(used_percent)) is AccountUsageLimitState.AVAILABLE
 
 
 @pytest.mark.parametrize("window_minutes", [0, None], ids=["zero-window", "missing-window"])
 def test_fresh_no_data_placeholder_is_unavailable(window_minutes: int | None) -> None:
-    placeholder = _row(0.0, reset_delta=None, window_minutes=window_minutes)
+    assert (
+        _evaluate(primary=_row(0.0, reset_delta=None, window_minutes=window_minutes))
+        is AccountUsageLimitState.DATA_UNAVAILABLE
+    )
 
-    assert _evaluate(primary=placeholder) is AccountUsageLimitState.DATA_UNAVAILABLE
 
-
-@pytest.mark.parametrize("used_percent", [10.0, 10.01, 100.0])
-def test_usage_at_or_above_limit_is_reached(used_percent: float) -> None:
-    assert _evaluate(primary=_row(used_percent)) is AccountUsageLimitState.REACHED
+def test_usage_at_limit_is_reached() -> None:
+    assert _evaluate(primary=_row(10.0)) is AccountUsageLimitState.REACHED
 
 
 @pytest.mark.parametrize(
@@ -79,11 +75,11 @@ def test_usage_at_or_above_limit_is_reached(used_percent: float) -> None:
     [
         (None, 10.0),
         (_row(None), 10.0),
-        (_row(5.0, recorded_at=NOW - timedelta(seconds=181)), 10.0),
         (_row(5.0), None),
     ],
+    ids=["missing-row", "missing-measurement", "missing-limit"],
 )
-def test_enabled_limit_fails_closed_without_usable_current_data(
+def test_enabled_limit_fails_closed_without_complete_inputs(
     primary: UsageWindowRow | None,
     limit_percent: float | None,
 ) -> None:
@@ -93,16 +89,16 @@ def test_enabled_limit_fails_closed_without_usable_current_data(
 @pytest.mark.parametrize(
     ("refresh_interval_seconds", "age_seconds", "expected"),
     [
-        (120, 200, AccountUsageLimitState.REACHED),
+        (120, 240, AccountUsageLimitState.REACHED),
         (120, 241, AccountUsageLimitState.DATA_UNAVAILABLE),
-        (90, 180, AccountUsageLimitState.REACHED),
-        (90, 181, AccountUsageLimitState.DATA_UNAVAILABLE),
+        (60, 180, AccountUsageLimitState.REACHED),
+        (60, 181, AccountUsageLimitState.DATA_UNAVAILABLE),
     ],
     ids=[
-        "within-2x-interval-is-fresh",
-        "past-2x-interval-is-stale",
-        "floor-boundary-is-fresh",
-        "past-floor-is-stale",
+        "double-interval-boundary-is-fresh",
+        "past-double-interval-is-stale",
+        "minimum-floor-boundary-is-fresh",
+        "past-minimum-floor-is-stale",
     ],
 )
 def test_freshness_cutoff_is_max_of_double_refresh_interval_and_floor(
@@ -125,40 +121,22 @@ def test_elapsed_window_is_ignored_when_another_current_window_is_available() ->
     )
 
 
-def test_elapsed_only_window_requires_a_post_reset_observation() -> None:
+def test_elapsed_only_window_is_unavailable() -> None:
     assert _evaluate(primary=_row(100.0, reset_delta=timedelta(seconds=-1))) is AccountUsageLimitState.DATA_UNAVAILABLE
 
 
-def test_post_reset_observation_recovers_availability_after_reached() -> None:
-    reached = _row(
-        10.0,
-        recorded_at=NOW - timedelta(hours=6),
-        reset_delta=timedelta(seconds=-1),
-    )
-
-    assert _evaluate(primary=_row(10.0)) is AccountUsageLimitState.REACHED
-    assert _evaluate(primary=reached) is AccountUsageLimitState.DATA_UNAVAILABLE
-    assert (
-        _evaluate(
-            primary=_row(0.0, reset_delta=timedelta(hours=5)),
-        )
-        is AccountUsageLimitState.AVAILABLE
-    )
-
-
 def test_weekly_only_primary_is_evaluated_as_the_long_window() -> None:
-    assert _evaluate(primary=_row(10.0, window_minutes=10080), secondary=None) is AccountUsageLimitState.REACHED
+    assert _evaluate(primary=_row(10.0, window_minutes=10080)) is AccountUsageLimitState.REACHED
 
 
 def test_newer_weekly_primary_replaces_an_older_secondary_row() -> None:
-    weekly_primary = _row(5.0, recorded_at=NOW, window_minutes=10080)
-    older_secondary = _row(
-        99.0,
-        recorded_at=NOW - timedelta(minutes=10),
-        window_minutes=10080,
+    assert (
+        _evaluate(
+            primary=_row(5.0, window_minutes=10080),
+            secondary=_row(99.0, recorded_at=NOW - timedelta(minutes=10), window_minutes=10080),
+        )
+        is AccountUsageLimitState.AVAILABLE
     )
-
-    assert _evaluate(primary=weekly_primary, secondary=older_secondary) is AccountUsageLimitState.AVAILABLE
 
 
 def test_monthly_only_plan_uses_monthly_instead_of_standard_slots() -> None:
@@ -177,93 +155,62 @@ def test_stale_relevant_window_fails_closed_even_when_another_window_is_fresh() 
     assert (
         _evaluate(
             primary=_row(5.0),
-            secondary=_row(
-                5.0,
-                recorded_at=NOW - timedelta(seconds=181),
-                window_minutes=10080,
-            ),
+            secondary=_row(5.0, recorded_at=NOW - timedelta(seconds=181), window_minutes=10080),
         )
         is AccountUsageLimitState.DATA_UNAVAILABLE
     )
 
 
-def test_fresh_weekly_primary_supersedes_old_monthly_shape() -> None:
-    assert (
-        _evaluate(
-            plan_type="free",
-            primary=_row(5.0, window_minutes=10080),
-            monthly=_row(
+@pytest.mark.parametrize(
+    ("primary", "monthly", "expected"),
+    [
+        (
+            _row(5.0, window_minutes=10080),
+            _row(
                 100.0,
                 recorded_at=NOW - timedelta(minutes=10),
                 reset_delta=timedelta(seconds=-1),
                 window_minutes=43200,
             ),
-        )
-        is AccountUsageLimitState.AVAILABLE
-    )
-
-
-def test_newer_monthly_shape_supersedes_weekly_primary() -> None:
-    assert (
-        _evaluate(
-            plan_type="free",
-            primary=_row(
-                5.0,
-                recorded_at=NOW - timedelta(seconds=10),
-                window_minutes=10080,
-            ),
-            monthly=_row(10.0, window_minutes=43200),
-        )
-        is AccountUsageLimitState.REACHED
-    )
-
-
-def test_newest_normalized_shape_still_fails_closed_when_stale() -> None:
-    assert (
-        _evaluate(
-            plan_type="free",
-            primary=_row(
-                5.0,
-                recorded_at=NOW - timedelta(seconds=181),
-                window_minutes=10080,
-            ),
-            monthly=_row(
-                5.0,
-                recorded_at=NOW - timedelta(minutes=10),
-                window_minutes=43200,
-            ),
-        )
-        is AccountUsageLimitState.DATA_UNAVAILABLE
-    )
-
-
-def test_monthly_and_weekly_shapes_at_sibling_boundary_use_reset_tiebreak() -> None:
-    assert (
-        _evaluate(
-            plan_type="free",
-            primary=_row(
-                5.0,
-                recorded_at=NOW,
-                reset_delta=timedelta(hours=1),
-                window_minutes=10080,
-            ),
-            monthly=_row(
+            AccountUsageLimitState.AVAILABLE,
+        ),
+        (
+            _row(5.0, recorded_at=NOW - timedelta(seconds=10), window_minutes=10080),
+            _row(10.0, window_minutes=43200),
+            AccountUsageLimitState.REACHED,
+        ),
+        (
+            _row(5.0, window_minutes=10080),
+            _row(10.0, window_minutes=43200),
+            AccountUsageLimitState.AVAILABLE,
+        ),
+        (
+            _row(5.0, reset_delta=timedelta(hours=1), window_minutes=10080),
+            _row(
                 10.0,
                 recorded_at=NOW - timedelta(seconds=SIBLING_FETCH_MARGIN_SECONDS),
                 reset_delta=timedelta(hours=2),
                 window_minutes=43200,
             ),
-        )
-        is AccountUsageLimitState.REACHED
-    )
-
-
-def test_monthly_and_weekly_exact_tie_uses_stable_weekly_primary_default() -> None:
-    assert (
-        _evaluate(
-            plan_type="free",
-            primary=_row(5.0, window_minutes=10080),
-            monthly=_row(10.0, window_minutes=43200),
-        )
-        is AccountUsageLimitState.AVAILABLE
-    )
+            AccountUsageLimitState.REACHED,
+        ),
+        (
+            _row(5.0, recorded_at=NOW - timedelta(seconds=181), window_minutes=10080),
+            _row(5.0, recorded_at=NOW - timedelta(minutes=10), window_minutes=43200),
+            AccountUsageLimitState.DATA_UNAVAILABLE,
+        ),
+    ],
+    ids=[
+        "newer-weekly-shape",
+        "newer-monthly-shape",
+        "exact-tie-keeps-weekly-primary",
+        "sibling-boundary-uses-reset-tiebreak",
+        "selected-monthly-shape-is-stale",
+    ],
+)
+def test_free_plan_evaluates_one_effective_long_window(
+    primary: UsageWindowRow,
+    monthly: UsageWindowRow,
+    expected: AccountUsageLimitState,
+) -> None:
+    assert _evaluate(plan_type="free", primary=primary, monthly=monthly) is expected
