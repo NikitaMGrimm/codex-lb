@@ -12,8 +12,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
 
-import anyio
-
 from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -56,8 +54,8 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonObject, JsonValue
-from app.core.utils.locks import fast_lock
 from app.core.usage.account_limits import AccountUsageLimitState
+from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import (
     ensure_request_id,
     ensure_request_scope_id,

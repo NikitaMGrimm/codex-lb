@@ -1316,12 +1316,12 @@ class LoadBalancer:
                 continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
                 sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                 standard_latest_primary={
-                    account_id: _clone_standard_usage_history(entry)
+                    account_id: clone_row(entry)
                     for account_id, entry in standard_latest_primary.items()
                     if account_id in ignore_standard_quota_account_ids
                 },
                 standard_latest_secondary={
-                    account_id: _clone_standard_usage_history(entry)
+                    account_id: clone_row(entry)
                     for account_id, entry in standard_latest_secondary.items()
                     if account_id in ignore_standard_quota_account_ids
                 },
@@ -2952,12 +2952,10 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
             else frozenset(selection_inputs.sticky_mutation_authority_account_ids)
         ),
         standard_latest_primary={
-            account_id: _clone_standard_usage_history(entry)
-            for account_id, entry in selection_inputs.standard_latest_primary.items()
+            account_id: clone_row(entry) for account_id, entry in selection_inputs.standard_latest_primary.items()
         },
         standard_latest_secondary={
-            account_id: _clone_standard_usage_history(entry)
-            for account_id, entry in selection_inputs.standard_latest_secondary.items()
+            account_id: clone_row(entry) for account_id, entry in selection_inputs.standard_latest_secondary.items()
         },
         quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(
