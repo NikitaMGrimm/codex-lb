@@ -4783,7 +4783,7 @@ async def test_v1_responses_http_bridge_owner_authorization_failure_is_stable(
     service = get_proxy_service_for_app(app_instance)
     monkeypatch.setattr(
         service._load_balancer,
-        "check_account_usage_limit_fresh",
+        "authorize_account_fresh",
         AsyncMock(side_effect=RuntimeError("usage database unavailable")),
     )
 

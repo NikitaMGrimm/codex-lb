@@ -13,11 +13,7 @@ from app.core.balancer import (
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
-    routing_eligible_states,
-)
-from app.core.balancer.logic import (
-    ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
-    ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+    evaluate_routing_pool,
 )
 from app.db.models import Account, AccountStatus
 from app.modules.proxy._load_balancer.sticky_selection import (
@@ -28,8 +24,9 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _clone_account,
     _filter_recovery_probe_candidates,
     _filter_states_for_usage_limit_and_account_caps,
-    _final_attempt_usage_limit_blocks,
+    _final_attempt_authorization_failure,
     _probing_result_requires_recovery_reservation,
+    _release_selection_resources,
     _select_account_preferring_budget_safe,
 )
 from app.modules.proxy._load_balancer.types import (
@@ -172,15 +169,11 @@ async def run_unbound_selection_path(
             # selector can still admit them through controlled backoff
             # fallback, so dropping them would disable the gate exactly
             # when the whole pool is congested.
+            pool = evaluate_routing_pool(states, traffic_class=traffic_class)
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
                 api_key_id=api_key_id,
                 lease_kind=lease_kind,
-                candidate_account_ids=[
-                    state.account_id
-                    for state in routing_eligible_states(
-                        states, traffic_class=traffic_class, include_error_backoff=True
-                    )
-                ],
+                candidate_account_ids=[state.account_id for state in pool.capacity_candidates],
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
                 threshold_pct=fair_share_threshold_pct,
@@ -188,6 +181,7 @@ async def run_unbound_selection_path(
             )
             selection_states, account_caps_exhausted = _filter_states_for_usage_limit_and_account_caps(
                 states,
+                pool=pool,
                 lease_kind=lease_kind,
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
@@ -387,17 +381,13 @@ async def run_unbound_selection_path(
                     selected_states,
                 )
         except BaseException:
-            await owner.release_account_lease(selected_lease)
+            await _release_selection_resources(owner, selected_lease, probe_reservation)
             selected_lease = None
-            async with owner._runtime_lock:
-                owner._release_due_probe_reservation_locked(probe_reservation)
             raise
         stale_account_ids = stale_account_ids or set()
         if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
-            await owner.release_account_lease(selected_lease)
+            await _release_selection_resources(owner, selected_lease, probe_reservation)
             selected_lease = None
-            async with owner._runtime_lock:
-                owner._release_due_probe_reservation_locked(probe_reservation)
             if attempt >= MAX_SELECTION_ATTEMPTS:
                 selected_snapshot = None
                 error_message = None
@@ -418,29 +408,28 @@ async def run_unbound_selection_path(
         selection_generation_changed = (
             selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation
         )
-        final_attempt_usage_limit_blocked = False
+        final_authorization_failure: SelectionResult | None = None
         if selection_generation_changed and attempt >= MAX_SELECTION_ATTEMPTS:
             assert selected_snapshot is not None
             try:
-                final_attempt_usage_limit_blocked = await _final_attempt_usage_limit_blocks(
+                final_authorization_failure = await _final_attempt_authorization_failure(
                     owner,
                     selected_snapshot.id,
                 )
             except BaseException:
-                await owner.release_account_lease(selected_lease)
+                await _release_selection_resources(owner, selected_lease, probe_reservation)
                 selected_lease = None
-                async with owner._runtime_lock:
-                    owner._release_due_probe_reservation_locked(probe_reservation)
                 raise
-        if selection_generation_changed and (attempt < MAX_SELECTION_ATTEMPTS or final_attempt_usage_limit_blocked):
-            await owner.release_account_lease(selected_lease)
+        if selection_generation_changed and (
+            attempt < MAX_SELECTION_ATTEMPTS or final_authorization_failure is not None
+        ):
+            await _release_selection_resources(owner, selected_lease, probe_reservation)
             selected_lease = None
-            async with owner._runtime_lock:
-                owner._release_due_probe_reservation_locked(probe_reservation)
-            if final_attempt_usage_limit_blocked:
+            if final_authorization_failure is not None:
                 selected_snapshot = None
-                error_message = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
-                selection_error_code = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
+                error_message = final_authorization_failure.error_message
+                selection_error_code = final_authorization_failure.error_code
+                selection_resets_at = None
                 break
             selection_inputs, selection_inputs_generation = await load_selection_inputs()
             if selection_inputs.error_code is not None and not selection_inputs.accounts:

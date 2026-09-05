@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
@@ -16,6 +17,10 @@ from app.db.models import (
     Account,
     AccountStatus,
     ApiKey,
+    ApiKeyLimit,
+    ApiKeyUsageReservation,
+    LimitType,
+    LimitWindow,
     QuotaPlannerDecision,
     QuotaWindowObservation,
     RequestLog,
@@ -1664,3 +1669,138 @@ async def test_quota_planner_warm_now_rate_limited_api_key_is_skipped(monkeypatc
 
     assert result.status == "skipped"
     assert result.reason.startswith("api_key_rate_limit_exceeded:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["cancel", "database_error"])
+async def test_real_sql_authorization_interruption_releases_warmup_claim_and_reservation(
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """A real driver interruption poisons a transaction; a raised mock does not."""
+    account_id, key_id = "sql-interruption-owner", "sql-interruption-key"
+    sql_started = asyncio.Event()
+    release_sql = threading.Event()
+    loop = asyncio.get_running_loop()
+    send_calls: list[str] = []
+    async with SessionLocal() as session:
+        account = _warmup_test_account(account_id)
+        account.usage_limit_enabled = True
+        account.usage_limit_percent = 10
+        session.add_all(
+            [
+                account,
+                UsageHistory(
+                    account_id=account_id, used_percent=5, window="primary", window_minutes=300, recorded_at=utcnow()
+                ),
+                ApiKey(id=key_id, name="SQL cancellation test", key_hash="sql-interruption-hash", key_prefix="sk-test"),
+                ApiKeyLimit(
+                    api_key_id=key_id,
+                    limit_type=LimitType.TOTAL_TOKENS,
+                    limit_window=LimitWindow.DAILY,
+                    max_value=100_000,
+                    current_value=0,
+                    reset_at=utcnow() + timedelta(days=1),
+                ),
+            ]
+        )
+        await QuotaPlannerRepository(session).upsert_settings(_AUTO_WARMUP_SETTINGS)
+        service = QuotaWarmupService(session)
+        original = service._usage.account_usage_limit_snapshot
+        reads = 0
+        dialect = session.get_bind().dialect.name
+
+        def sqlite_wait() -> int:
+            loop.call_soon_threadsafe(sql_started.set)
+            return int(release_sql.wait(timeout=10))
+
+        async def interrupt_final_read(owner_id: str):
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                if failure == "database_error":
+                    await session.execute(text("SELECT * FROM pr1528_missing_authorization_table"))
+                elif dialect == "sqlite":
+                    connection = await session.connection()
+
+                    def register_wait(conn):
+                        dbapi = conn.connection.dbapi_connection
+                        assert dbapi is not None
+                        dbapi.create_function("pr1528_wait", 0, sqlite_wait)
+
+                    await connection.run_sync(register_wait)
+                    await session.execute(text("SELECT pr1528_wait()"))
+                else:
+                    sql_started.set()
+                    await session.execute(text("SELECT pg_sleep(30) /* pr1528-authorization-cancel */"))
+            return await original(owner_id)
+
+        async def send_probe(**kwargs):
+            send_calls.append(kwargs["account"].id)
+            raise AssertionError("authorization failure must not dispatch")
+
+        monkeypatch.setattr(service._usage, "account_usage_limit_snapshot", interrupt_final_read)
+        monkeypatch.setattr(service, "_send_warmup_probe", send_probe)
+        task = asyncio.create_task(
+            service.warm_now(
+                account_id=account_id,
+                model="gpt-5.4-mini",
+                api_key_id=key_id,
+                force_probe=True,
+            )
+        )
+        try:
+            if failure == "cancel":
+                await asyncio.wait_for(sql_started.wait(), timeout=5)
+                if dialect == "postgresql":
+
+                    async def wait_for_server_query() -> None:
+                        async with SessionLocal() as monitor:
+                            while not await monitor.scalar(
+                                text(
+                                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event = 'PgSleep' "
+                                    "AND query LIKE 'SELECT pg_sleep(30)%pr1528-authorization-cancel%')"
+                                )
+                            ):
+                                await monitor.rollback()
+                                await asyncio.sleep(0.01)
+
+                    await asyncio.wait_for(wait_for_server_query(), timeout=5)
+                async with SessionLocal() as monitor:
+                    pending = await monitor.scalar(
+                        select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)
+                    )
+                    assert pending is not None and pending.status == "reserved"
+                task.cancel()
+                release_sql.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=5)
+            else:
+                result = await asyncio.wait_for(task, timeout=5)
+                assert result.status == "skipped"
+                assert result.reason == "account_usage_limit_authorization_failed"
+        finally:
+            release_sql.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert reads == 2
+    assert send_calls == []
+    async with SessionLocal() as verification:
+        decision = await verification.scalar(
+            select(QuotaPlannerDecision).where(QuotaPlannerDecision.account_id == account_id)
+        )
+        reservation = await verification.scalar(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)
+        )
+        limit = await verification.scalar(select(ApiKeyLimit).where(ApiKeyLimit.api_key_id == key_id))
+        assert decision is not None and decision.status == "skipped"
+        assert decision.reason == (
+            "account_usage_limit_authorization_cancelled"
+            if failure == "cancel"
+            else "account_usage_limit_authorization_failed"
+        )
+        assert reservation is not None and reservation.status == "released"
+        assert limit is not None and limit.current_value == 0

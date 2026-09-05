@@ -17,6 +17,7 @@ from app.modules.proxy._service.support import (
     _websocket_request_can_replay_before_visible_output,
     _websocket_should_defer_reasoning_prelude,
 )
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 from tests.unit.test_proxy_utils import (
     _make_account,
     _make_proxy_settings,
@@ -224,7 +225,9 @@ async def test_direct_websocket_security_replay_reacquires_create_admission(
             accounts=[regular_account, authorized_account],
         )
     )
-    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
+    service._load_balancer.authorize_account_fresh = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+    )
     cyber_message = (
         "This chat was flagged for possible cybersecurity risk. "
         "To get authorized for security work, join the Trusted Access for Cyber program. "

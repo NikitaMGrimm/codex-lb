@@ -1034,6 +1034,8 @@ class UsageRepository:
             )
             .where(
                 tuple_(UsageHistory.account_id, _normalized_window_expr()).in_(account_window_pairs),
+                # Filter before lag(): an unavailable sample is not a reset to zero.
+                _real_usage_measurement_clause(),
                 UsageHistory.recorded_at >= since,
                 UsageHistory.recorded_at <= until,
             )
@@ -1120,11 +1122,13 @@ class UsageRepository:
         window: str,
         since: datetime,
     ) -> list[UsageHistory]:
+        """Measured history for analytics; current-state reads retain unknowns."""
         stmt = (
             select(UsageHistory)
             .where(
                 UsageHistory.account_id == account_id,
                 _window_clause(window),
+                _real_usage_measurement_clause(),
                 UsageHistory.recorded_at >= since,
             )
             .order_by(UsageHistory.recorded_at.asc(), UsageHistory.id.asc())

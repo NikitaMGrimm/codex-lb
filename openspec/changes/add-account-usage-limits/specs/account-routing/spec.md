@@ -2,6 +2,84 @@
 
 ## ADDED Requirements
 
+### Requirement: Final owner authorization is explicit and fail-closed
+
+Fresh owner authorization MUST distinguish permission, a local usage-policy block, an unavailable owner, and an authorization infrastructure failure. A missing, paused, deactivated, or reauthentication-required owner MUST NOT be admitted on retry exhaustion. Failed final selection authorization MUST release provisional leases and recovery probes and MUST NOT publish a new or changed sticky owner. An unavailable owner MUST NOT be reported as having reached its usage policy. Cancellation MUST propagate after provisional resource cleanup.
+
+#### Scenario: Owner disappears on the final selection attempt
+
+- **GIVEN** selection state is invalidated on every bounded selection attempt
+- **AND** the selected owner is deleted or becomes administratively unavailable during the final attempt
+- **WHEN** final fresh authorization runs
+- **THEN** selection returns no account or lease
+- **AND** no new sticky owner is published and no provisional runtime pressure remains
+- **AND** the error identifies owner unavailability rather than a usage-policy block
+
+
+#### Scenario: Repeated cancellation interrupts final authorization cleanup
+
+- **GIVEN** selection owns a provisional stream lease and estimated-token pressure
+- **WHEN** final authorization is cancelled and another cancellation arrives while resource release awaits its runtime lock
+- **THEN** cleanup finishes releasing provisional lease and probe ownership before cancellation propagates
+- **AND** no sticky owner is published and no stream or token pressure remains
+
+
+### Requirement: Disabled policies preserve routing-pool semantics
+
+When all usage policies are disabled, applying the usage-policy and concurrency-cap projections MUST preserve established canonical routing, backoff fallback, and terminal-error semantics. Administratively unavailable and usage-policy-blocked accounts MUST NOT contribute fair-share capacity or become selectable. Evidence needed for canonical fallback and terminal errors MUST remain available independently of those capacity projections.
+
+#### Scenario: A canonical pool contains a backoff owner and a paused peer
+
+- **GIVEN** an active account in error backoff is below its concurrency cap
+- **AND** its only peer is paused and all usage policies are disabled
+- **WHEN** the canonical pool is projected for usage policy and concurrency admission
+- **THEN** the established controlled backoff fallback remains available
+- **AND** the paused peer contributes no fair-share capacity
+
+#### Scenario: Public routing preserves pre-feature administrative filtering
+
+- **GIVEN** one backoff owner has a persisted paused or deactivated peer that public account loading excludes
+- **WHEN** ordinary or soft-sticky routing evaluates the loaded pool with usage policies disabled
+- **THEN** the excluded peer does not newly manufacture backoff fallback
+
+#### Scenario: Public routing retains upstream quota block evidence
+
+- **GIVEN** one backoff owner has a rate-limited or quota-exceeded peer that remains in the loaded pool
+- **WHEN** ordinary or soft-sticky routing evaluates the pool with usage policies disabled
+- **THEN** the established controlled backoff fallback remains available
+
+### Requirement: Unavailable telemetry is not a numeric analytics sample
+
+Historical usage calculations MUST exclude unavailable measurement placeholders before window functions, deltas, averages, or trends use their values. A genuine zero-percent measurement with valid quota metadata MUST remain a measurement.
+
+#### Scenario: Missing observation between real measurements
+
+- **GIVEN** one quota window has real measurements of 70 and 71 percent with an unavailable placeholder between them
+- **WHEN** demand is calculated over those observations
+- **THEN** the measured positive usage delta is one percentage point, not 71
+
+### Requirement: Authorization failures retain local error provenance
+
+An `account_usage_limit_authorization_failed` error generated without an upstream response MUST NOT produce an upstream HTTP status in request logs.
+
+#### Scenario: Database authorization read fails
+
+- **GIVEN** a final local owner-authorization read fails before dispatch
+- **WHEN** the proxy records the resulting failure
+- **THEN** the request log contains the local authorization error
+- **AND** its upstream status code is absent
+
+### Requirement: Acknowledged policy mutations cannot be reverted by older reads
+
+Dashboard policy reconciliation MUST prevent an account or dashboard read started before an acknowledged mutation from replacing the acknowledged policy with older state, including when the read becomes inactive. Overlapping policy mutations MUST preserve their acknowledged ordering and MUST NOT allow a delayed prior reconciliation to revert a later acknowledged policy.
+
+#### Scenario: Inactive dashboard read settles after save
+
+- **GIVEN** a dashboard read starts before a policy mutation and subsequently becomes inactive
+- **WHEN** the mutation is acknowledged and the older read then settles
+- **THEN** cached policy fields still reflect the acknowledged mutation or a newer authoritative read
+- **AND** they do not revert to the pre-mutation policy
+
 ### Requirement: Accounts have a reversible maximum-usage policy
 
 Each account SHALL support an optional maximum standard-quota used percentage greater than 0 and at most 100, plus an enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling a configured policy SHALL retain its percentage for later re-enablement, while removing the policy SHALL clear the percentage and disable it. For a disabled update, the API MUST retain the latest stored percentage when the percentage field is omitted, clear it when the field is explicitly `null`, and replace it when a numeric value is supplied. The API MUST reject an enabled policy without an explicitly supplied percentage, MUST reject an enabled policy with a `null` percentage, and MUST reject percentages outside the supported range.
@@ -257,3 +335,21 @@ Reset-confirmed and staggered limit-warmup planning MUST apply the canonical sta
 - **GIVEN** an otherwise eligible short-window account has an `available` or disabled usage-limit policy
 - **WHEN** warmup planning and execution evaluate the account
 - **THEN** the usage-limit gate does not prevent its normal warmup action
+
+
+### Requirement: Policy visibility follows explicit observation boundaries
+
+The usage-policy API MUST commit the acknowledged configuration and invalidate
+its local selection inputs before returning success. Existing-owner dispatch
+checks MUST read authoritative policy/status independently of that cache. Peer
+fresh selection MUST retain the existing invalidation and TTL fallback contract;
+it MUST NOT assume that acknowledging an API mutation synchronously invalidates
+every replica. Already dispatched work MUST retain its settlement ownership.
+
+#### Scenario: An existing owner is used on a replica with cached selection inputs
+
+- **GIVEN** the replica's selection cache still contains a disabled policy
+- **AND** an enabled blocking policy has committed in the shared database
+- **WHEN** the replica performs its next existing-owner dispatch authorization read
+- **THEN** that read denies the new dispatch according to the committed policy
+- **AND** it does not substitute the cached disabled policy for authorization

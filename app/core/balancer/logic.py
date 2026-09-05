@@ -547,6 +547,55 @@ def _prepare_routing_candidates(
     return available, in_error_backoff, usage_limit_blocked
 
 
+@dataclass(frozen=True, slots=True)
+class RoutingPoolEvaluation:
+    """Capacity projections and canonical evidence from one eligibility pass.
+
+    Members refer to the original states; normalization is evaluated on clones
+    so reading capacity never mutates routing/recovery state. A capacity filter
+    may remove candidates, but must retain the rest of all_states as context.
+    """
+
+    all_states: tuple[AccountState, ...]
+    normal_candidates: tuple[AccountState, ...]
+    capacity_candidates: tuple[AccountState, ...]
+    routable_candidates: tuple[AccountState, ...]
+
+
+def evaluate_routing_pool(
+    states: Iterable[AccountState],
+    *,
+    now: float | None = None,
+    traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+) -> RoutingPoolEvaluation:
+    current = time.time() if now is None else now
+    originals = tuple(states)
+    evaluated = [replace(state) for state in originals]
+    available, in_error_backoff, _ = _prepare_routing_candidates(
+        evaluated,
+        current=current,
+        ignore_standard_quota=False,
+        bypass_quota_exceeded=False,
+        bypass_account_ids=None,
+    )
+    routable = [*available, *in_error_backoff]
+    normal = available
+    capacity = routable
+    if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:
+        if normal:
+            normal, _ = _filter_opportunistic_candidates(normal, current)
+        if capacity:
+            capacity, _ = _filter_opportunistic_candidates(capacity, current)
+
+    def project(candidates: list[AccountState]) -> tuple[AccountState, ...]:
+        identities = {id(state) for state in candidates}
+        return tuple(
+            original for original, evaluation in zip(originals, evaluated, strict=True) if id(evaluation) in identities
+        )
+
+    return RoutingPoolEvaluation(originals, project(normal), project(capacity), project(routable))
+
+
 def routing_eligible_states(
     states: Iterable[AccountState],
     *,
@@ -555,25 +604,8 @@ def routing_eligible_states(
     include_error_backoff: bool = False,
 ) -> list[AccountState]:
     """Return the pool-wide states eligible for the requested traffic class."""
-    current = time.time() if now is None else now
-    state_list = list(states)
-    evaluated_states = [replace(state) for state in state_list]
-    available, in_error_backoff, _ = _prepare_routing_candidates(
-        evaluated_states,
-        current=current,
-        ignore_standard_quota=False,
-        bypass_quota_exceeded=False,
-        bypass_account_ids=None,
-    )
-    eligible = [*available, *in_error_backoff] if include_error_backoff else available
-    if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and eligible:
-        eligible, _ = _filter_opportunistic_candidates(eligible, current)
-    eligible_evaluations = {id(state) for state in eligible}
-    return [
-        state
-        for state, evaluated in zip(state_list, evaluated_states, strict=True)
-        if id(evaluated) in eligible_evaluations
-    ]
+    pool = evaluate_routing_pool(states, now=now, traffic_class=traffic_class)
+    return list(pool.capacity_candidates if include_error_backoff else pool.normal_candidates)
 
 
 def select_account(

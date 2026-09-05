@@ -268,6 +268,9 @@ export function useAccountMutations() {
   });
 
   const usageLimitMutation = useMutation({
+    // Controls share these caches. Serialize policy writes through reconciliation
+    // so a delayed earlier save/refetch cannot race a later acknowledged edit.
+    scope: { id: "account-usage-limit" },
     mutationFn: ({
       accountId,
       update,
@@ -276,6 +279,12 @@ export function useAccountMutations() {
       update: AccountUsageLimitUpdateRequest;
     }) => updateAccountUsageLimit(accountId, update),
     onSuccess: async (data) => {
+      // Inactive reads are not refetched by invalidation. Cancel their retries
+      // before publishing the acknowledgement, even if the fetch ignores abort.
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: ["accounts", "list"] }),
+        queryClient.cancelQueries({ queryKey: ["dashboard", "overview"] }),
+      ]);
       reconcileUsageLimitCaches(queryClient, data);
       if (data.percent === null) {
         toast.success(t("accounts.toasts.usageLimitRemoved"));

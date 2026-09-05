@@ -22,16 +22,17 @@ from app.modules.api_keys.service import ApiKeyRequestUsageBudget
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 
 pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
 def _usage_policy_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def check_account_usage_limit_fresh(_self: LoadBalancer, _account_id: str) -> AccountUsageLimitState:
-        return AccountUsageLimitState.DISABLED
+    async def authorize_account_fresh(_self: LoadBalancer, _account_id: str) -> OwnerAuthorization:
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
 
-    monkeypatch.setattr(LoadBalancer, "check_account_usage_limit_fresh", check_account_usage_limit_fresh)
+    monkeypatch.setattr(LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
 
 def _make_bridge_session(
@@ -64,7 +65,9 @@ def _make_lease(lease_id: str) -> proxy_service.AccountLease:
 
 def _lease_balancer(**methods: object) -> SimpleNamespace:
     return SimpleNamespace(
-        check_account_usage_limit_fresh=AsyncMock(return_value=AccountUsageLimitState.DISABLED),
+        authorize_account_fresh=AsyncMock(
+            return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+        ),
         **methods,
     )
 
@@ -147,7 +150,7 @@ async def test_next_turn_reacquires_stream_lease() -> None:
         await mixin._ensure_http_bridge_session_stream_lease_locked(
             fake_self,
             session,
-            usage_limit_state=AccountUsageLimitState.DISABLED,
+            owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
         )
 
     assert session.account_lease is lease
@@ -192,7 +195,7 @@ async def test_reacquire_carries_turn_usage_budget_estimate() -> None:
             fake_self,
             session,
             request_state=request_state,
-            usage_limit_state=AccountUsageLimitState.DISABLED,
+            owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
         )
 
     assert session.account_lease is lease
@@ -243,7 +246,7 @@ async def test_keyed_warm_session_reacquire_is_fair_share_gated_and_counted(
             await mixin._ensure_http_bridge_session_stream_lease_locked(
                 fake_self,
                 hot_session,
-                usage_limit_state=AccountUsageLimitState.DISABLED,
+                owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
             )
 
     assert exc_info.value.status_code == 429
@@ -261,7 +264,7 @@ async def test_keyed_warm_session_reacquire_is_fair_share_gated_and_counted(
         await mixin._ensure_http_bridge_session_stream_lease_locked(
             fake_self,
             light_session,
-            usage_limit_state=AccountUsageLimitState.DISABLED,
+            owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
         )
 
     assert light_session.account_lease is not None
@@ -296,7 +299,7 @@ async def test_reacquire_with_snapshot_never_touches_settings_cache_under_lock(
             fake_self,
             session,
             fair_share_threshold_pct=37,
-            usage_limit_state=AccountUsageLimitState.DISABLED,
+            owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
         )
 
     settings_get.assert_not_awaited()
@@ -423,14 +426,14 @@ async def test_keyed_submit_resolves_fair_share_before_pending_lock(
         lambda: SimpleNamespace(get=stalled_get),
     )
 
-    async def stalled_usage_check(_account_id: str) -> AccountUsageLimitState:
+    async def stalled_usage_check(_account_id: str) -> OwnerAuthorization:
         usage_check_blocked.set()
         await asyncio.Event().wait()
-        return AccountUsageLimitState.DISABLED
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
 
     monkeypatch.setattr(
         service._load_balancer,
-        "check_account_usage_limit_fresh",
+        "authorize_account_fresh",
         stalled_usage_check,
     )
 
@@ -490,7 +493,7 @@ async def test_reacquire_denial_raises_local_cap_envelope() -> None:
             await mixin._ensure_http_bridge_session_stream_lease_locked(
                 fake_self,
                 session,
-                usage_limit_state=AccountUsageLimitState.DISABLED,
+                owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
             )
 
     assert exc_info.value.status_code == 429
@@ -529,7 +532,7 @@ async def test_reacquire_racing_close_releases_fresh_lease() -> None:
             await mixin._ensure_http_bridge_session_stream_lease_locked(
                 fake_self,
                 session,
-                usage_limit_state=AccountUsageLimitState.DISABLED,
+                owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
             )
 
     assert exc_info.value.status_code == 502
@@ -567,7 +570,7 @@ async def test_reacquire_racing_close_defers_cancellation_until_release() -> Non
             await mixin._ensure_http_bridge_session_stream_lease_locked(
                 fake_self,
                 session,
-                usage_limit_state=AccountUsageLimitState.DISABLED,
+                owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
             )
 
     reacquire_task = asyncio.create_task(reacquire())
@@ -597,7 +600,7 @@ async def test_reacquire_noop_when_lease_already_held() -> None:
         await mixin._ensure_http_bridge_session_stream_lease_locked(
             fake_self,
             session,
-            usage_limit_state=AccountUsageLimitState.DISABLED,
+            owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED),
         )
 
     assert session.account_lease is lease
@@ -686,14 +689,14 @@ async def test_turn_rechecks_usage_policy_after_prewarm_before_queue_admission(
     lease = _make_lease("l-policy-race")
     usage_gate = AsyncMock(
         side_effect=[
-            AccountUsageLimitState.AVAILABLE,
-            AccountUsageLimitState.REACHED,
+            OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.AVAILABLE),
+            OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.REACHED),
         ]
     )
     acquire_account_lease = AsyncMock(return_value=lease)
     release_account_lease = AsyncMock()
     retire = AsyncMock(return_value=True)
-    monkeypatch.setattr(service._load_balancer, "check_account_usage_limit_fresh", usage_gate)
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
     monkeypatch.setattr(service._load_balancer, "acquire_account_lease", acquire_account_lease)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
@@ -743,8 +746,10 @@ async def test_prewarm_rechecks_owner_policy_at_dispatch_boundary(
     send_text = AsyncMock()
     session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
     service._http_bridge_sessions[session.key] = session
-    usage_gate = AsyncMock(return_value=AccountUsageLimitState.REACHED)
-    monkeypatch.setattr(service._load_balancer, "check_account_usage_limit_fresh", usage_gate)
+    usage_gate = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.REACHED)
+    )
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
 
     async def acquire_admission(
         state: proxy_service._WebSocketRequestState,
@@ -794,14 +799,20 @@ async def test_prewarm_rechecks_owner_policy_at_dispatch_boundary(
 @pytest.mark.parametrize(
     ("denied_state", "expected_code"),
     [
-        (AccountUsageLimitState.REACHED, "account_usage_limit_reached"),
-        (AccountUsageLimitState.DATA_UNAVAILABLE, "account_usage_limit_reached"),
-        (None, "previous_response_owner_unavailable"),
+        (
+            OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.REACHED),
+            "account_usage_limit_reached",
+        ),
+        (
+            OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.DATA_UNAVAILABLE),
+            "account_usage_limit_reached",
+        ),
+        (OwnerAuthorization(OwnerAuthorizationKind.OWNER_UNAVAILABLE), "previous_response_owner_unavailable"),
     ],
 )
 async def test_owner_policy_denial_wins_over_queue_full(
     monkeypatch: pytest.MonkeyPatch,
-    denied_state: AccountUsageLimitState | None,
+    denied_state: OwnerAuthorization,
     expected_code: str,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -809,7 +820,7 @@ async def test_owner_policy_denial_wins_over_queue_full(
     session.account_lease = _make_lease("l-policy-queue-full")
     usage_gate = AsyncMock(return_value=denied_state)
     retire = AsyncMock(return_value=False)
-    monkeypatch.setattr(service._load_balancer, "check_account_usage_limit_fresh", usage_gate)
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
     monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
     monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
     request_state = proxy_service._WebSocketRequestState(
@@ -851,7 +862,7 @@ async def test_owner_policy_read_failure_has_stable_product_error(
     session.account_lease = _make_lease("l-policy-read-failure")
     monkeypatch.setattr(
         service._load_balancer,
-        "check_account_usage_limit_fresh",
+        "authorize_account_fresh",
         AsyncMock(side_effect=RuntimeError("database unavailable")),
     )
     request_state = proxy_service._WebSocketRequestState(
@@ -892,7 +903,7 @@ async def test_owner_policy_read_cancellation_propagates(
     session.account_lease = _make_lease("l-policy-read-cancel")
     monkeypatch.setattr(
         service._load_balancer,
-        "check_account_usage_limit_fresh",
+        "authorize_account_fresh",
         AsyncMock(side_effect=asyncio.CancelledError),
     )
     request_state = proxy_service._WebSocketRequestState(
@@ -937,7 +948,7 @@ async def test_turn_fails_closed_when_pinned_owner_is_missing() -> None:
             await mixin._ensure_http_bridge_session_stream_lease_locked(
                 fake_self,
                 session,
-                usage_limit_state=None,
+                owner_authorization=OwnerAuthorization(OwnerAuthorizationKind.OWNER_UNAVAILABLE),
             )
 
     assert exc_info.value.status_code == 502

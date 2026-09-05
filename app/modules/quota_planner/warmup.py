@@ -16,9 +16,8 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
-from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
 from app.core.usage.types import UsageWindowRow
-from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation, _await_result_deferring_cancellation
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, QuotaPlannerDecision
 from app.modules.accounts.repository import AccountsRepository
@@ -31,6 +30,7 @@ from app.modules.api_keys.service import (
     ApiKeysService,
 )
 from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind, load_owner_authorization
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
@@ -84,10 +84,10 @@ class WarmupUsage:
 @dataclass(frozen=True, slots=True)
 class _FreshStandardUsage:
     account: Account | None
+    decision: OwnerAuthorization
     primary: UsageWindowRow | None = None
     secondary: UsageWindowRow | None = None
     monthly: UsageWindowRow | None = None
-    limit_state: AccountUsageLimitState = AccountUsageLimitState.DISABLED
 
 
 class QuotaWarmupService:
@@ -253,11 +253,13 @@ class QuotaWarmupService:
                 claim_lease_expires_at=claim_lease_expires_at,
             )
         authorization_reason: str | None = None
-        if authorization.account is None:
+        if authorization.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+            authorization_reason = ACCOUNT_USAGE_LIMIT_AUTHORIZATION_FAILED_REASON
+        elif authorization.account is None:
             authorization_reason = "account_not_found"
-        elif authorization.account.status != AccountStatus.ACTIVE:
+        elif authorization.decision.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
             authorization_reason = f"account_status_{authorization.account.status.value}"
-        elif authorization.limit_state.blocks_account_use:
+        elif authorization.decision.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
             authorization_reason = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
         if authorization_reason is not None:
             return await self._skip_claimed_warmup_deferring_cancellation(
@@ -509,6 +511,10 @@ class QuotaWarmupService:
         claim_executed_at: datetime,
         claim_lease_expires_at: datetime,
     ) -> WarmupExecutionResult:
+        # Claim and reservation writes have committed before authorization.
+        # A cancelled driver call or a PostgreSQL statement error leaves the
+        # read transaction unusable. End it before releasing durable resources.
+        await self._session.rollback()
         row: QuotaPlannerDecision | None = None
         try:
             if reservation_id is not None:
@@ -539,36 +545,28 @@ class QuotaWarmupService:
         claim_executed_at: datetime,
         claim_lease_expires_at: datetime,
     ) -> WarmupExecutionResult:
-        cleanup = asyncio.create_task(
-            self._skip_claimed_warmup(
-                decision_id=decision_id,
-                reason=reason,
-                reservation_id=reservation_id,
-                claim_executed_at=claim_executed_at,
-                claim_lease_expires_at=claim_lease_expires_at,
-            )
-        )
-        cancellation: asyncio.CancelledError | None = None
-        while True:
+        async def settle() -> WarmupExecutionResult | Exception:
+            # Return a cleanup error as data until the shared waiter returns its
+            # cancellation marker. Otherwise a failed cleanup could replace the
+            # caller's original cancellation before that marker is delivered.
             try:
-                result = await asyncio.shield(cleanup)
-                break
-            except asyncio.CancelledError as exc:
-                if cleanup.cancelled():
-                    if cancellation is not None:
-                        raise cancellation from exc
-                    raise
-                if cancellation is None:
-                    cancellation = exc
-                current_task = asyncio.current_task()
-                if current_task is not None:
-                    current_task.uncancel()
-            except BaseException as cleanup_error:
-                if cancellation is not None:
-                    raise cancellation from cleanup_error
-                raise
+                return await self._skip_claimed_warmup(
+                    decision_id=decision_id,
+                    reason=reason,
+                    reservation_id=reservation_id,
+                    claim_executed_at=claim_executed_at,
+                    claim_lease_expires_at=claim_lease_expires_at,
+                )
+            except Exception as exc:
+                return exc
+
+        result, cancellation = await _await_result_deferring_cancellation(settle())
         if cancellation is not None:
+            if isinstance(result, Exception):
+                logger.warning("Warmup cleanup failed during cancellation", exc_info=result)
             raise cancellation
+        if isinstance(result, Exception):
+            raise result
         return result
 
     async def cancel_decision(self, decision_id: str) -> WarmupExecutionResult | None:
@@ -610,13 +608,15 @@ class QuotaWarmupService:
             return False, "dry_run_enabled"
 
         standard_usage = await self._load_fresh_standard_usage(account.id)
+        if standard_usage.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+            return False, ACCOUNT_USAGE_LIMIT_AUTHORIZATION_FAILED_REASON
         account = standard_usage.account
         if account is None:
             return False, "account_not_found"
         if account.status != AccountStatus.ACTIVE:
             return False, f"account_status_{account.status.value}"
 
-        if standard_usage.limit_state.blocks_account_use:
+        if standard_usage.decision.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
             return False, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
         latest = standard_usage.primary
         if _sample_blocks_short_window_planning(latest):
@@ -648,34 +648,33 @@ class QuotaWarmupService:
 
     async def _load_fresh_standard_usage(self, account_id: str) -> _FreshStandardUsage:
         account = await self._accounts.get_by_id_fresh(account_id)
-        if account is None:
-            return _FreshStandardUsage(account=None)
-        if account.status != AccountStatus.ACTIVE:
-            return _FreshStandardUsage(account=account)
-        snapshot = await self._usage.account_usage_limit_snapshot(account_id)
+        if account is None or account.status != AccountStatus.ACTIVE:
+            return _FreshStandardUsage(
+                account=account,
+                decision=OwnerAuthorization(
+                    OwnerAuthorizationKind.OWNER_UNAVAILABLE,
+                    owner_status=account.status if account is not None else None,
+                ),
+            )
+        decision = await load_owner_authorization(
+            self._usage,
+            account_id,
+            refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
+            require_active=True,
+        )
+        snapshot = decision.snapshot
         if snapshot is None:
-            return _FreshStandardUsage(account=None)
+            return _FreshStandardUsage(account=None, decision=decision)
         account.status = snapshot.status
         account.plan_type = snapshot.plan_type
         account.usage_limit_enabled = snapshot.enabled
         account.usage_limit_percent = snapshot.limit_percent
-        if account.status != AccountStatus.ACTIVE:
-            return _FreshStandardUsage(account=account)
-        limit_state = evaluate_standard_usage_limit(
-            enabled=snapshot.enabled,
-            limit_percent=snapshot.limit_percent,
-            plan_type=snapshot.plan_type,
-            primary=snapshot.primary,
-            secondary=snapshot.secondary,
-            monthly=snapshot.monthly,
-            refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
-        )
         return _FreshStandardUsage(
             account=account,
+            decision=decision,
             primary=snapshot.primary,
             secondary=snapshot.secondary,
             monthly=snapshot.monthly,
-            limit_state=limit_state,
         )
 
     @staticmethod

@@ -712,13 +712,25 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
 
 
 @pytest.mark.asyncio
-async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
+@pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
+async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path, db_setup, dialect):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect
 
     from app.db.migrate import _build_alembic_config
 
-    db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-usage-limits.sqlite'}"
+    if dialect == "postgresql":
+        if not _is_postgresql_database_url(_DATABASE_URL):
+            pytest.skip("PostgreSQL-only account usage-limit migration round trip")
+        db_url = _DATABASE_URL
+        # This is the same explicitly isolated test database used by the
+        # PostgreSQL empty-schema migration contract above, never app settings.
+        async with SessionLocal() as session:
+            await session.execute(text("DROP SCHEMA public CASCADE"))
+            await session.execute(text("CREATE SCHEMA public"))
+            await session.commit()
+    else:
+        db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-usage-limits.sqlite'}"
     revision = "20260728_010000_add_account_usage_limits"
     parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
 
@@ -738,10 +750,11 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                     VALUES (
                         'acc_usage_limit_migration', '00000000-0000-0000-0000-000000000001',
                         'usage-limit@example.com', 'plus',
-                        x'01', x'02', x'03', '2026-01-01 00:00:00', 'active'
+                        :access, :refresh, :identity, '2026-01-01 00:00:00', 'active'
                     )
                     """
-                )
+                ),
+                {"access": b"\x01", "refresh": b"\x02", "identity": b"\x03"},
             )
     finally:
         await engine.dispose()
@@ -773,7 +786,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                 text(
                     """
                     UPDATE accounts
-                    SET usage_limit_enabled = 1, usage_limit_percent = 10.0
+                    SET usage_limit_enabled = TRUE, usage_limit_percent = 10.0
                     WHERE id = 'acc_usage_limit_migration'
                     """
                 )
@@ -784,7 +797,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                     text(
                         """
                         UPDATE accounts
-                        SET usage_limit_enabled = 1, usage_limit_percent = NULL
+                        SET usage_limit_enabled = TRUE, usage_limit_percent = NULL
                         WHERE id = 'acc_usage_limit_migration'
                         """
                     )
@@ -795,7 +808,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                     text(
                         """
                         UPDATE accounts
-                        SET usage_limit_enabled = 0, usage_limit_percent = 101.0
+                        SET usage_limit_enabled = FALSE, usage_limit_percent = 101.0
                         WHERE id = 'acc_usage_limit_migration'
                         """
                     )
@@ -856,7 +869,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                     text(
                         """
                         UPDATE accounts
-                        SET usage_limit_enabled = 1, usage_limit_percent = NULL
+                        SET usage_limit_enabled = TRUE, usage_limit_percent = NULL
                         WHERE id = 'acc_usage_limit_migration'
                         """
                     )
@@ -867,7 +880,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                     text(
                         """
                         UPDATE accounts
-                        SET usage_limit_enabled = 0, usage_limit_percent = 101.0
+                        SET usage_limit_enabled = FALSE, usage_limit_percent = 101.0
                         WHERE id = 'acc_usage_limit_migration'
                         """
                     )

@@ -65,6 +65,27 @@ it to clear the value. Because upstream usage is observed after requests finish,
 delayed reporting and requests already in flight can move actual usage past the
 displayed limit before the gate sees it.
 
+The cap also applies to new turns on existing HTTP/WebSocket connections and to
+public, limit-reset, and quota-planner warmups. A continuation that requires a
+capped owner is rejected rather than silently moved to another account. An
+unavailable or deleted owner is reported separately from a reached cap.
+
+An enabled `100%` limit is **not** the same as disabling the feature: it still
+requires current telemetry and blocks at 100%. Missing telemetry is not treated
+as a real zero-percent measurement in usage history or demand calculations.
+
+After a save, the account list refreshes authoritative data. Older outstanding
+reads cannot revert the acknowledged policy, and overlapping policy edits are
+applied in order. Fresh owner checks read committed configuration directly;
+ordinary selection on another replica may briefly retain cached inputs until
+invalidation or cache expiry. Work already dispatched is not cancelled.
+
+`account_usage_limit_reached` means the local policy blocks the account (because
+the cap is reached or current telemetry is unavailable).
+`account_usage_limit_authorization_failed` means the local authorization read
+could not be completed; retry after the database/service recovers. It is not an
+upstream HTTP response.
+
 ---
 
 *Specs: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture) · [usage-refresh-policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy)*

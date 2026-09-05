@@ -51,6 +51,7 @@ from app.modules.proxy.capability_routing import (
     REQUIRED_CAPABILITY_HEADER,
     _capability_lineage_unavailable_error,
 )
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 
 pytestmark = pytest.mark.integration
 
@@ -148,11 +149,11 @@ def _stub_request_logging(monkeypatch: pytest.MonkeyPatch) -> None:
         del self, kwargs
         return None
 
-    async def check_account_usage_limit_fresh(_self: object, _account_id: str) -> AccountUsageLimitState:
-        return AccountUsageLimitState.DISABLED
+    async def authorize_account_fresh(_self: object, _account_id: str) -> OwnerAuthorization:
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
-    monkeypatch.setattr(proxy_module.LoadBalancer, "check_account_usage_limit_fresh", check_account_usage_limit_fresh)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
 
 class _FakeUpstreamMessage:
@@ -4802,10 +4803,17 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
         del self, headers, kwargs
         return account, upstream
 
-    async def check_account_usage_limit_fresh(self, account_id):
+    async def authorize_account_fresh(self, account_id):
         del self
         assert account_id == account.id
-        return usage_limit_state
+        if usage_limit_state is None:
+            return OwnerAuthorization(OwnerAuthorizationKind.OWNER_UNAVAILABLE)
+        return OwnerAuthorization(
+            OwnerAuthorizationKind.USAGE_POLICY_BLOCKED
+            if usage_limit_state.blocks_account_use
+            else OwnerAuthorizationKind.ALLOWED,
+            usage_limit_state,
+        )
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -4813,8 +4821,8 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(
         proxy_module.LoadBalancer,
-        "check_account_usage_limit_fresh",
-        check_account_usage_limit_fresh,
+        "authorize_account_fresh",
+        authorize_account_fresh,
     )
 
     request = {
@@ -4906,7 +4914,7 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
         del self, headers, kwargs
         return account, upstream
 
-    async def check_account_usage_limit_fresh(self, account_id):
+    async def authorize_account_fresh(self, account_id):
         nonlocal authorization_checks
         del self
         assert account_id == account.id
@@ -4914,8 +4922,8 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
         if authorization_checks == 2:
             if isinstance(second_check, Exception):
                 raise second_check
-            return second_check
-        return AccountUsageLimitState.DISABLED
+            return OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, second_check)
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
 
     async def record_connect_failure(self, **kwargs):
         del self
@@ -4939,8 +4947,8 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
     )
     monkeypatch.setattr(
         proxy_module.LoadBalancer,
-        "check_account_usage_limit_fresh",
-        check_account_usage_limit_fresh,
+        "authorize_account_fresh",
+        authorize_account_fresh,
     )
 
     request = {

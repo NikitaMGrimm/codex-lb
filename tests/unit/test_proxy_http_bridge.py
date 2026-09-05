@@ -81,6 +81,7 @@ from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_e
 from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission, LoadBalancer
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 from tests.unit.hypothesis_strategies import json_values as hypothesis_json_values
 
 pytestmark = pytest.mark.unit
@@ -172,10 +173,10 @@ def _stub_recovery_attempt_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _usage_policy_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def check_account_usage_limit_fresh(_self: LoadBalancer, _account_id: str) -> AccountUsageLimitState:
-        return AccountUsageLimitState.DISABLED
+    async def authorize_account_fresh(_self: LoadBalancer, _account_id: str) -> OwnerAuthorization:
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
 
-    monkeypatch.setattr(LoadBalancer, "check_account_usage_limit_fresh", check_account_usage_limit_fresh)
+    monkeypatch.setattr(LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
 
 def _without_installation_metadata(text: str) -> dict[str, Any]:
@@ -23954,10 +23955,15 @@ async def test_submit_http_bridge_request_rechecks_owner_policy_after_late_admis
     admission_waiting = asyncio.Event()
     release_admission = asyncio.Event()
 
-    async def usage_gate(_account_id: str) -> AccountUsageLimitState:
+    async def usage_gate(_account_id: str) -> OwnerAuthorization:
         nonlocal usage_read_count
         usage_read_count += 1
-        return usage_state
+        return OwnerAuthorization(
+            OwnerAuthorizationKind.USAGE_POLICY_BLOCKED
+            if usage_state.blocks_account_use
+            else OwnerAuthorizationKind.ALLOWED,
+            usage_state,
+        )
 
     original_admission = service._acquire_request_state_response_create_admission
 
@@ -23966,7 +23972,7 @@ async def test_submit_http_bridge_request_rechecks_owner_policy_after_late_admis
         await release_admission.wait()
         await original_admission(*args, **kwargs)
 
-    monkeypatch.setattr(service._load_balancer, "check_account_usage_limit_fresh", usage_gate)
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
     monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", delayed_admission)
     monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
     request_state = proxy_service._WebSocketRequestState(
@@ -24752,13 +24758,17 @@ async def test_recovery_alias_rollback_restores_live_predecessor_index() -> None
 @pytest.mark.parametrize(
     ("final_authorization", "expected_code", "expected_retirement"),
     [
-        (AccountUsageLimitState.REACHED, "account_usage_limit_reached", True),
+        (
+            OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.REACHED),
+            "account_usage_limit_reached",
+            True,
+        ),
         (RuntimeError("usage snapshot unavailable"), "account_usage_limit_authorization_failed", False),
     ],
 )
 async def test_recovery_final_authorization_failure_rolls_back_alias_before_dispatch(
     monkeypatch: pytest.MonkeyPatch,
-    final_authorization: AccountUsageLimitState | Exception,
+    final_authorization: OwnerAuthorization | Exception,
     expected_code: str,
     expected_retirement: bool,
 ) -> None:
@@ -24808,12 +24818,12 @@ async def test_recovery_final_authorization_failure_rolls_back_alias_before_disp
     )
     usage_gate = AsyncMock(
         side_effect=[
-            AccountUsageLimitState.AVAILABLE,
+            OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.AVAILABLE),
             final_authorization,
         ]
     )
     release_account_lease = AsyncMock()
-    monkeypatch.setattr(service._load_balancer, "check_account_usage_limit_fresh", usage_gate)
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-recovery-final-authorization",

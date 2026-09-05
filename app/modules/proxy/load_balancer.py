@@ -59,7 +59,6 @@ from app.core.plan_types import account_plan_matches_allowed, normalize_account_
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
-from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
@@ -86,7 +85,7 @@ from app.modules.proxy._load_balancer.model_eligibility import (
 from app.modules.proxy._load_balancer.model_eligibility import (
     _mapped_model_has_registry_entry as _mapped_model_has_registry_entry_impl,
 )
-from app.modules.proxy._load_balancer.owner_authorization import load_fresh_owner_usage_limit
+from app.modules.proxy._load_balancer.owner_authorization import load_fresh_owner_authorization
 from app.modules.proxy._load_balancer.selection_inputs import SelectionInputs as _SelectionInputs
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
@@ -162,6 +161,7 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_quota_definition,
     get_additional_quota_routing_policy,
 )
+from app.modules.usage.authorization import OwnerAuthorization
 from app.modules.usage.mappers import evaluate_account_usage_limit, usage_history_to_window_row
 
 if TYPE_CHECKING:
@@ -321,8 +321,8 @@ class LoadBalancer:
                 return 0, 0, 0.0
             return runtime.inflight_response_creates, runtime.inflight_streams, runtime.leased_tokens
 
-    async def check_account_usage_limit_fresh(self, account_id: str) -> AccountUsageLimitState | None:
-        return await load_fresh_owner_usage_limit(
+    async def authorize_account_fresh(self, account_id: str) -> OwnerAuthorization:
+        return await load_fresh_owner_authorization(
             self._repo_factory, account_id, refresh_interval_seconds=_usage_refresh_interval_seconds()
         )
 

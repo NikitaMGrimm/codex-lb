@@ -54,7 +54,6 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonObject, JsonValue
-from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.locks import fast_lock
 from app.core.utils.request_id import (
     ensure_request_id,
@@ -238,6 +237,7 @@ from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 
 logger = logging.getLogger("app.modules.proxy.service")
 
@@ -429,13 +429,15 @@ def _http_bridge_usage_limit_authorization_failed_error() -> ProxyResponseError:
 
 def _ensure_http_bridge_session_owner_authorized(
     session: "_HTTPBridgeSession",
-    usage_limit_state: AccountUsageLimitState | None,
+    owner_authorization: OwnerAuthorization,
 ) -> None:
-    if usage_limit_state is None:
+    if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+        raise _http_bridge_usage_limit_authorization_failed_error()
+    if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
         session.upstream_control.reconnect_requested = True
         session.upstream_control.retire_after_drain = True
         raise _http_bridge_previous_response_owner_unavailable_error()
-    if not usage_limit_state.blocks_account_use:
+    if owner_authorization.allowed:
         return
     session.upstream_control.reconnect_requested = True
     session.upstream_control.retire_after_drain = True
@@ -1945,13 +1947,13 @@ class _HTTPBridgeRequestSubmitMixin:
             fair_share_threshold_pct = 0
             if needs_stream_lease:
                 fair_share_threshold_pct = await self._http_bridge_fair_share_threshold_pct(session)
-                usage_limit_state = await self._fresh_http_bridge_owner_authorization(session)
+                owner_authorization = await self._fresh_http_bridge_owner_authorization(session)
                 async with session.pending_lock:
                     await self._ensure_http_bridge_session_stream_lease_locked(
                         session,
                         request_state=request_state,
                         fair_share_threshold_pct=fair_share_threshold_pct,
-                        usage_limit_state=usage_limit_state,
+                        owner_authorization=owner_authorization,
                     )
         except BaseException as exc:
             # Recovery claims are made before admission. If reacquiring an
@@ -2005,13 +2007,13 @@ class _HTTPBridgeRequestSubmitMixin:
         try:
             # The fair-share snapshot remains reusable across prewarm, but the
             # account policy is re-read immediately before queue admission.
-            usage_limit_state = await self._fresh_http_bridge_owner_authorization(session)
+            owner_authorization = await self._fresh_http_bridge_owner_authorization(session)
             async with session.pending_lock:
                 await self._ensure_http_bridge_session_stream_lease_locked(
                     session,
                     request_state=request_state,
                     fair_share_threshold_pct=fair_share_threshold_pct,
-                    usage_limit_state=usage_limit_state,
+                    owner_authorization=owner_authorization,
                 )
                 if session.queued_request_count >= queue_limit:
                     _log_http_bridge_event(
@@ -2389,8 +2391,8 @@ class _HTTPBridgeRequestSubmitMixin:
                                 ),
                                 retry_after_seconds=suppressed_retry_after_seconds,
                             )
-                    usage_limit_state = await self._fresh_http_bridge_owner_authorization(session)
-                    _ensure_http_bridge_session_owner_authorized(session, usage_limit_state)
+                    owner_authorization = await self._fresh_http_bridge_owner_authorization(session)
+                    _ensure_http_bridge_session_owner_authorized(session, owner_authorization)
                     async with session.pending_lock:
                         session.pending_requests.append(request_state)
                         session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
@@ -2725,8 +2727,8 @@ class _HTTPBridgeRequestSubmitMixin:
                         )
                         gate_acquired = False
                         return
-                    usage_limit_state = await self._fresh_http_bridge_owner_authorization(session)
-                    _ensure_http_bridge_session_owner_authorized(session, usage_limit_state)
+                    owner_authorization = await self._fresh_http_bridge_owner_authorization(session)
+                    _ensure_http_bridge_session_owner_authorized(session, owner_authorization)
                     async with session.pending_lock:
                         session.pending_requests.append(warmup_state)
                     request_enqueued = True
@@ -3023,12 +3025,12 @@ class _HTTPBridgeRequestSubmitMixin:
     async def _fresh_http_bridge_owner_authorization(
         self: Any,
         session: "_HTTPBridgeSession",
-    ) -> AccountUsageLimitState | None:
+    ) -> OwnerAuthorization:
         load_balancer = getattr(self, "_load_balancer", None)
         if load_balancer is None:
-            return AccountUsageLimitState.DISABLED
+            return OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
         try:
-            return await load_balancer.check_account_usage_limit_fresh(session.account.id)
+            return await load_balancer.authorize_account_fresh(session.account.id)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -3045,7 +3047,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         fair_share_threshold_pct: int | None = None,
-        usage_limit_state: AccountUsageLimitState | None,
+        owner_authorization: OwnerAuthorization,
     ) -> None:
         """Reacquire the account stream lease for a session idled between turns.
 
@@ -3083,7 +3085,7 @@ class _HTTPBridgeRequestSubmitMixin:
         load_balancer = getattr(self, "_load_balancer", None)
         if load_balancer is None:
             return
-        _ensure_http_bridge_session_owner_authorized(session, usage_limit_state)
+        _ensure_http_bridge_session_owner_authorized(session, owner_authorization)
         if session.account_lease is not None or session.closed:
             return
         api_key_id = session.key.api_key_id

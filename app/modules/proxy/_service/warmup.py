@@ -37,6 +37,7 @@ from app.modules.proxy.request_policy import (
     normalize_upstream_model_alias,
     validate_model_access,
 )
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind, load_owner_authorization
 from app.modules.usage.mappers import usage_history_to_window_row
 
 logger = logging.getLogger(__name__)
@@ -140,7 +141,7 @@ class _WarmupAccountSnapshot:
 @dataclass(frozen=True, slots=True)
 class _WarmupAuthorization:
     account: _WarmupAccountSnapshot | None
-    limit_state: AccountUsageLimitState = AccountUsageLimitState.DISABLED
+    decision: OwnerAuthorization
 
 
 def _is_warmup_usage_eligible(entry: UsageWindowRow | None) -> bool:
@@ -431,6 +432,15 @@ class _WarmupMixin:
                     error_code=error_code,
                     error_message=error_message,
                 )
+            if authorization.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+                error_code = _WARMUP_USAGE_LIMIT_AUTHORIZATION_FAILED
+                error_message = "Account usage-limit authorization failed"
+                return _WarmupSubmitResult(
+                    success=False,
+                    request_id=request_id,
+                    error_code=error_code,
+                    error_message=error_message,
+                )
             if authorization.account is None:
                 error_code = "account_not_found"
                 error_message = "Account no longer exists"
@@ -440,7 +450,7 @@ class _WarmupMixin:
                     error_code=error_code,
                     error_message=error_message,
                 )
-            if authorization.account.status != AccountStatus.ACTIVE:
+            if authorization.decision.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
                 error_code = "account_not_active"
                 error_message = f"Account status is {authorization.account.status.value}"
                 return _WarmupSubmitResult(
@@ -449,7 +459,7 @@ class _WarmupMixin:
                     error_code=error_code,
                     error_message=error_message,
                 )
-            if authorization.limit_state.blocks_account_use:
+            if authorization.decision.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
                 error_code = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
                 error_message = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
                 return _WarmupSubmitResult(
@@ -602,29 +612,28 @@ class _WarmupMixin:
         proxy = cast(_WarmupServiceProtocol, self)
         async with proxy._repo_factory() as repos:
             account = await repos.accounts.get_by_id_fresh(account_id)
-            if account is None:
-                return _WarmupAuthorization(account=None)
-            account_snapshot = _snapshot_warmup_account(account)
-            if account.status != AccountStatus.ACTIVE:
-                return _WarmupAuthorization(account=account_snapshot)
-            snapshot = await repos.usage.account_usage_limit_snapshot(account_id)
+            if account is None or account.status != AccountStatus.ACTIVE:
+                return _WarmupAuthorization(
+                    account=_snapshot_warmup_account(account) if account is not None else None,
+                    decision=OwnerAuthorization(
+                        OwnerAuthorizationKind.OWNER_UNAVAILABLE,
+                        owner_status=account.status if account is not None else None,
+                    ),
+                )
+            decision = await load_owner_authorization(
+                repos.usage,
+                account_id,
+                refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
+                require_active=True,
+            )
+            snapshot = decision.snapshot
             if snapshot is None:
-                return _WarmupAuthorization(account=None)
+                return _WarmupAuthorization(account=None, decision=decision)
             account_snapshot = replace(
-                account_snapshot,
+                _snapshot_warmup_account(account),
                 status=snapshot.status,
                 plan_type=snapshot.plan_type,
                 usage_limit_enabled=snapshot.enabled,
                 usage_limit_percent=snapshot.limit_percent,
             )
-            if account_snapshot.status != AccountStatus.ACTIVE:
-                return _WarmupAuthorization(account=account_snapshot)
-            limit_state = _evaluate_warmup_usage_limit(
-                account_snapshot,
-                _WarmupUsageSnapshot(
-                    primary=snapshot.primary,
-                    secondary=snapshot.secondary,
-                    monthly=snapshot.monthly,
-                ),
-            )
-            return _WarmupAuthorization(account=account_snapshot, limit_state=limit_state)
+            return _WarmupAuthorization(account=account_snapshot, decision=decision)

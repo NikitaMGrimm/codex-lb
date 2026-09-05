@@ -107,6 +107,7 @@ from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.proxy.work_admission import AdmissionLease
 from app.modules.request_logs.repository import PreviousResponseOwnerRecord, RequestLogsRepository
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 from app.modules.usage.repository import AccountUsageLimitSnapshot, AdditionalUsageRepository, UsageRepository
 from tests.unit._proxy_test_helpers import runtime_basic_auth_url
 from tests.unit.hypothesis_strategies import json_objects, json_values
@@ -6149,6 +6150,18 @@ def test_request_log_failure_metadata_keeps_direct_previous_response_not_found_s
     assert metadata.upstream_status_code == 400
     assert metadata.upstream_error_code == "previous_response_not_found"
     assert metadata.bridge_stage is None
+
+
+def test_request_log_failure_metadata_does_not_attribute_owner_authorization_failure_to_upstream() -> None:
+    from app.modules.proxy._service.http_bridge.request_submit import (
+        _http_bridge_usage_limit_authorization_failed_error,
+    )
+
+    error = _http_bridge_usage_limit_authorization_failed_error()
+    metadata = proxy_service._request_log_failure_metadata(error)
+    assert error.status_code == 503
+    assert error.payload["error"]["code"] == "account_usage_limit_authorization_failed"
+    assert metadata.upstream_status_code is None
 
 
 def test_request_log_failure_metadata_does_not_use_status_code_for_local_proxy_failures() -> None:
@@ -49750,8 +49763,8 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     monkeypatch.setattr(proxy_service, "_PREWARM_RESPONSE_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(
         service._load_balancer,
-        "check_account_usage_limit_fresh",
-        AsyncMock(return_value=AccountUsageLimitState.DISABLED),
+        "authorize_account_fresh",
+        AsyncMock(return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)),
     )
     reconnect_observations: list[dict[str, object]] = []
     admission_observations: list[dict[str, object]] = []
@@ -51727,6 +51740,18 @@ def test_maybe_dump_oversized_response_create_dedups_via_product_path(monkeypatc
 @pytest.mark.asyncio
 async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    # This test owns network/operation behavior, not lease reacquisition. Mock
+    # the explicit authorization boundary without adding a partial balancer.
+    monkeypatch.setattr(
+        service,
+        "_fresh_http_bridge_owner_authorization",
+        AsyncMock(
+            return_value=OwnerAuthorization(
+                OwnerAuthorizationKind.ALLOWED,
+                AccountUsageLimitState.DISABLED,
+            )
+        ),
+    )
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     original_text = json.dumps(
@@ -51816,6 +51841,18 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
 @pytest.mark.asyncio
 async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replayed(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    # This test owns network/operation behavior, not lease reacquisition. Mock
+    # the explicit authorization boundary without adding a partial balancer.
+    monkeypatch.setattr(
+        service,
+        "_fresh_http_bridge_owner_authorization",
+        AsyncMock(
+            return_value=OwnerAuthorization(
+                OwnerAuthorizationKind.ALLOWED,
+                AccountUsageLimitState.DISABLED,
+            )
+        ),
+    )
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     request_state = proxy_service._WebSocketRequestState(
@@ -51891,6 +51928,18 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
 @pytest.mark.asyncio
 async def test_submit_http_bridge_marks_ambiguous_operation_before_releasing_owner(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    # This test owns network/operation behavior, not lease reacquisition. Mock
+    # the explicit authorization boundary without adding a partial balancer.
+    monkeypatch.setattr(
+        service,
+        "_fresh_http_bridge_owner_authorization",
+        AsyncMock(
+            return_value=OwnerAuthorization(
+                OwnerAuthorizationKind.ALLOWED,
+                AccountUsageLimitState.DISABLED,
+            )
+        ),
+    )
     events: list[str] = []
     service._durable_bridge = SimpleNamespace(
         mark_operation_unknown=AsyncMock(side_effect=lambda **_kwargs: events.append("mark") or True),
@@ -51959,6 +52008,18 @@ async def test_submit_http_bridge_marks_ambiguous_operation_before_releasing_own
 @pytest.mark.asyncio
 async def test_submit_http_bridge_preflight_failure_keeps_operation_pre_dispatch(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    # This test owns network/operation behavior, not lease reacquisition. Mock
+    # the explicit authorization boundary without adding a partial balancer.
+    monkeypatch.setattr(
+        service,
+        "_fresh_http_bridge_owner_authorization",
+        AsyncMock(
+            return_value=OwnerAuthorization(
+                OwnerAuthorizationKind.ALLOWED,
+                AccountUsageLimitState.DISABLED,
+            )
+        ),
+    )
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     request_state = proxy_service._WebSocketRequestState(

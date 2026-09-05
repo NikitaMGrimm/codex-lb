@@ -10,3 +10,13 @@
 - [x] 8. Run focused backend/frontend, migration, precision, telemetry-freshness, error-precedence, continuity, and warmup regressions plus lint, formatting, type, architecture, and OpenSpec checks.
 - [x] 9. Resolve final review findings for warmup spec ownership, opportunistic error precedence, dashboard blocked-state display, and accessible percentage validation.
 - [x] 10. Make disable-retain atomic across the account API and dashboard, with stale-client regressions.
+
+## Authorization and consistency revamp
+
+- [x] 11. Reproduce final-selection, routing-context, telemetry-quality, and frontend-ordering regressions and integrate them into the owning test suites.
+- [x] 12. Introduce an explicit fresh owner-authorization contract and prove final-attempt, continuity, warmup, and cancellation cleanup.
+- [x] 13. Preserve canonical routing-pool context separately from capacity projections; prove disabled-policy fallback equivalence.
+- [x] 14. Centralize measurement-quality filtering before historical calculations and verify genuine zero observations remain measurements.
+- [x] 15. Classify authorization infrastructure failures as local in complete request-log metadata.
+- [x] 16. Prevent stale reads and overlapping mutations from reverting acknowledged dashboard policy changes on the locked frontend dependencies.
+- [x] 17. Document consistency and architectural decisions; run backend/frontend/PostgreSQL/spec/migration/quality checks.

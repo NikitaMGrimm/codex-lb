@@ -30,3 +30,16 @@ A missing fresh account MUST skip with reason `account_not_found`; any fresh non
 - **THEN** the decision is skipped with reason `account_usage_limit_authorization_failed`
 - **AND** the API-key reservation is released
 - **AND** no synthetic upstream request is sent
+
+
+### Requirement: Authorization cleanup recovers a failed database transaction
+
+Before settling a denied or cancelled claimed warmup, execution MUST roll back the authorization read transaction, including when an actual database statement fails or the driver connection is invalidated by cancellation. It MUST finish reservation release and the `executing` to `skipped` transition before propagating cancellation. SQLite diagnostic listeners MUST NOT reconnect an invalidated connection or prevent this rollback.
+
+#### Scenario: Cancellation interrupts an actual authorization SQL statement
+
+- **GIVEN** a warmup has a committed execution claim and a real API-key usage reservation
+- **WHEN** cancellation interrupts its final authorization SQL operation
+- **THEN** cleanup restores a usable transaction and releases the reservation's reserved capacity
+- **AND** the decision becomes `skipped` with reason `account_usage_limit_authorization_cancelled`
+- **AND** cancellation propagates and no probe is dispatched

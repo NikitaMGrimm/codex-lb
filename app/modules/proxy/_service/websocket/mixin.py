@@ -513,6 +513,7 @@ from app.modules.proxy.tool_call_dedupe import (
 from app.modules.proxy.tool_call_dedupe import (
     response_id_from_payload as tool_call_response_id_from_payload,
 )
+from app.modules.usage.authorization import OwnerAuthorizationKind
 
 
 def _facade() -> Any:
@@ -2692,9 +2693,7 @@ class _WebSocketMixin:
                             if account is None:
                                 raise _http_bridge_previous_response_owner_unavailable_error()
                             try:
-                                usage_limit_state = await proxy._load_balancer.check_account_usage_limit_fresh(
-                                    account.id
-                                )
+                                owner_authorization = await proxy._load_balancer.authorize_account_fresh(account.id)
                             except asyncio.CancelledError:
                                 raise
                             except Exception:
@@ -2713,9 +2712,18 @@ class _WebSocketMixin:
                                         error_type="server_error",
                                     ),
                                 )
-                            if usage_limit_state is None:
+                            if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+                                raise ProxyResponseError(
+                                    503,
+                                    openai_error(
+                                        "account_usage_limit_authorization_failed",
+                                        "Unable to verify account usage limit; retry later.",
+                                        error_type="server_error",
+                                    ),
+                                )
+                            if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
                                 raise _http_bridge_previous_response_owner_unavailable_error()
-                            if usage_limit_state.blocks_account_use:
+                            if owner_authorization.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
                                 status_code, error_payload = selection_failure_response(
                                     AccountSelection(
                                         account=None,

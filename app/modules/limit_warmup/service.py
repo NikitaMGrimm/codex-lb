@@ -19,12 +19,12 @@ from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
-from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
 from app.core.usage.pricing import get_pricing_for_model
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind, load_owner_authorization
 from app.modules.usage.mappers import evaluate_account_usage_limit, usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 
@@ -76,7 +76,7 @@ class LimitWarmupSendOutcome:
 @dataclass(frozen=True, slots=True)
 class _LimitWarmupAuthorization:
     account: Account | None
-    limit_state: AccountUsageLimitState
+    decision: OwnerAuthorization
 
 
 class LimitWarmupSender(Protocol):
@@ -226,6 +226,14 @@ class StreamingLimitWarmupSender:
                 error_code="account_usage_limit_authorization_failed",
                 error_message="Account usage-limit authorization failed",
             )
+        if authorization.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+            return LimitWarmupSendResult(
+                request_id=request_id,
+                success=False,
+                latency_ms=_elapsed_ms(started),
+                error_code="account_usage_limit_authorization_failed",
+                error_message="Account usage-limit authorization failed",
+            )
         fresh_account = authorization.account
         if (
             fresh_account is None
@@ -245,7 +253,7 @@ class StreamingLimitWarmupSender:
                 error_code="account_not_active",
                 error_message=error_message,
             )
-        if authorization.limit_state.blocks_account_use:
+        if authorization.decision.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
             return LimitWarmupSendResult(
                 request_id=request_id,
                 success=False,
@@ -365,32 +373,28 @@ class StreamingLimitWarmupSender:
         account_id: str,
     ) -> _LimitWarmupAuthorization:
         account = await accounts_repo.get_by_id_fresh(account_id)
-        if account is None:
+        if account is None or account.status != AccountStatus.ACTIVE:
             return _LimitWarmupAuthorization(
-                account=None,
-                limit_state=AccountUsageLimitState.DATA_UNAVAILABLE,
+                account=account,
+                decision=OwnerAuthorization(
+                    OwnerAuthorizationKind.OWNER_UNAVAILABLE,
+                    owner_status=account.status if account is not None else None,
+                ),
             )
-        snapshot = await UsageRepository(accounts_repo.session).account_usage_limit_snapshot(account_id)
+        decision = await load_owner_authorization(
+            UsageRepository(accounts_repo.session),
+            account_id,
+            refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
+            require_active=True,
+        )
+        snapshot = decision.snapshot
         if snapshot is None:
-            return _LimitWarmupAuthorization(
-                account=None,
-                limit_state=AccountUsageLimitState.DATA_UNAVAILABLE,
-            )
-
+            return _LimitWarmupAuthorization(account=None, decision=decision)
         account.status = snapshot.status
         account.plan_type = snapshot.plan_type
         account.usage_limit_enabled = snapshot.enabled
         account.usage_limit_percent = snapshot.limit_percent
-        limit_state = evaluate_standard_usage_limit(
-            enabled=snapshot.enabled,
-            limit_percent=snapshot.limit_percent,
-            plan_type=snapshot.plan_type,
-            primary=snapshot.primary,
-            secondary=snapshot.secondary,
-            monthly=snapshot.monthly,
-            refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
-        )
-        return _LimitWarmupAuthorization(account=account, limit_state=limit_state)
+        return _LimitWarmupAuthorization(account=account, decision=decision)
 
     async def _resolve_upstream_route(self, account: Account) -> ResolvedUpstreamRoute | None:
         if self._accounts_repo_factory is not None:

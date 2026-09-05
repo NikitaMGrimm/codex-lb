@@ -32,6 +32,7 @@ from app.modules.model_sources.selection import (
     responses_model_is_source_owned,
 )
 from app.modules.proxy import service as proxy_service
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 from tests.unit.test_proxy_utils import (
     _make_account,
     _make_proxy_settings,
@@ -336,7 +337,9 @@ async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest
 
     account = _make_account("acc_ws_source_guard_reuse")
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
-    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
+    service._load_balancer.authorize_account_fresh = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+    )
     upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_turn_one"))
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -513,7 +516,9 @@ async def test_reuse_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPa
     api_key = _alias_allowlist_api_key()
     account = _make_account("acc_ws_source_guard_alias")
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
-    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
+    service._load_balancer.authorize_account_fresh = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+    )
     upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -728,7 +733,9 @@ async def test_reuse_guard_forwards_a_pinned_input_file_turn(db_setup, monkeypat
 
     account = _make_account("acc_ws_source_guard_file_pin")
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
-    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
+    service._load_balancer.authorize_account_fresh = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+    )
     upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -783,7 +790,9 @@ async def test_reuse_guard_forwards_a_terminal_compaction_trigger_turn(
 
     account = _make_account("acc_ws_source_guard_compact")
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
-    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
+    service._load_balancer.authorize_account_fresh = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+    )
     upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -1018,7 +1027,9 @@ async def test_reuse_guard_rejects_a_later_disabled_source_turn(monkeypatch: pyt
 
     account = _make_account("acc_ws_source_guard_disabled_reuse")
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
-    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
+    service._load_balancer.authorize_account_fresh = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+    )
     upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_turn_one"))
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202

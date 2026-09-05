@@ -18,6 +18,7 @@ from app.core.config.settings import Settings
 from app.core.usage.account_limits import AccountUsageLimitState
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 
 pytestmark = pytest.mark.e2e
 
@@ -193,7 +194,9 @@ async def test_cancelled_http_bridge_stream_retires_before_retry_can_share_upstr
         "get_settings_cache",
         lambda: SimpleNamespace(get=AsyncMock(return_value=Settings())),
     )
-    service._load_balancer.check_account_usage_limit_fresh = AsyncMock(return_value=AccountUsageLimitState.DISABLED)
+    service._load_balancer.authorize_account_fresh = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+    )
     service._load_balancer.acquire_account_lease = AsyncMock(return_value=cast(Any, object()))
     service._load_balancer.release_account_lease = AsyncMock()
     service._finalize_websocket_request_state = cast(Any, AsyncMock())

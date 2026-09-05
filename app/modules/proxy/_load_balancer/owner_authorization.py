@@ -1,29 +1,25 @@
 from __future__ import annotations
 
-from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
-from app.db.models import AccountStatus
+import logging
+
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind, load_owner_authorization
 
-_UNAVAILABLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
+logger = logging.getLogger("app.modules.proxy.load_balancer")
 
 
-async def load_fresh_owner_usage_limit(
+async def load_fresh_owner_authorization(
     repo_factory: ProxyRepoFactory,
     account_id: str,
     *,
     refresh_interval_seconds: int,
-) -> AccountUsageLimitState | None:
+) -> OwnerAuthorization:
     """Load one owner's policy and usage windows in one database statement."""
-    async with repo_factory() as repos:
-        snapshot = await repos.usage.account_usage_limit_snapshot(account_id)
-    if snapshot is None or snapshot.status in _UNAVAILABLE_STATUSES:
-        return None
-    return evaluate_standard_usage_limit(
-        enabled=snapshot.enabled,
-        limit_percent=snapshot.limit_percent,
-        plan_type=snapshot.plan_type,
-        primary=snapshot.primary,
-        secondary=snapshot.secondary,
-        monthly=snapshot.monthly,
-        refresh_interval_seconds=refresh_interval_seconds,
-    )
+    try:
+        async with repo_factory() as repos:
+            return await load_owner_authorization(
+                repos.usage, account_id, refresh_interval_seconds=refresh_interval_seconds
+            )
+    except Exception:
+        logger.warning("Fresh owner authorization failed account_id=%s", account_id, exc_info=True)
+        return OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
