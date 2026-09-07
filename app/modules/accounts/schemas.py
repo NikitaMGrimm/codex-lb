@@ -167,12 +167,6 @@ class AccountOpenCodeAuthExportAccount(DashboardModel):
     email: str
 
 
-class AccountOpenCodeAuthExportResponse(DashboardModel):
-    filename: str
-    account: AccountOpenCodeAuthExportAccount
-    auth_json: OpenCodeAuthJson
-
-
 class AccountUpdateRequest(DashboardModel):
     security_work_authorized: bool | None = None
 
@@ -226,17 +220,6 @@ class AccountUsageLimitUpdateResponse(DashboardModel):
 
 class AccountDeleteResponse(DashboardModel):
     status: str
-
-
-class AccountExportResponse(DashboardModel):
-    account_id: str
-    email: str
-    workspace_id: str | None = None
-    workspace_label: str | None = None
-    seat_type: str | None = None
-    plan_type: str
-    status: str
-    auth_json: str
 
 
 class AccountProbeRequest(DashboardModel):

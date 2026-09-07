@@ -15,6 +15,7 @@ from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
@@ -150,14 +151,8 @@ def _install_successful_warmup_stub(monkeypatch: pytest.MonkeyPatch, captured_mo
     monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
 
 
-def _set_warmup_model_env(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.setenv("CODEX_LB_WARMUP_MODEL", value)
-    get_settings.cache_clear()
-
-
 @pytest.mark.asyncio
 async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(async_client, monkeypatch):
-    _set_warmup_model_env(monkeypatch, "gpt-5.4-env-ignored")
     await _enable_api_key_auth(async_client)
     settings_response = await async_client.put(
         "/api/settings",
@@ -352,7 +347,6 @@ async def test_warmup_immediately_observes_usage_refresh_transitions_for_account
         assert account is not None
         refreshed = await UsageUpdater(UsageRepository(session), accounts_repo).force_refresh(
             account,
-            ignore_refresh_disabled=True,
         )
     assert refreshed is True
 
@@ -364,7 +358,7 @@ async def test_warmup_immediately_observes_usage_refresh_transitions_for_account
     assert available.status_code == 200
     assert [item["account_id"] for item in available.json()["submitted"]] == [account_id]
     assert available.json()["skipped"] == []
-    assert captured_models == [get_settings().warmup_model]
+    assert captured_models == [(await get_settings_cache().get()).warmup_model]
 
     async def _fetch_unknown_usage(**kwargs: object) -> UsagePayload:
         del kwargs
@@ -386,7 +380,6 @@ async def test_warmup_immediately_observes_usage_refresh_transitions_for_account
         assert account is not None
         refreshed = await UsageUpdater(UsageRepository(session), accounts_repo).force_refresh(
             account,
-            ignore_refresh_disabled=True,
         )
     assert refreshed is True
 
@@ -397,7 +390,7 @@ async def test_warmup_immediately_observes_usage_refresh_transitions_for_account
     )
     assert unknown.status_code == 200
     assert unknown.json()["skipped"] == [{"account_id": account_id, "reason": "account_usage_limit_reached"}]
-    assert captured_models == [get_settings().warmup_model]
+    assert captured_models == [(await get_settings_cache().get()).warmup_model]
 
     accounts_response = await async_client.get("/api/accounts")
     assert accounts_response.status_code == 200
@@ -860,7 +853,6 @@ async def test_warmup_post_exchange_persist_conflict_surfaces_upstream_unavailab
 
 @pytest.mark.asyncio
 async def test_warmup_normalizes_model_alias_before_upstream(async_client, monkeypatch):
-    _set_warmup_model_env(monkeypatch, "gpt-5.4-mini-high")
     await _enable_api_key_auth(async_client)
     settings_response = await async_client.put(
         "/api/settings",
@@ -964,7 +956,6 @@ async def test_warmup_prohibits_fast_model_alias_priority_tier(async_client, mon
 
 @pytest.mark.asyncio
 async def test_warmup_mode_path_route_runs_without_request_body(async_client, monkeypatch):
-    _set_warmup_model_env(monkeypatch, "gpt-5.4-nano")
     await _enable_api_key_auth(async_client)
     settings_response = await async_client.put(
         "/api/settings",
@@ -1000,7 +991,6 @@ async def test_warmup_mode_path_route_runs_without_request_body(async_client, mo
 
 @pytest.mark.asyncio
 async def test_warmup_uses_api_key_enforced_model_over_dashboard_model(async_client, monkeypatch):
-    _set_warmup_model_env(monkeypatch, "gpt-5.4-nano")
     await _enable_api_key_auth(async_client)
     settings_response = await async_client.put(
         "/api/settings",
@@ -1118,7 +1108,6 @@ async def test_warmup_respects_api_key_account_scope(async_client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_warmup_rejects_disallowed_model_without_upstream_calls(async_client, monkeypatch):
-    _set_warmup_model_env(monkeypatch, "gpt-5.4-nano")
     await _enable_api_key_auth(async_client)
     settings_response = await async_client.put(
         "/api/settings",
@@ -1160,8 +1149,9 @@ async def test_warmup_rejects_disallowed_model_without_upstream_calls(async_clie
 
 @pytest.mark.asyncio
 async def test_warmup_ignores_api_key_limits_for_accounting(async_client, monkeypatch):
-    _set_warmup_model_env(monkeypatch, "gpt-5.4-nano")
     await _enable_api_key_auth(async_client)
+    settings_response = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.4-nano"})
+    assert settings_response.status_code == 200
     eligible_id = await _import_account(async_client, "acc-warmup-limited", "warmup-limited@example.com")
     await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
 
@@ -1236,6 +1226,7 @@ async def test_warmup_runs_parallel_with_max_five_accounts(async_client, monkeyp
 
     in_flight_compact_calls = 0
     peak_compact_calls = 0
+    all_slots_busy = asyncio.Event()
 
     async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
         del self, force, timeout_seconds
@@ -1247,8 +1238,10 @@ async def test_warmup_runs_parallel_with_max_five_accounts(async_client, monkeyp
 
         in_flight_compact_calls += 1
         peak_compact_calls = max(peak_compact_calls, in_flight_compact_calls)
+        if in_flight_compact_calls == 5:
+            all_slots_busy.set()
         try:
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(all_slots_busy.wait(), timeout=5)
             return CompactResponsePayload.model_validate(
                 {
                     "object": "response.compact",

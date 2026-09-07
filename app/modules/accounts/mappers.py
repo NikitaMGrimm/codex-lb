@@ -4,10 +4,10 @@ from datetime import datetime, timedelta, timezone
 
 from app.core import usage as usage_core
 from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
-from app.core.config import settings as config_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS, usage_freshness_horizon_seconds
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
@@ -31,7 +31,6 @@ from app.modules.usage.mappers import evaluate_account_usage_limit, usage_histor
 
 _ACCOUNT_ROUTING_POLICIES = frozenset({"burn_first", "normal", "preserve"})
 _RESET_CREDITS_INELIGIBLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.DEACTIVATED})
-_DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 
 
 def build_account_summaries(
@@ -121,7 +120,7 @@ def _account_to_summary(
         primary=primary_usage,
         secondary=secondary_usage,
         monthly=monthly_usage,
-        refresh_interval_seconds=_usage_refresh_interval_seconds(),
+        refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
     )
 
     if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
@@ -423,14 +422,9 @@ def _usage_entry_is_recent_enough(recorded_at: datetime | None) -> bool:
     if recorded_at is None:
         return False
     current_time = datetime.now(timezone.utc)
-    interval_seconds = max(_usage_refresh_interval_seconds() * 2, 180)
+    interval_seconds = usage_freshness_horizon_seconds()
     recorded_time = recorded_at if recorded_at.tzinfo is not None else recorded_at.replace(tzinfo=timezone.utc)
     return recorded_time >= current_time - timedelta(seconds=interval_seconds)
-
-
-def _usage_refresh_interval_seconds() -> int:
-    settings = config_settings.get_settings()
-    return int(getattr(settings, "usage_refresh_interval_seconds", _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS))
 
 
 def _display_window_expired(entry: UsageHistory | None, now_epoch: int) -> bool:

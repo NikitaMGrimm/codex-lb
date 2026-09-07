@@ -29,7 +29,7 @@ from app.modules.usage.additional_quota_keys import canonicalize_additional_quot
 from app.modules.usage.repository import UsageWindowWrite
 from app.modules.usage.updater import UsageUpdater
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.usage_refresh_request_path]
 
 
 @pytest.fixture(autouse=True)
@@ -253,12 +253,6 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
     inner_session_closed = asyncio.Event()
     session_was_open_during_refresh: list[bool] = []
 
-    @dataclass(frozen=True, slots=True)
-    class Settings:
-        usage_refresh_enabled: bool = True
-        usage_refresh_interval_seconds: int = 0
-        usage_refresh_auth_failure_cooldown_seconds: int = 0
-
     class OuterUsageRepository:
         async def latest_entry_for_account(self, account_id: str, *, window: str | None = None):
             return None
@@ -325,7 +319,8 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
     monkeypatch.setattr(usage_updater_module, "BackgroundUsageRepository", InnerUsageRepository)
     monkeypatch.setattr(usage_updater_module, "BackgroundAdditionalUsageRepository", InnerAdditionalUsageRepository)
     monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale", fake_refresh_account_if_stale)
-    monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
+    monkeypatch.setattr(usage_updater_module, "USAGE_REFRESH_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(usage_updater_module, "_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", 0.0)
 
     def non_owned_refresh_factory(started: asyncio.Event):
         async def factory() -> usage_updater_module.AccountRefreshResult:
@@ -389,12 +384,6 @@ async def test_refresh_accounts_owned_session_join_policy(
     release = asyncio.Event()
     refresh_calls = 0
 
-    @dataclass(frozen=True, slots=True)
-    class Settings:
-        usage_refresh_enabled: bool = True
-        usage_refresh_interval_seconds: int = 0
-        usage_refresh_auth_failure_cooldown_seconds: int = 0
-
     class AccountsRepo:
         async def get_by_id(self, account_id: str):
             return account if account_id == account.id else None
@@ -417,7 +406,8 @@ async def test_refresh_accounts_owned_session_join_policy(
         await release.wait()
         return usage_updater_module.AccountRefreshResult(usage_written=False)
 
-    monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
+    monkeypatch.setattr(usage_updater_module, "USAGE_REFRESH_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(usage_updater_module, "_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", 0.0)
     monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale_with_owned_session", fake_owned_refresh)
 
     updater = UsageUpdater(
@@ -457,12 +447,6 @@ async def test_owned_singleflight_reload_skips_account_that_became_ineligible(
     account = _make_account("acc_owned_session_paused", "workspace_owned_paused")
     account.status = AccountStatus.PAUSED
     refresh_called = False
-
-    @dataclass(frozen=True, slots=True)
-    class Settings:
-        usage_refresh_enabled: bool = True
-        usage_refresh_interval_seconds: int = 0
-        usage_refresh_auth_failure_cooldown_seconds: int = 0
 
     class OuterUsageRepository:
         async def latest_entry_for_account(self, account_id: str, *, window: str | None = None):
@@ -521,7 +505,8 @@ async def test_owned_singleflight_reload_skips_account_that_became_ineligible(
     monkeypatch.setattr(usage_updater_module, "BackgroundUsageRepository", InnerUsageRepository)
     monkeypatch.setattr(usage_updater_module, "BackgroundAdditionalUsageRepository", InnerAdditionalUsageRepository)
     monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale", fail_if_refreshed)
-    monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
+    monkeypatch.setattr(usage_updater_module, "USAGE_REFRESH_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(usage_updater_module, "_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", 0.0)
 
     initial_snapshot = _make_account("acc_owned_session_paused", "workspace_owned_paused")
 
@@ -1444,10 +1429,6 @@ async def test_recover_restores_rate_limited_account_after_persisted_cooldown_el
 
 @pytest.mark.asyncio
 async def test_usage_refresh_keeps_rate_limited_retry_after_cooldown(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -1492,10 +1473,7 @@ async def test_usage_refresh_keeps_rate_limited_retry_after_cooldown(monkeypatch
 
 @pytest.mark.asyncio
 async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
 
-    get_settings.cache_clear()
     usage_repo = StubUsageRepository()
     updater = UsageUpdater(usage_repo)
     account = _make_account("acc_force_probe", "workspace_force_probe")
@@ -1517,15 +1495,11 @@ async def test_force_refresh_bypasses_fresh_usage_cache(monkeypatch: pytest.Monk
         access_token_override=None,
     )
     sync_account.assert_awaited_once_with(account)
-    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
 async def test_force_refresh_does_not_join_stale_refresh_singleflight(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
 
-    get_settings.cache_clear()
     usage_repo = StubUsageRepository()
     updater = UsageUpdater(usage_repo)
     account = _make_account("acc_force_probe_singleflight", "workspace_force_probe_singleflight")
@@ -1573,17 +1547,12 @@ async def test_force_refresh_does_not_join_stale_refresh_singleflight(monkeypatc
     assert sync_account.await_count == 2
     sync_account.assert_awaited_with(account)
 
-    get_settings.cache_clear()
-
 
 @pytest.mark.asyncio
 async def test_force_refresh_preserves_cancellation_while_waiting_on_stale_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
 
-    get_settings.cache_clear()
     usage_repo = StubUsageRepository()
     updater = UsageUpdater(usage_repo)
     account = _make_account("acc_force_probe_cancel", "workspace_force_probe_cancel")
@@ -1620,16 +1589,11 @@ async def test_force_refresh_preserves_cancellation_while_waiting_on_stale_refre
     release_stale.set()
     assert await stale_task is False
     force_refresh_account.assert_not_awaited()
-    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
 async def test_force_refresh_bypasses_auth_failure_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", "300")
-    from app.core.config.settings import get_settings
 
-    get_settings.cache_clear()
     usage_repo = StubUsageRepository()
     updater = UsageUpdater(usage_repo)
     account = _make_account("acc_force_probe_cooldown", "workspace_force_probe_cooldown")
@@ -1652,60 +1616,10 @@ async def test_force_refresh_bypasses_auth_failure_cooldown(monkeypatch: pytest.
     )
     sync_account.assert_awaited_once_with(account)
     assert usage_updater_module._is_usage_refresh_in_cooldown(account.id) is False
-    get_settings.cache_clear()
-
-
-@pytest.mark.asyncio
-async def test_force_refresh_respects_usage_refresh_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "false")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
-    updater = UsageUpdater(StubUsageRepository())
-    account = _make_account("acc_force_probe_disabled", "workspace_force_probe_disabled")
-    refresh_account = AsyncMock()
-    monkeypatch.setattr(updater, "_refresh_account", refresh_account)
-
-    refreshed = await updater.force_refresh(account)
-
-    assert refreshed is False
-    refresh_account.assert_not_awaited()
-    get_settings.cache_clear()
-
-
-@pytest.mark.asyncio
-async def test_force_refresh_can_ignore_usage_refresh_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "false")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
-    updater = UsageUpdater(StubUsageRepository())
-    account = _make_account("acc_force_probe_disabled_override", "workspace_force_probe_disabled_override")
-    refresh_account = AsyncMock(
-        return_value=usage_updater_module.AccountRefreshResult(usage_written=True),
-    )
-    sync_account = AsyncMock()
-    monkeypatch.setattr(updater, "_refresh_account", refresh_account)
-    monkeypatch.setattr(updater, "_sync_account_from_repo", sync_account)
-
-    refreshed = await updater.force_refresh(account, ignore_refresh_disabled=True)
-
-    assert refreshed is True
-    refresh_account.assert_awaited_once_with(
-        account,
-        usage_account_id=account.chatgpt_account_id,
-        access_token_override=None,
-    )
-    sync_account.assert_awaited_once_with(account)
-    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
 async def test_usage_updater_includes_chatgpt_account_id_even_when_shared(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     calls: list[dict[str, Any]] = []
 
@@ -1745,10 +1659,6 @@ async def test_usage_updater_includes_chatgpt_account_id_even_when_shared(monkey
 
 @pytest.mark.asyncio
 async def test_force_refresh_uses_access_token_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     calls: list[dict[str, Any]] = []
 
@@ -1762,19 +1672,14 @@ async def test_force_refresh_uses_access_token_override(monkeypatch: pytest.Monk
     updater = UsageUpdater(usage_repo, accounts_repo=None)
     account = _make_account("acc_override", "workspace_override")
 
-    refreshed = await updater.force_refresh(account, ignore_refresh_disabled=True, access_token_override="caller-token")
+    refreshed = await updater.force_refresh(account, access_token_override="caller-token")
 
     assert refreshed is False
     assert calls == [{"access_token": "caller-token", "account_id": "workspace_override"}]
-    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
 async def test_usage_refresh_recovers_quota_exceeded_account_when_usage_is_available(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -1824,10 +1729,6 @@ async def test_usage_refresh_recovers_quota_exceeded_account_when_usage_is_avail
 
 @pytest.mark.asyncio
 async def test_usage_refresh_keeps_recent_quota_exceeded_cooldown(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -1870,11 +1771,7 @@ async def test_usage_refresh_keeps_recent_quota_exceeded_cooldown(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_usage_refresh_bypasses_freshness_after_quota_cooldown(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS", "3600")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
+    monkeypatch.setattr(usage_updater_module, "USAGE_REFRESH_INTERVAL_SECONDS", 3600)
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -1925,11 +1822,7 @@ async def test_usage_refresh_bypasses_freshness_after_quota_cooldown(monkeypatch
 
 @pytest.mark.asyncio
 async def test_usage_refresh_preserves_freshness_after_failed_quota_recovery_probe(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS", "3600")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
+    monkeypatch.setattr(usage_updater_module, "USAGE_REFRESH_INTERVAL_SECONDS", 3600)
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -1964,10 +1857,6 @@ async def test_usage_refresh_preserves_freshness_after_failed_quota_recovery_pro
 
 @pytest.mark.asyncio
 async def test_usage_refresh_does_not_overwrite_newer_status_change(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2015,10 +1904,6 @@ async def test_usage_refresh_does_not_overwrite_newer_status_change(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_usage_refresh_syncs_blocked_at_after_compare_failure(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2066,10 +1951,6 @@ async def test_usage_refresh_syncs_blocked_at_after_compare_failure(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_usage_refresh_does_not_recover_when_secondary_quota_is_missing(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2111,10 +1992,6 @@ async def test_usage_refresh_does_not_recover_when_secondary_quota_is_missing(mo
 
 @pytest.mark.asyncio
 async def test_usage_refresh_does_not_recover_when_secondary_quota_is_still_exhausted(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2156,10 +2033,6 @@ async def test_usage_refresh_does_not_recover_when_secondary_quota_is_still_exha
 
 @pytest.mark.asyncio
 async def test_usage_refresh_demotes_quota_exceeded_to_rate_limited_when_primary_is_exhausted(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2207,10 +2080,6 @@ async def test_usage_refresh_demotes_quota_exceeded_to_rate_limited_when_primary
 
 @pytest.mark.asyncio
 async def test_usage_refresh_recovers_quota_exceeded_free_weekly_account(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2244,10 +2113,6 @@ async def test_usage_refresh_recovers_quota_exceeded_free_weekly_account(monkeyp
 
 @pytest.mark.asyncio
 async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2287,10 +2152,7 @@ async def test_usage_refresh_stores_free_monthly_window_without_secondary_remap(
 
 @pytest.mark.asyncio
 async def test_usage_refresh_uses_fresh_monthly_row_for_quota_freshness(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
 
-    get_settings.cache_clear()
     fetch_usage_mock = AsyncMock()
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", fetch_usage_mock)
 
@@ -2318,10 +2180,6 @@ async def test_usage_refresh_uses_fresh_monthly_row_for_quota_freshness(monkeypa
 
 @pytest.mark.asyncio
 async def test_usage_refresh_skips_mismatched_workspace_payload(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2365,10 +2223,6 @@ async def test_usage_refresh_skips_mismatched_workspace_payload(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_usage_refresh_skips_taken_workspace_slot_payload(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2417,10 +2271,6 @@ async def test_usage_refresh_skips_taken_workspace_slot_payload(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_usage_refresh_skips_unknown_workspace_plan_mismatch(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2457,10 +2307,6 @@ async def test_usage_refresh_skips_unknown_workspace_plan_mismatch(monkeypatch) 
 async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspace_and_plan_conflicts(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2500,10 +2346,6 @@ async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspac
 async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspace_and_paid_plan_differs(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2543,10 +2385,6 @@ async def test_usage_refresh_skips_workspace_account_when_payload_omits_workspac
 async def test_usage_refresh_applies_paid_plan_upgrade_without_workspace(monkeypatch) -> None:
     """Regression for #1086: a Plus -> Pro upgrade on a workspace-less account
     must be persisted instead of being skipped as an identity mismatch."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2582,10 +2420,6 @@ async def test_usage_refresh_applies_paid_plan_upgrade_without_workspace(monkeyp
 
 @pytest.mark.asyncio
 async def test_usage_refresh_hydrates_unknown_plan_without_workspace(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2625,10 +2459,6 @@ async def test_usage_refresh_skips_unknown_plan_degrade_without_workspace(
     monkeypatch,
     payload_plan_type: str,
 ) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -2706,10 +2536,6 @@ async def test_usage_refresh_confirms_free_downgrade_without_workspace_on_second
     """Regression for #1456: an expired paid subscription on a workspace-less
     account must converge to ``free`` once a second consecutive refresh agrees,
     instead of being discarded forever as an identity mismatch."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -2742,10 +2568,6 @@ async def test_usage_refresh_confirms_free_downgrade_without_workspace_on_second
 async def test_usage_refresh_paid_payload_clears_pending_free_downgrade(monkeypatch) -> None:
     """A transient ``free`` blip must not accumulate toward a downgrade once the
     account reports a recognized paid plan again."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     fetch = _free_downgrade_payload_factory(["free", "plus", "free"])
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", fetch)
@@ -2780,10 +2602,6 @@ async def test_usage_refresh_paid_payload_clears_pending_free_downgrade(monkeypa
 async def test_usage_refresh_never_confirms_unrecognized_plan_without_workspace(monkeypatch) -> None:
     """Confirmation applies to ``free`` only: an unrecognized plan value stays
     rejected no matter how many times it repeats."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -2810,10 +2628,6 @@ async def test_usage_refresh_never_confirms_unrecognized_plan_without_workspace(
 async def test_usage_refresh_free_downgrade_confirmation_is_per_account(monkeypatch) -> None:
     """One ``free`` observation on two different accounts must not combine into
     a confirmation for either of them."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -2871,10 +2685,6 @@ async def test_free_downgrade_reset_only_clears_the_reporting_account(monkeypatc
     Two accounts each hold a pending observation; only the one that reports a
     recognized paid plan may be reset, so the other still confirms on its own
     next ``free`` observation."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     plans_by_account: dict[str, list[str]] = {
         "acc_reset_self": ["free", "plus"],
@@ -2935,10 +2745,6 @@ async def test_free_downgrade_reset_only_clears_the_reporting_account(monkeypatc
 async def test_force_refresh_confirms_free_downgrade_on_second_probe(monkeypatch) -> None:
     """Force probe shares the confirmation path: two probes reporting ``free``
     persist the downgrade without reauthentication."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -2968,10 +2774,6 @@ async def test_force_refresh_confirms_free_downgrade_with_access_token_override(
     """The Codex usage-identity path refreshes with an explicit access token
     override. Confirmation must apply there too, otherwise that caller can never
     converge an expired account."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -2999,10 +2801,6 @@ async def test_free_downgrade_confirms_across_an_intervening_degraded_payload(mo
     account is still paid, so it must not discard a pending downgrade. Otherwise a
     flapping upstream could block a real expiry from ever converging. Only a
     recognized paid plan resets the pending state."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -3038,10 +2836,6 @@ async def test_free_downgrade_confirmation_normalizes_plan_casing_and_whitespace
 ) -> None:
     """Upstream casing/whitespace must not change the outcome: each variant needs
     the same two observations, and none of them may confirm on the first."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -3069,10 +2863,6 @@ async def test_usage_refresh_never_confirms_free_downgrade_for_workspace_bound_a
     must not be demoted to free by a payload that never names its workspace,
     however many times that payload repeats: the payload cannot establish that it
     describes this account's slot."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -3100,10 +2890,6 @@ async def test_usage_refresh_never_confirms_free_downgrade_for_workspace_bound_a
 async def test_usage_refresh_never_confirms_conflicting_workspace_identity(monkeypatch) -> None:
     """A payload reporting another workspace's slot stays rejected regardless of
     repetition; confirmation must not weaken the workspace-conflict guard."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         del access_token, account_id
@@ -3172,10 +2958,6 @@ async def test_free_downgrade_evidence_is_shared_across_replicas(monkeypatch) ->
     pending count lived in process memory, each replica stalled at one
     observation and a genuinely expired account never downgraded.
     """
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -3212,10 +2994,6 @@ async def test_paid_payload_on_another_replica_clears_pending_downgrade(monkeypa
     state, replica A could confirm a downgrade even though replica B had already
     observed the account reporting a paid plan in between.
     """
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     usage_repo = StubUsageRepository(return_rows=True)
     accounts_repo = StubAccountsRepository()
@@ -3263,10 +3041,6 @@ async def test_token_rotation_between_observations_still_confirms_downgrade(monk
     #1456 downgrade would be postponed indefinitely. Rotation extends the same
     credential lineage; the second observation must confirm.
     """
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -3309,10 +3083,6 @@ async def test_rebound_seat_identity_restarts_free_downgrade_confirmation(monkey
     `tests/integration/test_accounts_api_probe.py`), and account deletion drops
     the row through `ondelete="CASCADE"`.
     """
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr(
         "app.modules.usage.updater.fetch_usage",
@@ -3483,10 +3253,6 @@ async def test_usage_updater_keeps_account_active_on_bare_402_or_404(
     error_payload: dict[str, Any],
     expected_message: str,
 ) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     fetch_calls = 0
 
@@ -3530,11 +3296,7 @@ async def test_usage_updater_keeps_account_active_on_bare_402_or_404(
 
 @pytest.mark.asyncio
 async def test_usage_updater_does_not_deactivate_on_403(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage_403(**_: Any) -> UsagePayload:
         raise UsageFetchError(403, "Forbidden")
@@ -3555,11 +3317,7 @@ async def test_usage_updater_does_not_deactivate_on_403(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_usage_updater_does_not_deactivate_on_transient_4xx(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage_429(**_: Any) -> UsagePayload:
         raise UsageFetchError(429, "Too Many Requests")
@@ -3580,11 +3338,7 @@ async def test_usage_updater_does_not_deactivate_on_transient_4xx(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_usage_updater_does_not_deactivate_on_401(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage_401(**_: Any) -> UsagePayload:
         raise UsageFetchError(401, "Unauthorized")
@@ -3625,11 +3379,7 @@ async def test_usage_updater_marks_session_failures_as_reauth_required(
     message: str,
     message_hint: str,
 ) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage_401_session_failure(**_: Any) -> UsagePayload:
         raise UsageFetchError(401, message, code=error_code)
@@ -3656,11 +3406,7 @@ async def test_usage_updater_marks_session_failures_as_reauth_required(
 
 @pytest.mark.asyncio
 async def test_usage_updater_deactivates_on_401_account_deactivated_code(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage_401_deactivated(**_: Any) -> UsagePayload:
         raise UsageFetchError(
@@ -3689,11 +3435,7 @@ async def test_usage_updater_deactivates_on_401_account_deactivated_code(monkeyp
 
 @pytest.mark.asyncio
 async def test_usage_updater_deactivates_on_401_deactivated_message_without_code(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage_401_deactivated_message(**_: Any) -> UsagePayload:
         raise UsageFetchError(
@@ -3728,11 +3470,8 @@ async def test_usage_updater_retry_keeps_account_active_on_bare_404(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
 
-    get_settings.cache_clear()
     fetch_calls = 0
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
@@ -3774,12 +3513,7 @@ async def test_usage_updater_retry_keeps_account_active_on_bare_404(
 
 @pytest.mark.asyncio
 async def test_usage_updater_cools_down_repeated_403_failures(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", "300")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     fetch_calls = 0
 
@@ -3806,12 +3540,7 @@ async def test_usage_updater_cools_down_repeated_403_failures(monkeypatch) -> No
 
 @pytest.mark.asyncio
 async def test_usage_updater_subset_refresh_does_not_clear_other_account_cooldowns(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", "300")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     fetch_calls = 0
 
@@ -3841,11 +3570,7 @@ async def test_usage_updater_subset_refresh_does_not_clear_other_account_cooldow
 
 
 def test_mark_usage_refresh_auth_cooldown_ignores_non_auth_status(monkeypatch) -> None:
-    monkeypatch.setattr(
-        usage_updater_module,
-        "get_settings",
-        lambda: type("Settings", (), {"usage_refresh_auth_failure_cooldown_seconds": 300.0})(),
-    )
+    monkeypatch.setattr(usage_updater_module, "_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", 300.0)
 
     usage_updater_module._mark_usage_refresh_auth_cooldown("acc_non_auth", 500)
 
@@ -3854,11 +3579,7 @@ def test_mark_usage_refresh_auth_cooldown_ignores_non_auth_status(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_usage_updater_does_not_deactivate_on_5xx(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage_500(**_: Any) -> UsagePayload:
         raise UsageFetchError(500, "Internal Server Error")
@@ -3879,10 +3600,6 @@ async def test_usage_updater_does_not_deactivate_on_5xx(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_usage_updater_persists_primary_and_secondary_usage(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         assert access_token
@@ -3942,10 +3659,6 @@ async def test_usage_updater_persists_primary_and_secondary_usage(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_forced_usage_refresh_syncs_free_to_plus_upgrade_without_workspace(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate({"plan_type": "plus"})
@@ -3959,7 +3672,7 @@ async def test_forced_usage_refresh_syncs_free_to_plus_upgrade_without_workspace
     accounts_repo.accounts_by_id[acc.id] = acc
     acc.plan_type = "free"
 
-    usage_written = await updater.force_refresh(acc, ignore_refresh_disabled=True)
+    usage_written = await updater.force_refresh(acc)
 
     assert usage_written is False
     assert acc.plan_type == "plus"
@@ -3971,10 +3684,6 @@ async def test_forced_usage_refresh_syncs_free_to_plus_upgrade_without_workspace
 
 @pytest.mark.asyncio
 async def test_usage_updater_computes_reset_at_from_reset_after_seconds(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     monkeypatch.setattr("app.modules.usage.updater._now_epoch", lambda: 1000)
 
@@ -4007,10 +3716,6 @@ async def test_usage_updater_computes_reset_at_from_reset_after_seconds(monkeypa
 
 @pytest.mark.asyncio
 async def test_usage_updater_persists_unavailable_placeholder_when_rate_limit_missing(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate({})
@@ -4031,11 +3736,7 @@ async def test_usage_updater_persists_unavailable_placeholder_when_rate_limit_mi
 
 @pytest.mark.asyncio
 async def test_usage_updater_refresh_accounts_returns_false_on_401_retry_failure(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage_401(**_: Any) -> UsagePayload:
         raise UsageFetchError(401, "Unauthorized")
@@ -4073,10 +3774,6 @@ async def test_usage_updater_refresh_accounts_returns_true_when_any_window_writt
     primary_used: float | None,
     secondary_used: float | None,
 ) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
         assert access_token
@@ -4110,10 +3807,6 @@ async def test_usage_updater_refresh_accounts_returns_true_when_any_window_writt
 
 @pytest.mark.asyncio
 async def test_usage_updater_refresh_accounts_returns_true_when_partial_write(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(*, account_id: str | None, **_: Any) -> UsagePayload:
         if account_id == "workspace_skip":
@@ -4149,10 +3842,6 @@ async def test_usage_updater_refresh_accounts_returns_true_when_partial_write(mo
 
 @pytest.mark.asyncio
 async def test_usage_updater_singleflights_concurrent_refreshes(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     fetch_calls = 0
     fetch_started = asyncio.Event()
@@ -4206,10 +3895,7 @@ async def test_usage_updater_singleflights_concurrent_refreshes(monkeypatch) -> 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_written_to_additional_repo(monkeypatch) -> None:
     """Additional rate limits from payload are persisted via additional_usage_repo."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
 
-    get_settings.cache_clear()
     monkeypatch.setattr("app.modules.usage.updater._now_epoch", lambda: 2000)
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
@@ -4278,10 +3964,6 @@ async def test_additional_rate_limits_written_to_additional_repo(monkeypatch) ->
 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_normalize_known_alias_to_canonical_quota_key(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4326,10 +4008,6 @@ async def test_additional_rate_limits_normalize_known_alias_to_canonical_quota_k
 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_merge_aliases_before_pruning_quota(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4379,10 +4057,6 @@ async def test_additional_rate_limits_merge_aliases_before_pruning_quota(monkeyp
 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_merge_windows_across_aliases(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4439,10 +4113,6 @@ async def test_additional_rate_limits_merge_windows_across_aliases(monkeypatch) 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_null_writes_nothing(monkeypatch) -> None:
     """When additional_rate_limits is null, no additional entries are written."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4471,10 +4141,6 @@ async def test_additional_rate_limits_null_writes_nothing(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_sync_even_when_main_rate_limit_missing(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4517,10 +4183,6 @@ async def test_additional_rate_limits_sync_even_when_main_rate_limit_missing(mon
 @pytest.mark.asyncio
 async def test_additional_only_account_not_repolled_within_interval(monkeypatch) -> None:
     """R6-F1: Additional-only accounts must not cause tight re-polling."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     call_count = 0
 
@@ -4563,10 +4225,6 @@ async def test_additional_only_account_not_repolled_within_interval(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_empty_list_writes_nothing(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4597,10 +4255,6 @@ async def test_additional_rate_limits_empty_list_writes_nothing(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_none_does_not_prune_existing_rows(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4630,10 +4284,7 @@ async def test_additional_rate_limits_none_does_not_prune_existing_rows(monkeypa
 @pytest.mark.asyncio
 async def test_additional_rate_limits_multiple_limits(monkeypatch) -> None:
     """Multiple additional limits produce one entry per limit per window."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
 
-    get_settings.cache_clear()
     monkeypatch.setattr("app.modules.usage.updater._now_epoch", lambda: 5000)
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
@@ -4698,10 +4349,6 @@ async def test_additional_rate_limits_multiple_limits(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_additional_rate_limits_secondary_none_only_primary(monkeypatch) -> None:
     """When secondary_window is None, only primary entry is written."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4748,10 +4395,6 @@ async def test_additional_rate_limits_secondary_none_only_primary(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_prune_stale_limit_names(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4815,10 +4458,6 @@ async def test_additional_rate_limits_prune_stale_limit_names(monkeypatch) -> No
 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_prune_stale_secondary_window(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4884,10 +4523,6 @@ async def test_additional_rate_limits_prune_stale_secondary_window(monkeypatch) 
 @pytest.mark.asyncio
 async def test_additional_rate_limits_no_credits_passed(monkeypatch) -> None:
     """Credits data is NOT passed to additional limit entries (no credits_* fields)."""
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
-
-    get_settings.cache_clear()
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate(
@@ -4955,11 +4590,8 @@ def test_latest_usage_is_fresh_returns_false_when_reset_at_has_passed() -> None:
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_fetches_when_additional_usage_ages_despite_fresh_main_rows(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
 
@@ -5013,11 +4645,8 @@ async def test_refresh_accounts_fetches_when_additional_usage_ages_despite_fresh
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_fetches_when_no_additional_rows_were_ever_synced(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
 
@@ -5056,11 +4685,8 @@ async def test_refresh_accounts_fetches_when_no_additional_rows_were_ever_synced
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_skips_fetch_when_additional_usage_is_fresh(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
 
@@ -5105,11 +4731,8 @@ async def test_refresh_accounts_skips_fetch_when_additional_usage_is_fresh(monke
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_skips_fetch_when_newer_sibling_row_supersedes_elapsed_primary(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
 
@@ -5154,11 +4777,8 @@ async def test_refresh_accounts_skips_fetch_when_newer_sibling_row_supersedes_el
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_skips_fetch_when_only_fresh_secondary_row_exists(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
 
@@ -5193,11 +4813,8 @@ async def test_refresh_accounts_skips_fetch_when_only_fresh_secondary_row_exists
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_ignores_lingering_monthly_rows_for_paid_plans(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
 
@@ -5244,11 +4861,8 @@ async def test_refresh_accounts_ignores_lingering_monthly_rows_for_paid_plans(mo
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_still_fetches_when_elapsed_primary_has_no_newer_sibling(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
 
@@ -5293,11 +4907,8 @@ async def test_refresh_accounts_still_fetches_when_elapsed_primary_has_no_newer_
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_forces_fetch_after_rate_limit_reset_despite_fresh_usage(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now_epoch = 1_700_000_000
     monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: now_epoch)
 
@@ -5345,12 +4956,9 @@ async def test_refresh_accounts_forces_fetch_after_rate_limit_reset_despite_fres
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_does_not_repeat_post_reset_rate_limit_probe(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS", "3600")
-    from app.core.config.settings import get_settings
+    monkeypatch.setattr(usage_updater_module, "USAGE_REFRESH_INTERVAL_SECONDS", 3600)
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: now_epoch)
@@ -5379,11 +4987,8 @@ async def test_refresh_accounts_does_not_repeat_post_reset_rate_limit_probe(monk
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_forces_fetch_after_quota_reset_despite_fresh_primary_usage(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    from app.core.config.settings import get_settings
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now_epoch = 1_700_000_000
     monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: now_epoch)
 
@@ -5437,12 +5042,9 @@ async def test_refresh_accounts_forces_fetch_after_quota_reset_despite_fresh_pri
 
 @pytest.mark.asyncio
 async def test_refresh_accounts_does_not_repeat_post_reset_quota_probe(monkeypatch) -> None:
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
-    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_INTERVAL_SECONDS", "3600")
-    from app.core.config.settings import get_settings
+    monkeypatch.setattr(usage_updater_module, "USAGE_REFRESH_INTERVAL_SECONDS", 3600)
     from app.core.utils.time import utcnow
 
-    get_settings.cache_clear()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     monkeypatch.setattr("app.modules.usage.updater.time.time", lambda: now_epoch)
@@ -5474,13 +5076,6 @@ async def test_refresh_accounts_does_not_repeat_post_reset_quota_probe(monkeypat
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class _RequestRefreshSettings:
-    usage_refresh_enabled: bool = True
-    usage_refresh_interval_seconds: int = 60
-    usage_refresh_auth_failure_cooldown_seconds: int = 0
-
-
 def _install_owned_session_row(
     monkeypatch: pytest.MonkeyPatch,
     stored_account: Account | None,
@@ -5500,23 +5095,14 @@ def _install_owned_session_row(
     class AdditionalUsageRepo:
         pass
 
-    monkeypatch.setattr(usage_updater_module, "get_settings", _RequestRefreshSettings)
+    monkeypatch.setattr(usage_updater_module, "_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", 0.0)
     monkeypatch.setattr(usage_updater_module, "BackgroundAccountsRepository", AccountsRepo)
     monkeypatch.setattr(usage_updater_module, "BackgroundUsageRepository", StubUsageRepository)
     monkeypatch.setattr(usage_updater_module, "BackgroundAdditionalUsageRepository", AdditionalUsageRepo)
 
 
-def test_request_refresh_returns_none_when_refresh_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        usage_updater_module, "get_settings", lambda: _RequestRefreshSettings(usage_refresh_enabled=False)
-    )
-
-    assert UsageUpdater.request_refresh("acc_request_disabled") is None
-    assert "acc_request_disabled" not in usage_updater_module._usage_request_refresh_deadlines
-
-
 def test_request_refresh_returns_none_during_auth_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(usage_updater_module, "get_settings", _RequestRefreshSettings)
+    monkeypatch.setattr(usage_updater_module, "_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", 0.0)
     usage_updater_module._usage_refresh_auth_cooldowns["acc_request_cooldown"] = time.monotonic() + 60
 
     assert UsageUpdater.request_refresh("acc_request_cooldown") is None
@@ -5524,7 +5110,7 @@ def test_request_refresh_returns_none_during_auth_cooldown(monkeypatch: pytest.M
 
 
 def test_request_refresh_debounces_repeats_until_window_elapses(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(usage_updater_module, "get_settings", _RequestRefreshSettings)
+    monkeypatch.setattr(usage_updater_module, "_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", 0.0)
     account_id = "acc_request_debounce"
 
     first = UsageUpdater.request_refresh(account_id)
@@ -5552,7 +5138,7 @@ def test_request_refresh_debounces_repeats_until_window_elapses(monkeypatch: pyt
 
 
 def test_request_refresh_debounce_is_per_account(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(usage_updater_module, "get_settings", _RequestRefreshSettings)
+    monkeypatch.setattr(usage_updater_module, "_USAGE_REFRESH_AUTH_FAILURE_COOLDOWN_SECONDS", 0.0)
 
     first = UsageUpdater.request_refresh("acc_request_a")
     other = UsageUpdater.request_refresh("acc_request_b")

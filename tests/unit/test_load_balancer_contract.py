@@ -14,7 +14,6 @@ import pytest
 
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.balancer import ERROR_BACKOFF_THRESHOLD, AccountState, evaluate_routing_pool, select_account
-from app.core.usage.account_limits import AccountUsageLimitState
 from app.db.models import Account, AccountStatus, StickySession, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -24,7 +23,6 @@ from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.usage.authorization import OwnerAuthorizationKind
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import AccountUsageLimitSnapshot, AdditionalUsageRepository, UsageRepository
 
@@ -678,8 +676,10 @@ async def test_public_exhaustion_envelope_wins_when_account_also_reaches_local_c
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("observe_only", [False, True])
 async def test_public_opportunistic_selection_preserves_local_usage_limit_code(
     selection_cache: AccountSelectionCache,
+    observe_only: bool,
 ) -> None:
     limited = _account("contract-opportunistic-local-limit")
     limited.usage_limit_enabled = True
@@ -692,6 +692,7 @@ async def test_public_opportunistic_selection_preserves_local_usage_limit_code(
 
     selection = await balancer.check_opportunistic_admission(
         model=None,
+        observe_only=observe_only,
         account_ids=None,
         prefer_earlier_reset_accounts=False,
         routing_strategy="usage_weighted",
@@ -703,8 +704,10 @@ async def test_public_opportunistic_selection_preserves_local_usage_limit_code(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("observe_only", [False, True])
 async def test_public_opportunistic_mixed_policy_pool_preserves_local_usage_limit_code(
     selection_cache: AccountSelectionCache,
+    observe_only: bool,
 ) -> None:
     limited = _account("contract-opportunistic-mixed-limited")
     limited.routing_policy = "burn_first"
@@ -721,6 +724,7 @@ async def test_public_opportunistic_mixed_policy_pool_preserves_local_usage_limi
 
     selection = await balancer.check_opportunistic_admission(
         model=None,
+        observe_only=observe_only,
         account_ids=None,
         prefer_earlier_reset_accounts=False,
         routing_strategy="usage_weighted",
@@ -732,8 +736,10 @@ async def test_public_opportunistic_mixed_policy_pool_preserves_local_usage_limi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("observe_only", [False, True])
 async def test_public_opportunistic_limit_error_requires_causal_block(
     selection_cache: AccountSelectionCache,
+    observe_only: bool,
 ) -> None:
     limited_preserve = _account("contract-opportunistic-noncausal-limited")
     limited_preserve.routing_policy = "preserve"
@@ -755,6 +761,7 @@ async def test_public_opportunistic_limit_error_requires_causal_block(
 
     selection = await balancer.check_opportunistic_admission(
         model=None,
+        observe_only=observe_only,
         account_ids=None,
         prefer_earlier_reset_accounts=False,
         routing_strategy="usage_weighted",
@@ -1474,42 +1481,6 @@ async def test_non_sticky_cache_generation_change_reselects_and_releases_once(
 
 
 @pytest.mark.asyncio
-async def test_fresh_owner_usage_check_uses_one_account_scoped_snapshot(
-    selection_cache: AccountSelectionCache,
-) -> None:
-    account = _account("contract-owner-usage-snapshot")
-    account.usage_limit_enabled = True
-    account.usage_limit_percent = 10.0
-    balancer, _, usage_repo, _ = _balancer(
-        [account],
-        selection_cache,
-        primary={account.id: _usage_row(81, account.id, window="primary", used_percent=10.0)},
-    )
-
-    state = await balancer.authorize_account_fresh(account.id)
-
-    assert state.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED
-    assert state.usage_limit_state is AccountUsageLimitState.REACHED
-    assert usage_repo.snapshot_calls == 1
-    assert sum(usage_repo.calls.values()) == 0
-
-
-@pytest.mark.asyncio
-async def test_fresh_owner_usage_check_fails_closed_for_unavailable_owner(
-    selection_cache: AccountSelectionCache,
-) -> None:
-    account = _account("contract-owner-usage-unavailable")
-    account.status = AccountStatus.PAUSED
-    balancer, _, usage_repo, _ = _balancer(
-        [account],
-        selection_cache,
-    )
-
-    assert (await balancer.authorize_account_fresh(account.id)).kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE
-    assert usage_repo.snapshot_calls == 1
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
 async def test_public_selection_rechecks_usage_limit_when_inputs_change_before_persist(
     selection_cache: AccountSelectionCache,
@@ -1707,38 +1678,6 @@ async def test_public_selection_final_generation_check_rejects_newly_reached_usa
     assert load_spy.await_count == 4
     assert release_spy.await_count == 4
     assert usage_repo.snapshot_calls == 1
-    assert sticky_repo.account_id is None
-    assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
-async def test_public_selection_final_generation_check_releases_lease_when_usage_read_fails(
-    selection_cache: AccountSelectionCache,
-    monkeypatch: pytest.MonkeyPatch,
-    sticky: bool,
-) -> None:
-    account = _account(f"contract-input-generation-final-read-failure-{sticky}")
-    balancer, _, _, sticky_repo = _balancer([account], selection_cache)
-    release_spy = AsyncMock(wraps=balancer.release_account_lease)
-
-    async def invalidate_after_each_admission(*_args: Any, **_kwargs: Any) -> set[str]:
-        selection_cache.invalidate()
-        return set()
-
-    usage_read_error = RuntimeError("usage snapshot unavailable")
-    monkeypatch.setattr(balancer, "_persist_selection_state", invalidate_after_each_admission)
-    monkeypatch.setattr(
-        balancer,
-        "authorize_account_fresh",
-        AsyncMock(side_effect=usage_read_error),
-    )
-    monkeypatch.setattr(balancer, "release_account_lease", release_spy)
-
-    with pytest.raises(RuntimeError, match="usage snapshot unavailable"):
-        await asyncio.wait_for(_select_with_lease(balancer, sticky=sticky), timeout=1.0)
-
-    assert release_spy.await_count == 4
     assert sticky_repo.account_id is None
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 

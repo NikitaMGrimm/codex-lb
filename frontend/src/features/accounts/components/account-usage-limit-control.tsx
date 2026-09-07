@@ -33,7 +33,7 @@ export function AccountUsageLimitControl({
   const [draftState, setDraftState] = useState(() => ({
     accountId: account.accountId,
     configuredPercent,
-    value: configuredPercent === null ? "" : formatPercent(configuredPercent),
+    value: configuredPercent === null ? "" : String(configuredPercent),
   }));
   if (
     draftState.accountId !== account.accountId ||
@@ -42,7 +42,7 @@ export function AccountUsageLimitControl({
     setDraftState({
       accountId: account.accountId,
       configuredPercent,
-      value: configuredPercent === null ? "" : formatPercent(configuredPercent),
+      value: configuredPercent === null ? "" : String(configuredPercent),
     });
   }
   const draft = draftState.value;
@@ -68,10 +68,7 @@ export function AccountUsageLimitControl({
       return;
     }
     onChange(account.accountId, {
-      enabled:
-        configuredPercent === null
-          ? true
-          : usageLimitEnabled,
+      enabled: configuredPercent === null || usageLimitEnabled,
       percent: parsedDraft,
     });
   };
@@ -107,7 +104,7 @@ export function AccountUsageLimitControl({
         {configuredPercent === null
           ? t("accounts.usageLimit.description")
           : t("accounts.usageLimit.summary", {
-              maximum: formatPercent(configuredPercent),
+              maximum: String(configuredPercent),
               reserved: formatReservedPercent(configuredPercent),
             })}
       </p>
@@ -167,7 +164,7 @@ export function AccountUsageLimitControl({
       {validDraft && draftChanged ? (
         <p className="text-xs text-muted-foreground">
           {t("accounts.usageLimit.summary", {
-            maximum: formatPercent(parsedDraft),
+            maximum: String(parsedDraft),
             reserved: formatReservedPercent(parsedDraft),
           })}
         </p>
@@ -195,17 +192,10 @@ export function AccountUsageLimitControl({
 
 function UsageLimitStateBadge({ state }: { state: AccountUsageLimitState }) {
   const { t } = useTranslation();
-  if (state === "reached") {
+  if (state === "reached" || state === "data_unavailable") {
     return (
       <Badge variant="destructive">
-        {t("accounts.usageLimit.states.reached")}
-      </Badge>
-    );
-  }
-  if (state === "data_unavailable") {
-    return (
-      <Badge variant="destructive">
-        {t("accounts.usageLimit.states.dataUnavailable")}
+        {t(state === "reached" ? "accounts.usageLimit.states.reached" : "accounts.usageLimit.states.dataUnavailable")}
       </Badge>
     );
   }
@@ -213,10 +203,6 @@ function UsageLimitStateBadge({ state }: { state: AccountUsageLimitState }) {
     return <Badge variant="secondary">{t("common.states.active")}</Badge>;
   }
   return <Badge variant="outline">{t("common.states.off")}</Badge>;
-}
-
-function formatPercent(value: number): string {
-  return String(value);
 }
 
 function formatReservedPercent(maximumUsedPercent: number): string {

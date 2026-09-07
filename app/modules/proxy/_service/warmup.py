@@ -20,13 +20,16 @@ from app.core.auth.refresh import (
 from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
 from app.core.clients.proxy import ProxyResponseError, UpstreamProxyRouteTrace, filter_inbound_headers
 from app.core.clients.proxy import compact_responses as core_compact_responses
+from app.core.config.dashboard_overrides import dashboard_overrides_bound, with_dashboard_overrides
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
+from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.usage.types import UsageWindowRow
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
@@ -165,7 +168,7 @@ def _evaluate_warmup_usage_limit(
         primary=usage.primary,
         secondary=usage.secondary,
         monthly=usage.monthly,
-        refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
+        refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
     )
 
 
@@ -315,6 +318,9 @@ class _WarmupMixin:
             )
 
         dashboard_settings = await get_settings_cache().get()
+        # C2-3 resilience toggles: bound before the per-account fan-out so every
+        # warmup submission task inherits the dashboard breaker gate.
+        bind_resilience_toggles(dashboard_settings)
         configured_model = dashboard_settings.warmup_model
         prohibit_fast_mode = dashboard_settings.prohibit_fast_mode
         effective_model = api_key.enforced_model if api_key and api_key.enforced_model else configured_model
@@ -325,13 +331,14 @@ class _WarmupMixin:
 
         async def _submit_account_warmup(account: _WarmupAccountSnapshot) -> _WarmupSubmitResult:
             async with submission_semaphore:
-                return await self._submit_warmup_request(
-                    account=account,
-                    api_key=api_key,
-                    headers=filtered_headers,
-                    warmup_model=effective_model,
-                    prohibit_fast_mode=prohibit_fast_mode,
-                )
+                with dashboard_overrides_bound(dashboard_settings):
+                    return await self._submit_warmup_request(
+                        account=account,
+                        api_key=api_key,
+                        headers=filtered_headers,
+                        warmup_model=effective_model,
+                        prohibit_fast_mode=prohibit_fast_mode,
+                    )
 
         submission_results = await asyncio.gather(*(_submit_account_warmup(account) for account in accounts_to_submit))
 
@@ -409,7 +416,7 @@ class _WarmupMixin:
         proxy = cast(_WarmupServiceProtocol, self)
 
         try:
-            refresh_timeout = max(1.0, float(get_settings().upstream_connect_timeout_seconds))
+            refresh_timeout = max(1.0, float(with_dashboard_overrides(get_settings()).upstream_connect_timeout_seconds))
             live_account = await proxy._ensure_fresh_with_budget(live_account, timeout_seconds=refresh_timeout)
             route = await proxy._resolve_upstream_route_for_account(live_account, operation="warmup")
             if route is not None:
@@ -623,7 +630,7 @@ class _WarmupMixin:
             decision = await load_owner_authorization(
                 repos.usage,
                 account_id,
-                refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
+                refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
                 require_active=True,
             )
             snapshot = decision.snapshot

@@ -34,6 +34,8 @@ class SelectionInputs(SelectionInputsProtocol):
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
 
+    soft_drain_enabled: bool | None = None
+
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]:
         if self.continuity_owner_candidates is None:
