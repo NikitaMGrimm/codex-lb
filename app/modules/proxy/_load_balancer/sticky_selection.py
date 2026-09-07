@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -31,6 +30,7 @@ from app.core.balancer.logic import (
     ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
     ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
 )
+from app.core.clock import REAL_SCHEDULER, Clock
 from app.core.utils.shared_future import _await_result_deferring_cancellation
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
@@ -101,6 +101,7 @@ SelectionInputsT = TypeVar("SelectionInputsT", bound=SelectionInputsProtocol)
 
 
 class StickySelectionOwner(Protocol):
+    _clock: Clock
     _runtime_lock: asyncio.Lock
     _repo_factory: ProxyRepoFactory
     _selection_inputs_cache: AccountSelectionCache
@@ -239,7 +240,7 @@ async def _release_selection_resources(
             return exc
         return None
 
-    error, cancellation = await _await_result_deferring_cancellation(release())
+    error, cancellation = await _await_result_deferring_cancellation(release(), scheduler=REAL_SCHEDULER)
     if cancellation is not None:
         if error is not None:
             logger.warning("Selection cleanup failed during cancellation", exc_info=error)
@@ -504,7 +505,7 @@ async def run_sticky_selection_path(
                 else build_routing_costs(
                     settings=selection_inputs.quota_planner_settings,
                     states=states,
-                    now=datetime.now(timezone.utc),
+                    now=datetime.fromtimestamp(owner._clock.time(), timezone.utc),
                 )
             )
             # Key shape is deliberately irrelevant here. Only typed
@@ -629,6 +630,7 @@ async def run_sticky_selection_path(
                 selection_states = _filter_recovery_probe_candidates(
                     selection_states,
                     traffic_class=traffic_class,
+                    now=owner._clock.time(),
                 )
             probe_reservation: ProbeReservation | None = None
         # Raw sticky rows are global, while account-assigned API keys and
@@ -822,6 +824,7 @@ async def run_sticky_selection_path(
                 result.account,
                 routing_strategy=routing_strategy,
                 traffic_class=traffic_class,
+                now=owner._clock.time(),
             )
             if should_reserve_probe and probing_result_requires_reservation:
                 # Sticky persistence happens outside the runtime lock.
@@ -1301,6 +1304,7 @@ async def _select_with_stickiness(
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
     sticky_refresh_skip_deadline: datetime | None = None,
+    clock: Clock,
 ) -> _StickySelectionOutcome:
     if not sticky_key or not sticky_repo:
         return _StickySelectionOutcome(
@@ -1405,7 +1409,7 @@ async def _select_with_stickiness(
             # budget threshold. That preserves continuity below the
             # threshold while avoiding obvious short-window failures once
             # the session is skating on the edge of exhaustion.
-            now = time.time()
+            now = clock.time()
             budget_pressured = (
                 sticky_kind
                 in (
@@ -1530,7 +1534,7 @@ async def _select_with_stickiness(
                 grace_copy = replace(pinned)
                 grace_result = select_account(
                     [grace_copy],
-                    now=time.time() + _STICKY_GRACE_PERIOD_SECONDS,
+                    now=clock.time() + _STICKY_GRACE_PERIOD_SECONDS,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
@@ -1728,20 +1732,22 @@ def _probing_result_requires_recovery_reservation(
     *,
     routing_strategy: str,
     traffic_class: TrafficClass,
+    now: float,
 ) -> bool:
     if routing_strategy in ("sequential_drain", "reset_drain", "single_account"):
         return False
     if result_account is None or result_account.health_tier != HEALTH_TIER_PROBING:
         return False
-    return _pool_has_available_healthy_account_without_backoff(states, traffic_class=traffic_class)
+    return _pool_has_available_healthy_account_without_backoff(states, traffic_class=traffic_class, now=now)
 
 
 def _filter_recovery_probe_candidates(
     states: list[AccountState],
     *,
     traffic_class: TrafficClass,
+    now: float,
 ) -> list[AccountState]:
-    if not _pool_has_available_healthy_account_without_backoff(states, traffic_class=traffic_class):
+    if not _pool_has_available_healthy_account_without_backoff(states, traffic_class=traffic_class, now=now):
         return states
     return [state for state in states if state.health_tier != HEALTH_TIER_PROBING]
 
@@ -1750,10 +1756,12 @@ def _pool_has_available_healthy_account_without_backoff(
     states: Iterable[AccountState],
     *,
     traffic_class: TrafficClass,
+    now: float,
 ) -> bool:
     return _pool_has_available_account_without_backoff(
         (state for state in states if state.health_tier == HEALTH_TIER_HEALTHY),
         traffic_class=traffic_class,
+        now=now,
     )
 
 
@@ -1761,13 +1769,14 @@ def _pool_has_available_account_without_backoff(
     states: Iterable[AccountState],
     *,
     traffic_class: TrafficClass,
+    now: float,
 ) -> bool:
     """Return whether the complete pool passes non-cap routing eligibility."""
     # ``select_account`` normalizes expired quota/cooldown fields in place;
     # classify on copies so cap-error reporting cannot mutate the real
     # selection snapshot before sticky persistence. Keep the pool intact:
     # opportunistic admission compares candidates with one another.
-    return bool(routing_eligible_states(states, now=time.time(), traffic_class=traffic_class))
+    return bool(routing_eligible_states(states, now=now, traffic_class=traffic_class))
 
 
 def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
