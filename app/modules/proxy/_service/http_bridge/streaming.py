@@ -3902,7 +3902,7 @@ class _HTTPBridgeStreamingMixin:
                 await self._reset_http_bridge_session_after_local_terminal_error(
                     session,
                     error_code="stream_incomplete",
-                    error_message="Upstream websocket closed before response.completed",
+                    error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
                 )
                 switch_to_account_neutral_replay(
                     event="poisoned_owner_best_effort_replay",

@@ -8502,7 +8502,10 @@ async def test_v1_responses_http_bridge_reports_unavailable_required_owner_when_
             json={
                 "model": "gpt-5.1",
                 "instructions": "Return exactly OK.",
-                "input": "hello",
+                "input": [
+                    {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                    {"role": "user", "content": "hello"},
+                ],
                 "prompt_cache_key": "http-bridge-required-owner",
             },
         ),
@@ -8516,7 +8519,10 @@ async def test_v1_responses_http_bridge_reports_unavailable_required_owner_when_
             json={
                 "model": "gpt-5.1",
                 "instructions": "Return exactly OK.",
-                "input": "continue",
+                "input": [
+                    {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                    {"role": "user", "content": "continue"},
+                ],
                 "prompt_cache_key": "http-bridge-required-owner",
                 "previous_response_id": first.json()["id"],
             },
@@ -13085,7 +13091,10 @@ async def test_v1_responses_http_bridge_upstream_failure_attributes_api_key_in_r
         json={
             "model": "gpt-5.1",
             "instructions": "Return exactly OK.",
-            "input": "hello",
+            "input": [
+                {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                {"role": "user", "content": "hello"},
+            ],
             "prompt_cache_key": "bridge-key-attribution",
         },
     )
@@ -13107,7 +13116,10 @@ async def test_v1_responses_http_bridge_upstream_failure_attributes_api_key_in_r
         json={
             "model": "gpt-5.1",
             "instructions": "Return exactly OK.",
-            "input": "hello-again",
+            "input": [
+                {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                {"role": "user", "content": "hello-again"},
+            ],
             "prompt_cache_key": "bridge-key-attribution",
             "previous_response_id": first_body["id"],
         },
@@ -14095,7 +14107,10 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
         json={
             "model": "gpt-5.1",
             "instructions": "Return exactly OK.",
-            "input": "hello",
+            "input": [
+                {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                {"role": "user", "content": "hello"},
+            ],
             "prompt_cache_key": "send-failure-previous-response",
         },
     )
@@ -14116,7 +14131,10 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
         json={
             "model": "gpt-5.1",
             "instructions": "Return exactly OK.",
-            "input": "hello-again",
+            "input": [
+                {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                {"role": "user", "content": "hello-again"},
+            ],
             "prompt_cache_key": "send-failure-previous-response",
             "previous_response_id": first_body["id"],
         },
