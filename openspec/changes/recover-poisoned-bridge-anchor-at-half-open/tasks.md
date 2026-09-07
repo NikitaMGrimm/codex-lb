@@ -434,6 +434,438 @@
       conversation, with the durable circuit row serving as the
       replica-visible evidence
 
+- [x] 2.86 The stale-load watermark survives the settlement popping the
+      state object via a per-key record, so a racing lookup cannot
+      resurrect the settled row into a fresh state
+
+- [x] 2.87 The load-armed poison quarantine compares against the effective
+      configured abandonment threshold, honoring a one-strike policy on
+      rows another replica recorded
+
+- [x] 2.88 Revoking a speculative poison arm restores a weaker quarantine
+      the arm upgraded, preserving the independently justified fence
+
+- [x] 2.89 The first anchor-planning pass loads the circuit for a hard key
+      before any anchor decision, closing the first-touch window where an
+      expired poison row's anchor was planned into the probe
+
+- [x] 2.90 The load-arm verdict honors the one-clear marker, so a kept row
+      from a completed verified replay does not re-fence the recovered key
+
+- [x] 2.91 The generation claim reports confirmed losses, outages, and
+      claims distinctly; only a confirmed CAS loss drives the remote-lease
+      retry-after fallback
+
+- [x] 2.92 The partial-cleanup strike is recorded before its failure frames
+      are published, keeping quarantine cover ahead of an immediate resend
+
+- [x] 2.93 The idle-exhaustion strike precedes the terminal frame and its
+      consult and abandonment follow it as deferred cleanup, so a slow
+      durable store cannot delay the client-visible terminal
+
+- [x] 2.94 Poison revocation fences on the arm's own provenance and
+      downgrades to a weaker fence that armed during the speculative
+      window, so disproved poison evidence cannot outlive its revocation
+
+- [x] 2.95 The idle-exhaustion consult and abandonment run as an owned
+      registered task created before the terminal frame is yielded, so a
+      consumer closing the generator at that yield cannot skip them
+
+- [x] 2.96 A confirmed terminal abandonment records the episode marker
+      even while its circuit settlement remains outstanding, and derives
+      its settlement from the terminal request plus pending survivors
+
+- [x] 2.97 The quarantine downgrade restores the weaker fence's own
+      deadline, and the completion's generation-fenced clear applies the
+      poison-provenance fence with the same downgrade
+
+- [x] 2.98 The one-clear marker resets whenever a durable load adopts a
+      foreign write, covering equal-count episode replacements
+
+- [x] 2.99 The anchor-advance suppression fires only after the fresh
+      anchor's registration succeeds
+
+- [x] 2.100 The pre-planning circuit load repeats for the canonical key
+      when continuity resolution replaces the incoming key, so aliased
+      paths receive the same quarantine protection
+
+- [x] 2.101 A lost persist whose returned row is neither the writer's own
+      stamp nor its unchanged base resets the one-clear marker, covering
+      equal-count replacements the load path cannot see
+
+- [x] 2.102 The completion's clear of its own session key fences on the
+      generation captured before its settlement and registration awaits,
+      sparing a quarantine armed during them
+
+- [x] 2.103 The grouped funnel writes the episode marker inside the same
+      owned task as the abandonment, so a cancellation between the durable
+      clear and the marker cannot skip it
+
+- [x] 2.104 The stream finalizer awaits a still-running idle settlement
+      before detaching and retiring, keeping the durable owner epoch alive
+      for the abandonment's continuity fence
+
+- [x] 2.105 Persist and settlement watermarks are stamped after their
+      durable writes land, and a settlement sweeps any state a pre-delete
+      load snapshot resurrected while its delete was in flight
+
+- [x] 2.106 The settle fence carries the observed admission generation, and
+      a moved row whose version held while its admission generation
+      advanced leaves the settlement owed to the claimed replay
+
+- [x] 2.107 The partial cleanup freezes its removed-holder snapshot before
+      finalization empties the deque, so a removed safe-replay holder still
+      blocks the settle
+
+- [x] 2.108 The waiterless retirement receives the reader's pre-drain state
+      snapshot, so a drained safe-replay holder still blocks the settle and
+      an all-safe drain does not strike
+
+- [x] 2.109 The verified replay captures its source quarantine fence with
+      the clear's own provenance rule (covered at the clear seam; the
+      capture call is one-line glue on the recovery path)
+
+- [x] 2.110 The once-per-key planning load is recorded as an accepted
+      residual in design.md: a remote poison opening reaches the worker at
+      the next submit-time refresh, costing at most one self-healing probe
+
+- [x] 2.111 The anchor-advance suppression persists as a fenced
+      detail-only rewrite to the non-poison anchor-superseded class, never
+      charging a failure or advancing the row's version, so replicas stop
+      arming against the fresh anchor while concurrent strikes outrank it
+
+- [x] 2.112 A strike whose pre-load failed re-persists once onto the
+      observed row's lineage instead of losing its failure to the blind
+      drop and the wholesale adoption
+
+- [x] 2.113 A load that disproves the fenced episode — reset, supersession,
+      below-threshold non-poison replacement, or missing/expired row —
+      revokes the stale process-local poison quarantine under its
+      provenance fence
+
+- [x] 2.114 The planning cache honors a cached circuit view only while it
+      is younger than the minimum cooldown, so a remote opening is either
+      still cooling or refreshed before its expired cooldown admits a probe
+      (supersedes the 2.110 residual, which is removed from design.md)
+
+- [x] 2.115 The settle stamps a reconcile watermark only for keys that
+      carried an episode or an unverified durable view, keeping healthy
+      high-cardinality traffic out of the map and its prune scan
+
+- [x] 2.116 A twice-missed settle reconciles its owed episode onto the
+      surviving row — or concludes settled when the row is gone — instead
+      of restoring the pre-chase snapshot with an obsolete fence
+
+- [x] 2.117 The anchor-supersession fence carries the observed failure
+      count alongside the version, so a lagging-clock strike that merged
+      without moving the version outranks a supersession that follows it
+
+- [x] 2.118 A load adopting a foreign write while the poison quarantine is
+      active re-arms it against the adopted cooldown and refreshes the
+      provenance; only a truly unchanged episode skips the re-arm
+
+- [x] 2.119 Confirmed durable misses are cached for the planning window,
+      sparing healthy hard keys the planning-time round trip while the
+      submit-time load keeps enforcing any newly created cooldown
+
+- [x] 2.120 Foreign writes are identified by any observed column moving —
+      version, count, or detail — never the timestamp alone, so
+      lagging-clock strikes reset markers and re-arm quarantines
+
+- [x] 2.121 A proxy-injected anchor fails closed at submission when the
+      key's poison quarantine is active by dispatch time, making the
+      planning caches performance bounds rather than clock-dependent
+      correctness assumptions
+
+- [x] 2.122 The planning-miss cache is hard-capped and swept front-only in
+      insertion order, bounding its cost under high-cardinality traffic
+
+- [x] 2.123 A settle with neither a local episode nor a durable
+      observation is refused as owed instead of issuing an unfenced reset
+
+- [x] 2.124 The submit-time poison gate hands back the half-open probe it
+      claimed when failing closed, so the corrected resend is not
+      suppressed by a phantom lease
+
+- [x] 2.125 The terminal settlement's deferral covers its publication
+      awaits, so a cancellation between the queued frame and its sentinel
+      cannot skip the consult, abandonment, and marker
+
+- [x] 2.126 A request that observed a response event holds no safe replay
+      and no longer blocks settlement, matching the retry path's own
+      refusal
+
+- [x] 2.127 Deferred-reasoning prelude evidence also marks the response
+      started for the safe-replay predicate, since it deliberately leaves
+      the counted events at zero
+
+- [x] 2.128 The submit-time gate hands back only a half-open probe this
+      request itself claimed, never a lease another request is flying
+
+- [x] 2.129 The owed poison class survives a later non-poison strike
+      overwriting the durable detail, and any next strike retries the owed
+      clear, fenced on the exact reconciled lineage
+
+- [x] 2.130 A claim CAS miss advertises a remote probe only when the
+      admission generation advanced; sibling resets, purges, and lookup
+      outages report the timer the fresh row actually carries
+
+- [x] 2.131 The probe handback identifies this admission's claim by
+      deadline value, covering a claim made after the load dropped a stale
+      lease
+
+- [x] 2.132 The anchor-advance suppression is a transitional fence applied
+      before the fresh anchor is published and rolled back when the
+      registration fails, closing the consult window without stranding the
+      old anchor
+
+- [x] 2.133 A claim CAS miss advertises a remote probe only for an
+      at-threshold row whose admission generation advanced past the
+      captured one, excluding probe-then-reset and recreated lineages
+
+- [x] 2.134 A poison strike recorded over the supersession sentinel resets
+      the marker, starting a new abandonment story for the fresh anchor
+
+- [x] 2.135 The supersession rollback restores only the exact captured
+      episode and lineage, never a replacement state
+
+- [x] 2.136 The persist merge treats a returned count or detail the write
+      did not submit as foreign evidence, resetting the marker a same-base
+      lagging-clock merge would otherwise carry across
+
+- [x] 2.137 The claim-miss probe inference is lineage-aware: an admission
+      generation advanced in an earlier reset lineage is not a probe in
+      the new one
+
+- [x] 2.138 The supersession fence carries the expected prior detail both
+      ways, so exactly one completion owns each transition and a loser's
+      rollback cannot destroy the winner's supersession
+
+- [x] 2.139 The probe handback clears only the exact lease token captured
+      immediately after admission, never a lease another submission
+      installed later
+
+- [x] 2.140 The completion's quarantine clear is gated on the fresh
+      anchor's durable registration confirming, so a swallowed alias
+      failure cannot strip the last protection from the stored old anchor
+
+- [x] 2.141 The planning-miss hard cap is enforced at insertion, holding
+      through concurrent bursts that pass the pre-await sweep
+
+- [x] 2.142 Handing a probe back restores the consumed transition marker,
+      so the corrected resend re-claims the lease and follow-ups stay
+      suppressed behind it
+
+- [x] 2.143 A failed registration after a successful settle re-seeds the
+      durable poison row on the zeroed lineage, keeping every replica
+      armed against the still-stored old anchor
+
+- [x] 2.144 The claimed-probe token is handed out by the admission's claim
+      under its own lock, exact under any interleaving
+
+- [x] 2.145 The submission finalizer releases the claimed probe on every
+      pre-dispatch exit, not only the poisoned-anchor rejection
+
+- [x] 2.146 The owed poison debt survives foreign same-lineage strikes
+      (count growth) and dies with the reset/replacement signature
+
+- [x] 2.147 A missed fenced TTL purge reconciles the surviving fresh row
+      instead of popping the circuit and revoking the quarantine
+
+- [x] 2.148 The scheduled circuit purge spares ever-claimed generations
+      for one extra TTL so a claim near the boundary is not reaped
+      mid-replay
+
+- [x] 2.149 An at-threshold poison detail is sticky in the strike merge,
+      making the durable row the cross-replica debt record; the local owed
+      record dies with foreign writes and re-arms from the adopted row
+
+- [x] 2.150 The completion adopts durable-only circuit rows before
+      capturing its quarantine fence and pre-settle poison detail
+
+- [x] 2.151 The probe handback keys on the send-attempt marker, keeping a
+      possibly-live ambiguous dispatch's lease in force
+
+- [x] 2.152 The stale-row TTL purge is fenced on the admission generation
+      so an active replay claim survives a racing expiry
+
+- [x] 2.153 The transitional marker applies only to episodes carrying
+      poison evidence; clean episodes are never marked already abandoned
+
+- [x] 2.154 The on-demand TTL purge applies the ever-claimed grace, since
+      a claim observed in the row cannot be protected by any fence on
+      observed values
+
+- [x] 2.155 Abandonment-driven settles leave the anchor_abandoned durable
+      tombstone and the unanchored-delta gate fails closed on it, covering
+      restarts and other replicas after a settled abandonment
+
+- [x] 2.156 The refreshed row after a purge miss honors the ever-claimed
+      grace when its age is evaluated
+
+- [x] 2.157 A completion replacing a poison episode settles onto the
+      transitional anchor_abandoned tombstone and erases it only after the
+      fresh anchor's registration commits, so a crash or takeover inside
+      the settle-to-registration window fails deltas closed instead of
+      reading as a disproved episode
+
+- [x] 2.158 The failed-settlement suppression persists the transitional
+      tombstone durably and promotes it to anchor_superseded only after
+      the registration commits; the rollback fence follows the tombstone
+
+- [x] 2.159 Poison debt arms only when the strike is at or over the
+      threshold, so a clean_close opener cannot resurrect a
+      below-threshold poison detail and clear a valid anchor uncovered
+
+- [x] 2.160 A response.completed without a usable response id (or matched
+      request) confirms no registration and keeps the quarantine
+
+- [x] 2.161 The terminal-frame strike excludes internal warmup probes
+      (prewarm or skip-request-log states), matching the completion
+      settle's exclusions; the terminal-error fixtures model real client
+      requests so the strike path stays exercised
+
+- [x] 2.162 A completion whose pre-settle row already carries the
+      tombstone settles onto the tombstone and erases it only after the
+      registration commits
+
+- [x] 2.163 The load-path stale purge spares tombstone rows and adopts
+      them so the unanchored-delta gate can read them
+
+- [x] 2.164 The scheduled purge preserves tombstone rows until the
+      bridge-retention cutoff and reaps them past it
+
+- [x] 2.165 A completion whose pre-settle durable load fails still
+      settles locally, and the settle derives the fail-closed tombstone
+      from the poison episode it actually adopts instead of resetting it
+      plain off the blind capture
+
+- [x] 2.166 A completion that cannot register a fresh anchor (no usable
+      response id or matched request) leaves a poison episode unsettled
+      instead of writing a zero-count tombstone the next load reads as a
+      disproved episode
+
+- [x] 2.167 A transitional tombstone fences the stored anchor: loads do
+      not revoke a surviving quarantine off a tombstone row, and
+      full-resend planning suppresses durable-anchor injection over one
+
+- [x] 2.168 The abandonment tombstone is sticky in the strike merge
+      against every failure-class overwrite, in both dialects, NULL-safe
+
+- [x] 2.169 The owed-debt arm and the durable sticky-detail fence use the
+      effective configured anchor-poison threshold, arming and preserving
+      a one-failure debt at a configured threshold of one
+
+- [x] 2.170 The submit-time gate fails a proxy-injected anchor closed
+      over an adopted abandonment tombstone, matching the quarantine gate
+
+- [x] 2.171 A restored episode that is itself the tombstone hands back a
+      promotion token, so a committed registration promotes it instead of
+      stranding the fresh anchor behind the lingering tombstone
+
+- [x] 2.172 The on-demand stale purge fences on the observed count and
+      detail, so a detail-only tombstone transition or lagging-clock
+      merge makes it miss and reconcile instead of deleting the fence
+
+- [x] 2.173 A purge-miss reconcile adopts a refreshed tombstone
+      regardless of its preserved old epoch
+
+- [x] 2.174 Owed poison debt alone makes the failed-settlement
+      suppression transitional, even under a non-poison local detail
+
+- [x] 2.175 The grouped settlement excludes internal warmup states from
+      its strike loop, matching the single-request terminal branch
+
+- [x] 2.176 The abandonment-driven settle yields to freshly registered
+      continuity, downgrading its tombstone to a plain reset when the
+      post-clear re-read shows a new anchor
+
+- [x] 2.177 The freshness check compares both continuity columns, so a
+      turn-state-only advance also downgrades the abandonment settle
+
+- [x] 2.178 A post-settle continuity re-read erases a tombstone written
+      over fresh continuity through the fenced detail-only rewrite
+
+- [x] 2.179 The abandonment settle is fenced to its authorizing episode
+      (epoch and count) and spares a replacement episode's cooldown; a
+      continuity-informed plain reset suppresses the blind tombstone
+      upgrade
+
+- [x] 2.180 The authorizing episode is captured before the continuity
+      clear's await, and the fence includes the admission generation so a
+      claimed replay survives the settle
+
+- [x] 2.181 The suppression keeps a local tombstone local until the
+      registration commits, never flipping it early to the superseded
+      sentinel
+
+- [x] 2.182 The tombstone promotion and erase retry once on transient
+      durable failures before deferring to the next completion's healing
+
+- [x] 2.183 The internal precreated-retry path threads the claim token
+      and a send-attempt baseline, handing an unused probe back on every
+      dispatchless exit
+
+- [x] 2.184 An episode-fenced settle never chases a moved row: the
+      CAS-miss chase re-fences only for completion callers, and a
+      replacement lineage keeps its cooldown
+
+- [x] 2.185 The pre-response eventless timeout keeps upstream's
+      distinguishable bridge_eventless_timeout detail while counting as
+      anchor-poison evidence: the poison map and both dialects' sticky
+      fences include it, and the eventless site routes through the fenced
+      consult flow with the truthful suppression message
+
+- [x] 2.186 The retry-transport failure funnel abandons through the same
+      capped consult and continuity fence, never the raw configured
+      threshold or an unfenced clear
+
+- [x] 2.187 The failed-registration poison restore transitions its own
+      tombstone through the fenced supersede before re-seeding
+
+- [x] 2.188 The durable reset CAS carries the observed failure count, so
+      a lagging-clock strike fences an episode reset the epoch cannot see
+
+- [x] 2.189 A poison upgrade stashes an active weaker quarantine with its
+      own deadline, and the poison revocation downgrades to it
+
+- [x] 2.190 An unpersisted local strike cannot strand a confirmed
+      abandonment's settle: the chase recognizes the same-lineage
+      lower-count row and settles through its own fence
+
+- [x] 2.191 The abandonment fences from the consulted episode when one is
+      passed, so a sibling settle emptying the registry cannot unfence it
+
+- [x] 2.192 The retry-transport funnel publishes its terminal before the
+      settlement task runs, and the finalizer awaits that task
+
+- [x] 2.193 The terminal and grouped funnels pass their consulted episode
+      into the abandonment, verified through spies on the real funnels
+
+- [x] 2.194 A completion whose pre-settle load failed recaptures its
+      quarantine-clear fence after the settle, so the inner-load-armed
+      quarantine clears on registration
+
+- [x] 2.195 The scheduled purge reaps a tombstone only when no durable
+      session (direct or alias-resolved) still stores continuity for its
+      key, so a live session cannot outlive its fail-closed fence
+
+- [x] 2.196 The consult adopts the authorizing durable row's epoch,
+      admission generation, and higher count onto an unpersisted episode
+
+- [x] 2.197 Promote and erase CAS misses reconcile on the row's own
+      values through the shared tombstone reconcile
+
+- [x] 2.198 The merged-opening arm uses the effective poison threshold,
+      arming from an adopted one-failure row under a clean local strike
+
+- [x] 2.199 The consult adopts a moved row's fence over a positive but
+      stale local epoch, not only over an unpersisted one
+
+- [x] 2.200 The poison classification expires on its own deadline: weaker
+      arms extend only the shared session fence and cannot prolong the
+      anchor-is-dead answer
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

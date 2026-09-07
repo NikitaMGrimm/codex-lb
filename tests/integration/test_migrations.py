@@ -712,13 +712,25 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
 
 
 @pytest.mark.asyncio
-async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
+@pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
+async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path, db_setup, dialect):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect
 
     from app.db.migrate import _build_alembic_config
 
-    db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-usage-limits.sqlite'}"
+    if dialect == "postgresql":
+        if not _is_postgresql_database_url(_DATABASE_URL):
+            pytest.skip("PostgreSQL-only account usage-limit migration round trip")
+        db_url = _DATABASE_URL
+        # This is the same explicitly isolated test database used by the
+        # PostgreSQL empty-schema migration contract above, never app settings.
+        async with SessionLocal() as session:
+            await session.execute(text("DROP SCHEMA public CASCADE"))
+            await session.execute(text("CREATE SCHEMA public"))
+            await session.commit()
+    else:
+        db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-usage-limits.sqlite'}"
     revision = "20260728_010000_add_account_usage_limits"
     parent_revision = "20260812_120000_add_sticky_abandonment_scope"
 
@@ -738,10 +750,11 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                     VALUES (
                         'acc_usage_limit_migration', '00000000-0000-0000-0000-000000000001',
                         'usage-limit@example.com', 'plus',
-                        x'01', x'02', x'03', '2026-01-01 00:00:00', 'active'
+                        :access, :refresh, :identity, '2026-01-01 00:00:00', 'active'
                     )
                     """
-                )
+                ),
+                {"access": b"\x01", "refresh": b"\x02", "identity": b"\x03"},
             )
     finally:
         await engine.dispose()
@@ -773,7 +786,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                 text(
                     """
                     UPDATE accounts
-                    SET usage_limit_enabled = 1, usage_limit_percent = 10.0
+                    SET usage_limit_enabled = TRUE, usage_limit_percent = 10.0
                     WHERE id = 'acc_usage_limit_migration'
                     """
                 )
@@ -784,7 +797,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                     text(
                         """
                         UPDATE accounts
-                        SET usage_limit_enabled = 1, usage_limit_percent = NULL
+                        SET usage_limit_enabled = TRUE, usage_limit_percent = NULL
                         WHERE id = 'acc_usage_limit_migration'
                         """
                     )
@@ -795,7 +808,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                     text(
                         """
                         UPDATE accounts
-                        SET usage_limit_enabled = 0, usage_limit_percent = 101.0
+                        SET usage_limit_enabled = FALSE, usage_limit_percent = 101.0
                         WHERE id = 'acc_usage_limit_migration'
                         """
                     )
@@ -803,14 +816,27 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
     finally:
         await engine.dispose()
 
+    deployed_revision = "20260828_010000_merge_deployed_usage_limits_and_current_main_heads"
+    await to_thread.run_sync(lambda: run_upgrade(db_url, deployed_revision, bootstrap_legacy=False))
+    assert inspect_migration_state(db_url).current_revision == deployed_revision
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
     migration_state = inspect_migration_state(db_url)
-    assert migration_state.head_revision == _HEAD_REVISION
-    assert migration_state.current_revision == revision
+    assert migration_state.head_revision == "20260907_000000_merge_vps_usage_limits_and_upstream"
+    assert migration_state.current_revision == migration_state.head_revision
     verification_engine = create_async_engine(db_url, future=True)
     try:
         async with verification_engine.connect() as conn:
+            preserved = (
+                await conn.execute(
+                    text(
+                        "SELECT usage_limit_enabled, usage_limit_percent FROM accounts "
+                        "WHERE id = 'acc_usage_limit_migration'"
+                    )
+                )
+            ).one()
+            assert preserved == (True, 10.0)
             revision_rows = await conn.execute(text("SELECT version_num FROM alembic_version"))
-            assert [str(row[0]) for row in revision_rows.fetchall()] == [revision]
+            assert [str(row[0]) for row in revision_rows.fetchall()] == [migration_state.head_revision]
     finally:
         await verification_engine.dispose()
 
@@ -855,7 +881,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                     text(
                         """
                         UPDATE accounts
-                        SET usage_limit_enabled = 1, usage_limit_percent = NULL
+                        SET usage_limit_enabled = TRUE, usage_limit_percent = NULL
                         WHERE id = 'acc_usage_limit_migration'
                         """
                     )
@@ -866,18 +892,13 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                     text(
                         """
                         UPDATE accounts
-                        SET usage_limit_enabled = 0, usage_limit_percent = 101.0
+                        SET usage_limit_enabled = FALSE, usage_limit_percent = 101.0
                         WHERE id = 'acc_usage_limit_migration'
                         """
                     )
                 )
     finally:
         await engine.dispose()
-
-    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-    migration_state = inspect_migration_state(db_url)
-    assert migration_state.head_revision == _HEAD_REVISION
-    assert migration_state.current_revision == _HEAD_REVISION
 
 
 @pytest.mark.asyncio
@@ -1959,6 +1980,92 @@ async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
         async with engine.connect() as conn:
             tables_after_downgrade = await conn.run_sync(lambda sync_conn: set(sa_inspect(sync_conn).get_table_names()))
         assert rollup_tables <= tables_after_downgrade
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_quota_warmup_claim_expiry_migration_upgrade_and_downgrade(tmp_path):
+    from datetime import datetime, timezone
+
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'quota-warmup-claim-expiry.sqlite'}"
+    parent_revision = "20260828_000000_add_accounts_chatgpt_identity_index"
+    claim_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            # A claim that could still be mid-probe when the migration runs
+            # (claim stamp = now) and one whose claim stamp is older than any
+            # probe can run (genuinely stranded by a crash).
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO quota_planner_decisions (
+                        id, mode, action, account_id, scheduled_at, executed_at,
+                        score, reason, forecast_snapshot_hash, state_before_json,
+                        state_after_json, status, idempotency_key, created_at
+                    ) VALUES (
+                        'warmup-legacy-executing', 'auto', 'warmup', 'acc-legacy', NULL, NULL,
+                        0.0, 'legacy_executing', NULL, NULL,
+                        NULL, 'executing', 'legacy-warmup-claim', CURRENT_TIMESTAMP
+                    ), (
+                        'warmup-legacy-stranded', 'auto', 'warmup', 'acc-legacy', NULL,
+                        '2026-01-01 00:00:00.000000',
+                        0.0, 'legacy_executing', NULL, NULL,
+                        NULL, 'executing', 'legacy-warmup-claim-stranded', '2026-01-01 00:00:00.000000'
+                    )
+                    """
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, claim_revision, bootstrap_legacy=False))
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("quota_planner_decisions")
+                }
+            )
+            live_lease = (
+                await conn.execute(
+                    text("SELECT lease_expires_at FROM quota_planner_decisions WHERE id = 'warmup-legacy-executing'")
+                )
+            ).scalar_one()
+            stranded_lease = (
+                await conn.execute(
+                    text("SELECT lease_expires_at FROM quota_planner_decisions WHERE id = 'warmup-legacy-stranded'")
+                )
+            ).scalar_one()
+        assert "lease_expires_at" in columns
+        # A possibly-live legacy claim keeps a conservative execution window:
+        # its backfilled lease must still be in the future so a concurrent
+        # pre-migration probe is not reclaimed (and duplicated) mid-flight.
+        assert live_lease is not None
+        assert datetime.fromisoformat(str(live_lease)) > datetime.now(timezone.utc).replace(tzinfo=None)
+        # A claim stamped long before the migration is already expired and
+        # recoverable on the next scheduler sweep.
+        assert stranded_lease is not None
+        assert datetime.fromisoformat(str(stranded_lease)) <= datetime.now(timezone.utc).replace(tzinfo=None)
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            columns_after = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("quota_planner_decisions")
+                }
+            )
+        assert "lease_expires_at" not in columns_after
     finally:
         await engine.dispose()
 

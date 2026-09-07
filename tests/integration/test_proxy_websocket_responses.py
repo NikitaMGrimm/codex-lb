@@ -51,6 +51,7 @@ from app.modules.proxy.capability_routing import (
     REQUIRED_CAPABILITY_HEADER,
     _capability_lineage_unavailable_error,
 )
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 
 pytestmark = pytest.mark.integration
 
@@ -148,11 +149,11 @@ def _stub_request_logging(monkeypatch: pytest.MonkeyPatch) -> None:
         del self, kwargs
         return None
 
-    async def check_account_usage_limit(_self: object, _account_id: str) -> AccountUsageLimitState:
-        return AccountUsageLimitState.DISABLED
+    async def authorize_account_fresh(_self: object, _account_id: str) -> OwnerAuthorization:
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
-    monkeypatch.setattr(proxy_module.LoadBalancer, "check_account_usage_limit", check_account_usage_limit)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
 
 class _FakeUpstreamMessage:
@@ -2627,7 +2628,7 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
     seen_headers = cast(dict[str, str], seen["headers"])
     assert seen_headers["session_id"] == "thread-ws-1"
     assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"
-    assert seen_headers["x-codex-turn-state"] != cast(str, seen["sticky_key"])
+    assert "x-codex-turn-state" not in seen_headers
     assert seen["sticky_key"] == _codex_session_selection_key("thread-ws-1")
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     assert seen["prefer_earlier_reset"] is False
@@ -4024,10 +4025,9 @@ def test_backend_responses_websocket_accepts_and_reuses_generated_turn_state(app
             assert json.loads(websocket.receive_text())["type"] == "response.completed"
 
     assert turn_state
-    assert [cast(dict[str, str], selection["headers"])["x-codex-turn-state"] for selection in selections] == [
-        turn_state,
-        turn_state,
-    ]
+    selection_headers = [cast(dict[str, str], selection["headers"]) for selection in selections]
+    assert "x-codex-turn-state" not in selection_headers[0]
+    assert selection_headers[1]["x-codex-turn-state"] == turn_state
     assert selections[1]["sticky_key"] == turn_state
     assert selections[1]["sticky_kind"] == proxy_module.StickySessionKind.CODEX_SESSION
     second_payload = json.loads(second_upstream.sent_text[0])
@@ -4166,10 +4166,9 @@ def test_backend_responses_websocket_echoed_generated_turn_state_reuses_continui
     assert "previous_response_id" not in first_upstream_payload
     assert second_upstream_payload["previous_response_id"] == "resp_generated_anchor"
     assert second_upstream_payload["input"] == [second_input]
-    assert [cast(dict[str, str], selection["headers"])["x-codex-turn-state"] for selection in selections] == [
-        turn_state,
-        turn_state,
-    ]
+    selection_headers = [cast(dict[str, str], selection["headers"]) for selection in selections]
+    assert "x-codex-turn-state" not in selection_headers[0]
+    assert selection_headers[1]["x-codex-turn-state"] == turn_state
 
 
 def test_backend_responses_websocket_goal_restart_retires_reused_socket_and_keeps_full_resend(
@@ -4429,7 +4428,7 @@ def test_backend_responses_websocket_reconnect_keeps_session_affinity_with_fresh
         proxy_module.StickySessionKind.CODEX_SESSION,
         proxy_module.StickySessionKind.CODEX_SESSION,
     ]
-    assert [cast(dict[str, str], selection["headers"])["x-codex-turn-state"] for selection in selections] == turn_states
+    assert all("x-codex-turn-state" not in cast(dict[str, str], selection["headers"]) for selection in selections)
 
 
 def test_backend_responses_websocket_echoes_existing_turn_state_header(app_instance, monkeypatch):
@@ -4804,16 +4803,27 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
         del self, headers, kwargs
         return account, upstream
 
-    async def check_account_usage_limit(self, account_id):
+    async def authorize_account_fresh(self, account_id):
         del self
         assert account_id == account.id
-        return usage_limit_state
+        if usage_limit_state is None:
+            return OwnerAuthorization(OwnerAuthorizationKind.OWNER_UNAVAILABLE)
+        return OwnerAuthorization(
+            OwnerAuthorizationKind.USAGE_POLICY_BLOCKED
+            if usage_limit_state.blocks_account_use
+            else OwnerAuthorizationKind.ALLOWED,
+            usage_limit_state,
+        )
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
-    monkeypatch.setattr(proxy_module.LoadBalancer, "check_account_usage_limit", check_account_usage_limit)
+    monkeypatch.setattr(
+        proxy_module.LoadBalancer,
+        "authorize_account_fresh",
+        authorize_account_fresh,
+    )
 
     request = {
         "type": "response.create",
@@ -4886,6 +4896,9 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
     upstream = _OverlappingUpstreamWebSocket()
     account = SimpleNamespace(id="acct_ws_usage_limit_read_failure")
     authorization_checks = 0
+    failure_logs: list[dict[str, object]] = []
+    released_create_leases: list[object] = []
+    original_release_create_lease = proxy_module.ProxyService._release_request_state_account_response_create_lease
 
     class _FakeSettingsCache:
         async def get(self):
@@ -4901,7 +4914,7 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
         del self, headers, kwargs
         return account, upstream
 
-    async def check_account_usage_limit(self, account_id):
+    async def authorize_account_fresh(self, account_id):
         nonlocal authorization_checks
         del self
         assert account_id == account.id
@@ -4909,14 +4922,34 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
         if authorization_checks == 2:
             if isinstance(second_check, Exception):
                 raise second_check
-            return second_check
-        return AccountUsageLimitState.DISABLED
+            return OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, second_check)
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+
+    async def record_connect_failure(self, **kwargs):
+        del self
+        failure_logs.append(kwargs)
+
+    async def track_release_create_lease(self, request_state):
+        lease = request_state.account_response_create_lease
+        await original_release_create_lease(self, request_state)
+        if lease is not None:
+            released_create_leases.append(lease)
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
-    monkeypatch.setattr(proxy_module.LoadBalancer, "check_account_usage_limit", check_account_usage_limit)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_websocket_connect_failure", record_connect_failure)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_release_request_state_account_response_create_lease",
+        track_release_create_lease,
+    )
+    monkeypatch.setattr(
+        proxy_module.LoadBalancer,
+        "authorize_account_fresh",
+        authorize_account_fresh,
+    )
 
     request = {
         "type": "response.create",
@@ -4938,6 +4971,9 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
                 assert rejected["response"]["error"]["code"] == expected_error_code
                 assert len(upstream.sent_text) == 1
                 assert upstream.closed is False
+                assert failure_logs[-1]["error_code"] == expected_error_code
+                assert failure_logs[-1]["account_id"] == account.id
+                assert len(released_create_leases) == 1
 
                 release_first_response.set()
                 first_completed = json.loads(websocket.receive_text())
@@ -5197,7 +5233,7 @@ def test_v1_responses_websocket_accepts_and_reuses_generated_turn_state(app_inst
 
     seen_headers = cast(dict[str, str], seen["headers"])
     assert turn_state
-    assert seen_headers["x-codex-turn-state"] == turn_state
+    assert "x-codex-turn-state" not in seen_headers
     assert seen["sticky_key"] != turn_state
     assert seen["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
 
@@ -8889,7 +8925,21 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     assert first_upstream.closed is True
 
 
-@pytest.mark.parametrize("frame", ['{"type":"response.create"', "[]"])
+def _deeply_nested_response_create_frame() -> str:
+    # Past pydantic-core's ~250-level serializer limit: the depth guard must
+    # yield a 400 event instead of raising out of the per-frame handler.
+    deep: object = {"leaf": 1}
+    for _ in range(300):
+        deep = [deep]
+    item = {"role": "user", "content": [{"type": "input_text", "text": "x", "n": deep}]}
+    return json.dumps({"type": "response.create", "model": "gpt-5.6-sol", "instructions": "", "input": [item]})
+
+
+@pytest.mark.parametrize(
+    "frame",
+    ['{"type":"response.create"', "[]", _deeply_nested_response_create_frame()],
+    ids=["truncated-json", "array", "deeply-nested-input"],
+)
 def test_backend_responses_websocket_rejects_malformed_first_frame_as_invalid_payload(app_instance, monkeypatch, frame):
     called = {"connect": False}
 

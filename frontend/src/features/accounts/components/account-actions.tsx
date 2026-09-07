@@ -121,7 +121,6 @@ export function AccountActions({
       ) : null}
 
       <AccountUsageLimitControl
-        key={`${account.accountId}:${account.usageLimitPercent ?? "none"}`}
         account={account}
         busy={busy}
         readOnly={readOnly}

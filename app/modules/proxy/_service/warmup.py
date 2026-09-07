@@ -5,7 +5,7 @@ import logging
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Protocol, cast
 from uuid import uuid4
@@ -32,7 +32,12 @@ from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_client_fields
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
-from app.modules.proxy.request_policy import normalize_upstream_model_alias, validate_model_access
+from app.modules.proxy.request_policy import (
+    apply_prohibit_fast_mode,
+    normalize_upstream_model_alias,
+    validate_model_access,
+)
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind, load_owner_authorization
 from app.modules.usage.mappers import usage_history_to_window_row
 
 logger = logging.getLogger(__name__)
@@ -136,7 +141,7 @@ class _WarmupAccountSnapshot:
 @dataclass(frozen=True, slots=True)
 class _WarmupAuthorization:
     account: _WarmupAccountSnapshot | None
-    limit_state: AccountUsageLimitState = AccountUsageLimitState.DISABLED
+    decision: OwnerAuthorization
 
 
 def _is_warmup_usage_eligible(entry: UsageWindowRow | None) -> bool:
@@ -363,7 +368,9 @@ class _WarmupMixin:
         *,
         api_key: ApiKeyData | None,
     ) -> list[_WarmupAccountSnapshot]:
-        active_accounts = [account for account in accounts if account.status == AccountStatus.ACTIVE]
+        active_accounts = [
+            account for account in accounts if account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+        ]
         if api_key is None or not api_key.account_assignment_scope_enabled:
             return active_accounts
         assigned_ids = {account_id for account_id in api_key.assigned_account_ids if account_id}
@@ -425,6 +432,15 @@ class _WarmupMixin:
                     error_code=error_code,
                     error_message=error_message,
                 )
+            if authorization.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+                error_code = _WARMUP_USAGE_LIMIT_AUTHORIZATION_FAILED
+                error_message = "Account usage-limit authorization failed"
+                return _WarmupSubmitResult(
+                    success=False,
+                    request_id=request_id,
+                    error_code=error_code,
+                    error_message=error_message,
+                )
             if authorization.account is None:
                 error_code = "account_not_found"
                 error_message = "Account no longer exists"
@@ -434,7 +450,7 @@ class _WarmupMixin:
                     error_code=error_code,
                     error_message=error_message,
                 )
-            if authorization.account.status != AccountStatus.ACTIVE:
+            if authorization.decision.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
                 error_code = "account_not_active"
                 error_message = f"Account status is {authorization.account.status.value}"
                 return _WarmupSubmitResult(
@@ -443,7 +459,7 @@ class _WarmupMixin:
                     error_code=error_code,
                     error_message=error_message,
                 )
-            if authorization.limit_state.blocks_account_use:
+            if authorization.decision.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
                 error_code = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
                 error_message = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
                 return _WarmupSubmitResult(
@@ -462,7 +478,12 @@ class _WarmupMixin:
                 input="warmup",
                 store=False,
             )
-            normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
+            normalize_upstream_model_alias(payload)
+            apply_prohibit_fast_mode(
+                payload,
+                prohibit_fast_mode=prohibit_fast_mode,
+                request_id=request_id,
+            )
             response = await _call_with_supported_optional_kwargs(
                 _service_core_compact_responses(),
                 payload,
@@ -591,29 +612,28 @@ class _WarmupMixin:
         proxy = cast(_WarmupServiceProtocol, self)
         async with proxy._repo_factory() as repos:
             account = await repos.accounts.get_by_id_fresh(account_id)
-            if account is None:
-                return _WarmupAuthorization(account=None)
-            account_snapshot = _snapshot_warmup_account(account)
-            if account.status != AccountStatus.ACTIVE:
-                return _WarmupAuthorization(account=account_snapshot)
-            if not account_snapshot.usage_limit_enabled:
+            if account is None or account.status != AccountStatus.ACTIVE:
                 return _WarmupAuthorization(
-                    account=account_snapshot,
-                    limit_state=AccountUsageLimitState.DISABLED,
+                    account=_snapshot_warmup_account(account) if account is not None else None,
+                    decision=OwnerAuthorization(
+                        OwnerAuthorizationKind.OWNER_UNAVAILABLE,
+                        owner_status=account.status if account is not None else None,
+                    ),
                 )
-
-            account_ids = [account_id]
-            primary = (await repos.usage.latest_by_account(window="primary", account_ids=account_ids)).get(account_id)
-            secondary = (await repos.usage.latest_by_account(window="secondary", account_ids=account_ids)).get(
-                account_id
+            decision = await load_owner_authorization(
+                repos.usage,
+                account_id,
+                refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
+                require_active=True,
             )
-            monthly = (await repos.usage.latest_by_account(window="monthly", account_ids=account_ids)).get(account_id)
-            limit_state = _evaluate_warmup_usage_limit(
-                account_snapshot,
-                _WarmupUsageSnapshot(
-                    primary=usage_history_to_window_row(primary) if primary is not None else None,
-                    secondary=usage_history_to_window_row(secondary) if secondary is not None else None,
-                    monthly=usage_history_to_window_row(monthly) if monthly is not None else None,
-                ),
+            snapshot = decision.snapshot
+            if snapshot is None:
+                return _WarmupAuthorization(account=None, decision=decision)
+            account_snapshot = replace(
+                _snapshot_warmup_account(account),
+                status=snapshot.status,
+                plan_type=snapshot.plan_type,
+                usage_limit_enabled=snapshot.enabled,
+                usage_limit_percent=snapshot.limit_percent,
             )
-            return _WarmupAuthorization(account=account_snapshot, limit_state=limit_state)
+            return _WarmupAuthorization(account=account_snapshot, decision=decision)

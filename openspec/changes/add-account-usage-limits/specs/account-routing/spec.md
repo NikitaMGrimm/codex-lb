@@ -2,6 +2,84 @@
 
 ## ADDED Requirements
 
+### Requirement: Final owner authorization is explicit and fail-closed
+
+Fresh owner authorization MUST distinguish permission, a local usage-policy block, an unavailable owner, and an authorization infrastructure failure. A missing, paused, deactivated, or reauthentication-required owner MUST NOT be admitted on retry exhaustion. Failed final selection authorization MUST release provisional leases and recovery probes and MUST NOT publish a new or changed sticky owner. An unavailable owner MUST NOT be reported as having reached its usage policy. Cancellation MUST propagate after provisional resource cleanup.
+
+#### Scenario: Owner disappears on the final selection attempt
+
+- **GIVEN** selection state is invalidated on every bounded selection attempt
+- **AND** the selected owner is deleted or becomes administratively unavailable during the final attempt
+- **WHEN** final fresh authorization runs
+- **THEN** selection returns no account or lease
+- **AND** no new sticky owner is published and no provisional runtime pressure remains
+- **AND** the error identifies owner unavailability rather than a usage-policy block
+
+
+#### Scenario: Repeated cancellation interrupts final authorization cleanup
+
+- **GIVEN** selection owns a provisional stream lease and estimated-token pressure
+- **WHEN** final authorization is cancelled and another cancellation arrives while resource release awaits its runtime lock
+- **THEN** cleanup finishes releasing provisional lease and probe ownership before cancellation propagates
+- **AND** no sticky owner is published and no stream or token pressure remains
+
+
+### Requirement: Disabled policies preserve routing-pool semantics
+
+When all usage policies are disabled, applying the usage-policy and concurrency-cap projections MUST preserve established canonical routing, backoff fallback, and terminal-error semantics. Administratively unavailable and usage-policy-blocked accounts MUST NOT contribute fair-share capacity or become selectable. Evidence needed for canonical fallback and terminal errors MUST remain available independently of those capacity projections.
+
+#### Scenario: A canonical pool contains a backoff owner and a paused peer
+
+- **GIVEN** an active account in error backoff is below its concurrency cap
+- **AND** its only peer is paused and all usage policies are disabled
+- **WHEN** the canonical pool is projected for usage policy and concurrency admission
+- **THEN** the established controlled backoff fallback remains available
+- **AND** the paused peer contributes no fair-share capacity
+
+#### Scenario: Public routing preserves pre-feature administrative filtering
+
+- **GIVEN** one backoff owner has a persisted paused or deactivated peer that public account loading excludes
+- **WHEN** ordinary or soft-sticky routing evaluates the loaded pool with usage policies disabled
+- **THEN** the excluded peer does not newly manufacture backoff fallback
+
+#### Scenario: Public routing retains upstream quota block evidence
+
+- **GIVEN** one backoff owner has a rate-limited or quota-exceeded peer that remains in the loaded pool
+- **WHEN** ordinary or soft-sticky routing evaluates the pool with usage policies disabled
+- **THEN** the established controlled backoff fallback remains available
+
+### Requirement: Unavailable telemetry is not a numeric analytics sample
+
+Historical usage calculations MUST exclude unavailable measurement placeholders before window functions, deltas, averages, or trends use their values. A genuine zero-percent measurement with valid quota metadata MUST remain a measurement.
+
+#### Scenario: Missing observation between real measurements
+
+- **GIVEN** one quota window has real measurements of 70 and 71 percent with an unavailable placeholder between them
+- **WHEN** demand is calculated over those observations
+- **THEN** the measured positive usage delta is one percentage point, not 71
+
+### Requirement: Authorization failures retain local error provenance
+
+An `account_usage_limit_authorization_failed` error generated without an upstream response MUST NOT produce an upstream HTTP status in request logs.
+
+#### Scenario: Database authorization read fails
+
+- **GIVEN** a final local owner-authorization read fails before dispatch
+- **WHEN** the proxy records the resulting failure
+- **THEN** the request log contains the local authorization error
+- **AND** its upstream status code is absent
+
+### Requirement: Acknowledged policy mutations cannot be reverted by older reads
+
+Dashboard policy reconciliation MUST prevent an account or dashboard read started before an acknowledged mutation from replacing the acknowledged policy with older state, including when the read becomes inactive. Overlapping policy mutations MUST preserve their acknowledged ordering and MUST NOT allow a delayed prior reconciliation to revert a later acknowledged policy.
+
+#### Scenario: Inactive dashboard read settles after save
+
+- **GIVEN** a dashboard read starts before a policy mutation and subsequently becomes inactive
+- **WHEN** the mutation is acknowledged and the older read then settles
+- **THEN** cached policy fields still reflect the acknowledged mutation or a newer authoritative read
+- **AND** they do not revert to the pre-mutation policy
+
 ### Requirement: Accounts have a reversible maximum-usage policy
 
 Each account SHALL support an optional maximum standard-quota used percentage greater than 0 and at most 100, plus an enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling a configured policy SHALL retain its percentage for later re-enablement, while removing the policy SHALL clear the percentage and disable it. For a disabled update, the API MUST retain the latest stored percentage when the percentage field is omitted, clear it when the field is explicitly `null`, and replace it when a numeric value is supplied. The API MUST reject an enabled policy without an explicitly supplied percentage, MUST reject an enabled policy with a `null` percentage, and MUST reject percentages outside the supported range.
@@ -33,6 +111,7 @@ Each account SHALL support an optional maximum standard-quota used percentage gr
 For an account with an enabled maximum usage policy, the selector MUST evaluate current standard primary and long-window quota observations after normalizing weekly-only and monthly-only account shapes. When historical monthly and normalized weekly-only shapes coexist, observations from fetches separated by more than the shared sibling-fetch margin MUST be ordered by `recorded_at`; observations within the margin MUST use quota metadata and reset-deadline precedence, with the weekly-primary shape winning an otherwise exact tie. If any current standard window reports used percentage greater than or equal to the configured maximum, the account MUST be excluded after upstream status, quota, and cooldown checks but before error-backoff classification, sticky affinity, single-account routing, manual routing policy, additional-quota routing, health-tier selection, backoff fallback, fair-share capacity accounting, or any routing strategy is applied. Standard usage limits MUST NOT be bypassed by an additional-quota request that ignores standard upstream exhaustion. Reaching a local account policy MUST NOT mutate the account's persisted upstream status.
 
 Each newly admitted logical HTTP bridge turn MUST re-evaluate its continuity-pinned account through the same standard usage-limit policy, including when a reused bridge retains its stream lease and when an idle bridge would otherwise reacquire that lease. A policy denial MUST occur before the new turn is queued or sent, MUST use the `account_usage_limit_reached` response contract, and MUST retire the bridge after already-admitted turns drain without rebinding or disrupting their ownership and settlement. If the pinned account no longer exists or becomes administratively unavailable, admission MUST fail closed with the established bridge continuity-lost response and retire the bridge without creating a new runtime lease for that owner.
+If the final direct owner-policy snapshot read fails, the new turn MUST fail closed with `account_usage_limit_authorization_failed` before upstream dispatch without retiring the bridge. Cancellation MUST continue to propagate.
 
 Each newly admitted `response.create` on an existing proxy WebSocket MUST re-evaluate the socket-pinned account through the same standard usage-limit policy. A `reached` or `data_unavailable` result MUST reject only the new frame with `account_usage_limit_reached` before upstream dispatch, without disrupting already-admitted responses on the shared socket.
 If the final policy read fails, the new frame MUST fail closed with `account_usage_limit_authorization_failed` before upstream dispatch, without retiring the shared upstream or disrupting already-admitted responses. Cancellation MUST continue to propagate.
@@ -73,6 +152,15 @@ If the final policy read fails, the new frame MUST fail closed with `account_usa
 - **THEN** the new turn fails with `account_usage_limit_reached` before upstream dispatch
 - **AND** already-admitted work remains pinned and settles normally
 - **AND** the bridge retires after that work drains
+
+#### Scenario: Reused bridge policy authorization fails
+
+- **GIVEN** an HTTP bridge is continuity-pinned to an account
+- **AND** the final usage-limit policy read for a new logical turn fails
+- **WHEN** the turn is authorized
+- **THEN** the turn fails with `account_usage_limit_authorization_failed`
+- **AND** the turn is not sent upstream
+- **AND** the bridge remains available for a later retry
 
 #### Scenario: Reused WebSocket owner becomes administratively unavailable
 
@@ -222,47 +310,9 @@ Account summaries SHALL expose the configured percentage, enabled flag, and eval
 
 ### Requirement: Synthetic warmups respect account usage limits
 
-The public `/v1/warmup` entry point MUST evaluate every target account's current standard primary, secondary, and monthly observations with the canonical usage-limit evaluator before choosing submissions in `normal`, `strict`, or `force` mode. `force` mode MAY bypass the legacy zero-percent primary-window warmup heuristic, but it MUST NOT bypass an enabled account usage limit whose state is `reached` or `data_unavailable`. A blocked target MUST NOT produce upstream traffic; `normal` and `force` responses MUST report it as skipped with reason `account_usage_limit_reached`, while `strict` mode MUST reject the operation because not every target is usage-eligible.
-
-After credential refresh and before each public warmup compact request is dispatched, execution MUST freshly reload the account and its current standard primary, secondary, and monthly observations, MUST require the account to remain `active`, and MUST reapply the canonical evaluator. A missing account MUST fail that target with code `account_not_found`; a non-active account MUST fail it with code `account_not_active`; a `reached` or `data_unavailable` policy MUST fail it with code `account_usage_limit_reached`; and a final authorization read failure MUST fail it with code `account_usage_limit_authorization_failed`. None of these outcomes may send the compact request upstream.
-
-Quota warmup planning MUST exclude an already-evaluated account state whose enabled usage-limit state is `reached` or `data_unavailable`. After atomically claiming a planned decision and acquiring any API-key reservation, execution MUST freshly load the account and its current standard primary, secondary, and monthly observations, MUST require the fresh account status to remain `active`, and MUST apply the canonical standard usage-limit evaluator and shape rules immediately before sending the synthetic probe. A missing fresh account MUST skip with reason `account_not_found`; any fresh non-active account MUST skip with reason `account_status_<status>`; and either account denial MUST release any reservation, transition the claimed decision from `executing` to `skipped`, and MUST NOT send the probe. If the authoritative usage-limit evaluation is `reached` or `data_unavailable`, execution MUST perform the same cleanup with reason `account_usage_limit_reached`. Disabled and `available` policies MUST preserve normal short-window planning and execution behavior.
-
-If the final standard-usage authorization read fails, execution MUST perform the same cleanup with reason `account_usage_limit_authorization_failed`; if that read is cancelled, it MUST use reason `account_usage_limit_authorization_cancelled` and propagate cancellation after cleanup. Neither authorization outcome MUST be persisted as `account_usage_limit_reached`.
+Every synthetic warmup surface MUST apply the canonical standard-window usage-limit policy before dispatch. An enabled policy in state `reached` or `data_unavailable`, or a failed final authorization read, MUST fail closed without upstream traffic. Warmup mode and manual force controls MUST NOT bypass this operator policy.
 
 Reset-confirmed and staggered limit-warmup planning MUST apply the canonical standard usage-limit evaluator to the refreshed standard observations before creating an attempt. The streaming limit-warmup sender MUST freshly load the account and its current standard primary, secondary, and monthly observations and MUST reapply the evaluator immediately before sending upstream traffic. A `reached` or `data_unavailable` result MUST fail the attempt with code `account_usage_limit_reached` and MUST NOT send the probe. A final authorization read failure MUST fail closed with code `account_usage_limit_authorization_failed` and MUST NOT send the probe. Disabled and `available` policies MUST preserve existing limit-warmup behavior.
-
-#### Scenario: Limit reached after warmup planning
-
-- **GIVEN** a synthetic warmup was planned while the account policy was available
-- **AND** a newer standard observation reaches the enabled maximum before execution
-- **WHEN** the execution gate re-evaluates the account
-- **THEN** the warmup is skipped
-- **AND** no synthetic upstream request is sent
-
-#### Scenario: Force warmup cannot override the hard account policy
-
-- **GIVEN** a target account has an enabled maximum-usage policy in state `reached` or `data_unavailable`
-- **WHEN** the operator invokes `/v1/warmup` in `force` mode
-- **THEN** the account is reported as skipped with reason `account_usage_limit_reached`
-- **AND** no compact request is sent upstream
-
-#### Scenario: Public warmup reaches the limit after planning
-
-- **GIVEN** `/v1/warmup` selected an account while its enabled policy was available
-- **AND** a newer standard observation reaches the maximum before per-account submission
-- **WHEN** final warmup authorization reloads the account and observations
-- **THEN** that target fails with code `account_usage_limit_reached`
-- **AND** no compact request is sent upstream
-
-#### Scenario: Account pauses after warmup planning
-
-- **GIVEN** a synthetic warmup was planned while the account was active
-- **AND** the account becomes paused after the decision claim or API-key reservation
-- **WHEN** the final execution authorization reloads the account
-- **THEN** the warmup is skipped with reason `account_status_paused`
-- **AND** any API-key reservation is released
-- **AND** no synthetic upstream request is sent
 
 #### Scenario: Missing current data blocks warmup
 
@@ -285,3 +335,21 @@ Reset-confirmed and staggered limit-warmup planning MUST apply the canonical sta
 - **GIVEN** an otherwise eligible short-window account has an `available` or disabled usage-limit policy
 - **WHEN** warmup planning and execution evaluate the account
 - **THEN** the usage-limit gate does not prevent its normal warmup action
+
+
+### Requirement: Policy visibility follows explicit observation boundaries
+
+The usage-policy API MUST commit the acknowledged configuration and invalidate
+its local selection inputs before returning success. Existing-owner dispatch
+checks MUST read authoritative policy/status independently of that cache. Peer
+fresh selection MUST retain the existing invalidation and TTL fallback contract;
+it MUST NOT assume that acknowledging an API mutation synchronously invalidates
+every replica. Already dispatched work MUST retain its settlement ownership.
+
+#### Scenario: An existing owner is used on a replica with cached selection inputs
+
+- **GIVEN** the replica's selection cache still contains a disabled policy
+- **AND** an enabled blocking policy has committed in the shared database
+- **WHEN** the replica performs its next existing-owner dispatch authorization read
+- **THEN** that read denies the new dispatch according to the committed policy
+- **AND** it does not substitute the cached disabled policy for authorization

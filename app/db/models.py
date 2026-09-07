@@ -1730,6 +1730,7 @@ class QuotaPlannerDecision(Base):
     action: Mapped[str] = mapped_column(String, nullable=False)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     score: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0.0"), nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     forecast_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -1873,6 +1874,7 @@ class HttpBridgeOperationState(str, Enum):
     SUBMITTED = "submitted"
     UNKNOWN = "unknown"
     ACKNOWLEDGED = "acknowledged"
+    ABANDONED = "abandoned"
     COMPLETED = "completed"
     FAILED = "failed"
 

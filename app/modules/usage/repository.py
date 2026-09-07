@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
 from threading import RLock
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
 
 from anyio import to_thread
 from sqlalchemy import (
     Integer,
     String,
     and_,
+    case,
     column,
     delete,
     func,
@@ -28,12 +29,14 @@ from sqlalchemy import (
 )
 from sqlalchemy import cast as sqlalchemy_cast
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
+from app.core import usage as usage_core
 from app.core.config.settings import get_settings
-from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
+from app.core.usage.types import UsageAggregateRow, UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.account_identity_lock import lock_postgresql_account_identities
-from app.db.models import Account, AdditionalUsageHistory, UsageHistory
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, UsageHistory
 from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.db.sqlite_utils import sqlite_db_path_from_url
 from app.modules.usage.additional_quota_keys import (
@@ -43,6 +46,13 @@ from app.modules.usage.additional_quota_keys import (
 )
 
 _PRIMARY_WINDOW_LITERAL = literal_column("'primary'")
+NormalizedUsageWindow = Literal["primary", "secondary"]
+_REAL_USAGE_MEASUREMENT_SQLITE_CLAUSE = "(used_percent != 0.0 or reset_at is not null or window_minutes > 0)"
+_USAGE_LIMIT_UNAVAILABLE_STATUSES = (
+    AccountStatus.PAUSED,
+    AccountStatus.REAUTH_REQUIRED,
+    AccountStatus.DEACTIVATED,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +80,39 @@ class UsageWindowWrite:
 class LiveSnapshotSettlement:
     account_id: str
     usage_limit_enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AccountUsageLimitSnapshot:
+    status: AccountStatus
+    enabled: bool
+    limit_percent: float | None
+    plan_type: str
+    primary: UsageWindowRow | None
+    secondary: UsageWindowRow | None
+    monthly: UsageWindowRow | None
+
+
+def _projected_usage_window(
+    account_id: str,
+    *,
+    used_percent: float | None,
+    reset_at: int | None,
+    window_minutes: int | None,
+    recorded_at: datetime | None,
+) -> UsageWindowRow | None:
+    if used_percent is None or recorded_at is None:
+        return None
+    row = UsageWindowRow(
+        account_id=account_id,
+        used_percent=float(used_percent),
+        reset_at=int(reset_at) if reset_at is not None else None,
+        window_minutes=int(window_minutes) if window_minutes is not None else None,
+        recorded_at=recorded_at,
+    )
+    if row.used_percent == 0.0 and usage_core.is_no_data_placeholder(row):
+        return replace(row, used_percent=None)
+    return row
 
 
 class LiveSnapshotOwnerIdentityRelockError(RuntimeError):
@@ -254,6 +297,7 @@ def _query_bulk_history_since_sqlite(
         where account_id in ({placeholders})
           and {window_clause}
           and recorded_at >= ?
+          and {_REAL_USAGE_MEASUREMENT_SQLITE_CLAUSE}
           {id_clause}
         order by account_id, recorded_at asc
     """
@@ -307,6 +351,7 @@ def _query_bulk_history_metadata_sqlite(
             where account_id in ({placeholders})
               and {window_clause}
               and recorded_at >= ?
+              and {_REAL_USAGE_MEASUREMENT_SQLITE_CLAUSE}
               {id_clause}
             order by id asc, account_id asc
         )
@@ -327,6 +372,16 @@ def _window_clause(window: str | None):
     if not window or window == "primary":
         return _normalized_window_expr() == "primary"
     return UsageHistory.window == window
+
+
+def _real_usage_measurement_clause():
+    """Exclude only the persisted no-data placeholder shape."""
+
+    return or_(
+        UsageHistory.used_percent != 0.0,
+        UsageHistory.reset_at.is_not(None),
+        UsageHistory.window_minutes > 0,
+    )
 
 
 def _sqlite_path_from_bind(bind) -> object | None:
@@ -640,6 +695,77 @@ class UsageRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def account_usage_limit_snapshot(self, account_id: str) -> AccountUsageLimitSnapshot | None:
+        """Read one account's usage-limit policy and standard windows atomically."""
+
+        should_load_windows = Account.status.notin_(_USAGE_LIMIT_UNAVAILABLE_STATUSES)
+
+        def latest_id(window: str):
+            return (
+                select(UsageHistory.id)
+                .where(
+                    UsageHistory.account_id == Account.id,
+                    _window_clause(window),
+                    should_load_windows,
+                )
+                .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+                .limit(1)
+                .correlate(Account)
+                .scalar_subquery()
+            )
+
+        primary = aliased(UsageHistory, name="usage_limit_primary")
+        secondary = aliased(UsageHistory, name="usage_limit_secondary")
+        monthly = aliased(UsageHistory, name="usage_limit_monthly")
+        stmt = (
+            select(
+                Account.status,
+                Account.usage_limit_enabled,
+                Account.usage_limit_percent,
+                Account.plan_type,
+                primary.used_percent.label("primary_used_percent"),
+                primary.reset_at.label("primary_reset_at"),
+                primary.window_minutes.label("primary_window_minutes"),
+                primary.recorded_at.label("primary_recorded_at"),
+                secondary.used_percent.label("secondary_used_percent"),
+                secondary.reset_at.label("secondary_reset_at"),
+                secondary.window_minutes.label("secondary_window_minutes"),
+                secondary.recorded_at.label("secondary_recorded_at"),
+                monthly.used_percent.label("monthly_used_percent"),
+                monthly.reset_at.label("monthly_reset_at"),
+                monthly.window_minutes.label("monthly_window_minutes"),
+                monthly.recorded_at.label("monthly_recorded_at"),
+            )
+            .select_from(Account)
+            .outerjoin(primary, primary.id == latest_id("primary"))
+            .outerjoin(secondary, secondary.id == latest_id("secondary"))
+            .outerjoin(monthly, monthly.id == latest_id("monthly"))
+            .where(Account.id == account_id, Account.delete_requested_at.is_(None))
+        )
+        row = (await self._session.execute(stmt)).one_or_none()
+        if row is None:
+            return None
+        values = row._mapping
+
+        def projected(window: str) -> UsageWindowRow | None:
+            return _projected_usage_window(
+                account_id,
+                used_percent=values[f"{window}_used_percent"],
+                reset_at=values[f"{window}_reset_at"],
+                window_minutes=values[f"{window}_window_minutes"],
+                recorded_at=values[f"{window}_recorded_at"],
+            )
+
+        return AccountUsageLimitSnapshot(
+            status=row[0],
+            enabled=bool(row[1]),
+            limit_percent=row[2],
+            plan_type=row[3],
+            primary=projected("primary"),
+            secondary=projected("secondary"),
+            monthly=projected("monthly"),
+        )
+
     async def add_entry(
         self,
         account_id: str,
@@ -849,7 +975,10 @@ class UsageRepository:
         since: datetime,
         window: str | None = None,
     ) -> list[UsageAggregateRow]:
-        conditions = [UsageHistory.recorded_at >= since]
+        conditions = [
+            UsageHistory.recorded_at >= since,
+            _real_usage_measurement_clause(),
+        ]
         if window:
             conditions.append(_window_clause(window))
         stmt = (
@@ -881,6 +1010,47 @@ class UsageRepository:
             )
             for row in rows
         ]
+
+    async def positive_used_percent_deltas_by_account(
+        self,
+        account_windows: Mapping[str, NormalizedUsageWindow],
+        *,
+        since: datetime,
+        until: datetime,
+    ) -> dict[str, float]:
+        if not account_windows:
+            return {}
+        account_window_pairs = tuple(account_windows.items())
+        samples = (
+            select(
+                UsageHistory.account_id.label("account_id"),
+                UsageHistory.used_percent.label("used_percent"),
+                func.lag(UsageHistory.used_percent)
+                .over(
+                    partition_by=UsageHistory.account_id,
+                    order_by=(UsageHistory.recorded_at, UsageHistory.id),
+                )
+                .label("previous_used_percent"),
+            )
+            .where(
+                tuple_(UsageHistory.account_id, _normalized_window_expr()).in_(account_window_pairs),
+                # Filter before lag(): an unavailable sample is not a reset to zero.
+                _real_usage_measurement_clause(),
+                UsageHistory.recorded_at >= since,
+                UsageHistory.recorded_at <= until,
+            )
+            .subquery("weekly_demand_samples")
+        )
+        delta = samples.c.used_percent - samples.c.previous_used_percent
+        statement = select(
+            samples.c.account_id,
+            func.coalesce(
+                func.sum(case((delta > 0, delta), else_=0.0)),
+                0.0,
+            ).label("positive_delta"),
+        ).group_by(samples.c.account_id)
+        rows = (await self._session.execute(statement)).all()
+        return {str(row.account_id): float(row.positive_delta) for row in rows}
 
     async def latest_by_account(
         self,
@@ -952,11 +1122,13 @@ class UsageRepository:
         window: str,
         since: datetime,
     ) -> list[UsageHistory]:
+        """Measured history for analytics; current-state reads retain unknowns."""
         stmt = (
             select(UsageHistory)
             .where(
                 UsageHistory.account_id == account_id,
                 _window_clause(window),
+                _real_usage_measurement_clause(),
                 UsageHistory.recorded_at >= since,
             )
             .order_by(UsageHistory.recorded_at.asc(), UsageHistory.id.asc())
@@ -1053,21 +1225,22 @@ class UsageRepository:
             .where(
                 recency_clause,
                 _window_clause(window),
+                _real_usage_measurement_clause(),
             )
             .order_by(UsageHistory.account_id, UsageHistory.recorded_at.asc())
         )
         result = await self._session.execute(stmt)
         grouped: dict[str, list[UsageHistorySnapshot]] = {}
-        for row in result.all():
+        for id_, account_id, used_percent, recorded_at, reset_at, window_minutes in result.tuples():
             snapshot = UsageHistorySnapshot(
-                id=int(row.id),
-                account_id=row.account_id,
-                used_percent=float(row.used_percent),
-                recorded_at=row.recorded_at,
-                reset_at=float(row.reset_at) if row.reset_at is not None else None,
-                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+                id=int(id_),
+                account_id=account_id,
+                used_percent=float(used_percent),
+                recorded_at=recorded_at,
+                reset_at=float(reset_at) if reset_at is not None else None,
+                window_minutes=int(window_minutes) if window_minutes is not None else None,
             )
-            grouped.setdefault(snapshot.account_id, []).append(snapshot)
+            grouped.setdefault(account_id, []).append(snapshot)
         return grouped
 
     async def _bulk_history_since_capped_postgresql(
@@ -1132,6 +1305,7 @@ class UsageRepository:
                     else ()
                 ),
                 _window_clause(window),
+                _real_usage_measurement_clause(),
             )
             .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
             .limit(per_account_row_cap)
@@ -1144,6 +1318,7 @@ class UsageRepository:
                     UsageHistory.account_id == account_cutoffs.c.account_id,
                     UsageHistory.recorded_at >= account_cutoffs.c.uncapped_floor,
                     _window_clause(window),
+                    _real_usage_measurement_clause(),
                 )
                 .correlate(account_cutoffs)
             )
@@ -1153,16 +1328,19 @@ class UsageRepository:
         stmt = select(recent).select_from(account_cutoffs.join(recent, true()))
         result = await self._session.execute(stmt)
         grouped: dict[str, list[UsageHistorySnapshot]] = {}
-        for row in result.all():
+        # Positional unpacking: Row attribute lookups dominated the per-row
+        # cost of this loop on dense deployments (dashboard polls hydrate
+        # thousands of rows per call). Column order follows snapshot_columns.
+        for id_, account_id, used_percent, recorded_at, reset_at, window_minutes in result.tuples():
             snapshot = UsageHistorySnapshot(
-                id=int(row.id),
-                account_id=row.account_id,
-                used_percent=float(row.used_percent),
-                recorded_at=row.recorded_at,
-                reset_at=float(row.reset_at) if row.reset_at is not None else None,
-                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+                id=int(id_),
+                account_id=account_id,
+                used_percent=float(used_percent),
+                recorded_at=recorded_at,
+                reset_at=float(reset_at) if reset_at is not None else None,
+                window_minutes=int(window_minutes) if window_minutes is not None else None,
             )
-            grouped.setdefault(snapshot.account_id, []).append(snapshot)
+            grouped.setdefault(account_id, []).append(snapshot)
         for snapshots in grouped.values():
             snapshots.sort(key=lambda snapshot: (snapshot.recorded_at, snapshot.id))
         return grouped
@@ -1185,11 +1363,7 @@ class UsageRepository:
 
         conditions: list = [
             UsageHistory.recorded_at >= since,
-            or_(
-                UsageHistory.used_percent != 0.0,
-                UsageHistory.reset_at.is_not(None),
-                UsageHistory.window_minutes > 0,
-            ),
+            _real_usage_measurement_clause(),
         ]
         if window:
             conditions.append(_window_clause(window))

@@ -41,8 +41,10 @@ async def test_deferred_warmup_cleanup_preserves_cancellation_when_cleanup_fails
         decision_id: str,
         reason: str,
         reservation_id: str | None,
+        claim_executed_at: datetime,
+        claim_lease_expires_at: datetime,
     ) -> WarmupExecutionResult:
-        del decision_id, reason, reservation_id
+        del decision_id, reason, reservation_id, claim_executed_at, claim_lease_expires_at
         cleanup_started.set()
         await allow_cleanup_to_fail.wait()
         raise RuntimeError("cleanup failed")
@@ -53,6 +55,8 @@ async def test_deferred_warmup_cleanup_preserves_cancellation_when_cleanup_fails
             decision_id="decision-cleanup-failure",
             reason="account_usage_limit_authorization_cancelled",
             reservation_id=None,
+            claim_executed_at=datetime(2026, 1, 1),
+            claim_lease_expires_at=datetime(2026, 1, 1, 0, 5),
         )
     )
     await cleanup_started.wait()
@@ -77,8 +81,10 @@ async def test_deferred_warmup_cleanup_propagates_failure_without_cancellation(
         decision_id: str,
         reason: str,
         reservation_id: str | None,
+        claim_executed_at: datetime,
+        claim_lease_expires_at: datetime,
     ) -> WarmupExecutionResult:
-        del decision_id, reason, reservation_id
+        del decision_id, reason, reservation_id, claim_executed_at, claim_lease_expires_at
         raise RuntimeError("cleanup failed")
 
     monkeypatch.setattr(QuotaWarmupService, "_skip_claimed_warmup", fail_cleanup)
@@ -88,6 +94,8 @@ async def test_deferred_warmup_cleanup_propagates_failure_without_cancellation(
             decision_id="decision-cleanup-failure-no-cancel",
             reason="account_usage_limit_authorization_failed",
             reservation_id=None,
+            claim_executed_at=datetime(2026, 1, 1),
+            claim_lease_expires_at=datetime(2026, 1, 1, 0, 5),
         )
 
 

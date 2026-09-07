@@ -74,6 +74,15 @@ anchor one strike earlier than a fresh episode would, against a key whose
 requests are already failing eventlessly — an accepted, bounded trade until
 an episode marker is persisted with the row.
 
+The residual has narrowed since it was recorded: the anchor-advance
+suppression — the one marker path whose surviving row coexists with fresh
+durable continuity — is now persisted by rewriting the row's failure detail
+to the non-poison ``anchor_superseded`` class, so other replicas neither
+arm quarantine against the fresh anchor nor authorize its abandonment. The
+remaining process-local markers cover confirmed abandonments, which are
+cross-replica safe already: their continuity columns are empty, and the
+empty-continuity consult refuses another clear.
+
 ## Accepted residual: probe admission is process-local
 
 The exactly-one-probe guarantee holds per worker process. In a multi-replica
@@ -94,3 +103,17 @@ suppression message reports the configured half-open lease duration as the
 retry-after upper bound rather than the remote probe's actual remaining
 lease; persisting the lease deadline would require a schema change and a
 durable write on the admission path, out of scope for this change.
+
+## Planning-time circuit staleness is bounded by the minimum cooldown
+
+The pre-planning durable load runs on a worker's first touch of a hard key
+(and again when continuity resolution replaces it with a different
+canonical key), and its cached view is honored only while it is younger
+than the minimum cooldown (60s). This bound is exactly sufficient rather
+than per-request: a circuit another replica opens after this worker's last
+load cannot have an expired cooldown until at least the minimum cooldown
+has passed, by which time any planning pass has refreshed — so the
+poisoned-anchor probe race is closed while keys with circuit history pay
+at most one durable read per minimum-cooldown window instead of one per
+request. (Keys with no circuit row never enter the cache and already
+refresh per planning pass.)

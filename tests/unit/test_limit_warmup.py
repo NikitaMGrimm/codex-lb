@@ -10,10 +10,12 @@ import pytest
 
 from app.core.clients.proxy import UpstreamProxyRouteTrace
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.limit_warmup import service as limit_warmup_service
 from app.modules.limit_warmup.service import LimitWarmupSendResult, LimitWarmupService, StreamingLimitWarmupSender
+from app.modules.usage.repository import AccountUsageLimitSnapshot
 
 pytestmark = pytest.mark.unit
 
@@ -53,9 +55,8 @@ def _usage(
 ) -> UsageHistory:
     window_minutes = {"primary": 300, "secondary": 10_080, "monthly": 43_200}[window]
     if recorded_at is None:
-        recorded_at = datetime.fromtimestamp(
-            reset_at - window_minutes * 60,
-            tz=timezone.utc,
+        recorded_at = (
+            datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=reset_at - window_minutes * 60)
         ).replace(tzinfo=None)
     return UsageHistory(
         account_id=account_id,
@@ -424,6 +425,30 @@ class _WarmupAccountsRepoContext:
         return False
 
 
+def _install_usage_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    account: Account,
+    *,
+    snapshot: AccountUsageLimitSnapshot | None = None,
+) -> SimpleNamespace:
+    usage_repo = SimpleNamespace(
+        account_usage_limit_snapshot=AsyncMock(
+            return_value=snapshot
+            or AccountUsageLimitSnapshot(
+                status=account.status,
+                enabled=bool(account.usage_limit_enabled),
+                limit_percent=account.usage_limit_percent,
+                plan_type=account.plan_type,
+                primary=None,
+                secondary=None,
+                monthly=None,
+            )
+        )
+    )
+    monkeypatch.setattr(limit_warmup_service, "UsageRepository", lambda _session: usage_repo)
+    return usage_repo
+
+
 @pytest.mark.asyncio
 async def test_streaming_limit_warmup_sender_passes_resolved_route(monkeypatch: pytest.MonkeyPatch) -> None:
     account = _account()
@@ -450,6 +475,7 @@ async def test_streaming_limit_warmup_sender_passes_resolved_route(monkeypatch: 
     monkeypatch.setattr(sender._encryptor, "decrypt", lambda value: "access")
     monkeypatch.setattr(limit_warmup_service, "resolve_upstream_route", resolve_route)
     monkeypatch.setattr(limit_warmup_service, "stream_responses", stream)
+    _install_usage_snapshot(monkeypatch, account)
 
     result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
 
@@ -530,23 +556,31 @@ async def test_streaming_limit_warmup_sender_rechecks_usage_limit_before_send(
 ) -> None:
     now = utcnow()
     reset_at = int(now.replace(tzinfo=timezone.utc).timestamp()) + 3600
-    account = _account(usage_limit_enabled=True, usage_limit_percent=50.0)
+    account = _account(usage_limit_enabled=False, usage_limit_percent=None)
     repo = _WarmupAccountsRepo(account=account)
     usage_repo = SimpleNamespace(
-        latest_by_account=AsyncMock(
-            side_effect=[
-                {account.id: _usage(account.id, used_percent=10.0, reset_at=reset_at, recorded_at=now)},
-                {
-                    account.id: _usage(
-                        account.id,
-                        used_percent=75.0,
-                        reset_at=reset_at,
-                        window="secondary",
-                        recorded_at=now,
-                    )
-                },
-                {},
-            ]
+        account_usage_limit_snapshot=AsyncMock(
+            return_value=AccountUsageLimitSnapshot(
+                status=AccountStatus.ACTIVE,
+                enabled=True,
+                limit_percent=50.0,
+                plan_type="plus",
+                primary=UsageWindowRow(
+                    account_id=account.id,
+                    used_percent=10.0,
+                    reset_at=reset_at,
+                    window_minutes=300,
+                    recorded_at=now,
+                ),
+                secondary=UsageWindowRow(
+                    account_id=account.id,
+                    used_percent=75.0,
+                    reset_at=reset_at,
+                    window_minutes=10_080,
+                    recorded_at=now,
+                ),
+                monthly=None,
+            )
         )
     )
     sender = StreamingLimitWarmupSender(cast(Any, repo))
@@ -563,14 +597,18 @@ async def test_streaming_limit_warmup_sender_rechecks_usage_limit_before_send(
 
     monkeypatch.setattr(sender._auth_manager, "ensure_fresh", ensure_fresh)
     monkeypatch.setattr(sender, "_resolve_upstream_route", resolve_route)
-    monkeypatch.setattr(limit_warmup_service, "UsageRepository", lambda _session: usage_repo)
+    usage_repo = _install_usage_snapshot(
+        monkeypatch,
+        account,
+        snapshot=usage_repo.account_usage_limit_snapshot.return_value,
+    )
     monkeypatch.setattr(limit_warmup_service, "stream_responses", stream)
 
     result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
 
     assert result.error_code == "account_usage_limit_reached"
     assert repo.fresh_reads == 3
-    assert usage_repo.latest_by_account.await_count == 3
+    usage_repo.account_usage_limit_snapshot.assert_awaited_once_with(account.id)
 
 
 @pytest.mark.asyncio
@@ -579,7 +617,19 @@ async def test_streaming_limit_warmup_sender_fails_closed_without_usable_usage_d
 ) -> None:
     account = _account(usage_limit_enabled=True, usage_limit_percent=50.0)
     repo = _WarmupAccountsRepo(account=account)
-    usage_repo = SimpleNamespace(latest_by_account=AsyncMock(side_effect=[{}, {}, {}]))
+    usage_repo = SimpleNamespace(
+        account_usage_limit_snapshot=AsyncMock(
+            return_value=AccountUsageLimitSnapshot(
+                status=AccountStatus.ACTIVE,
+                enabled=True,
+                limit_percent=50.0,
+                plan_type="plus",
+                primary=None,
+                secondary=None,
+                monthly=None,
+            )
+        )
+    )
     sender = StreamingLimitWarmupSender(cast(Any, repo))
 
     async def ensure_fresh(target: Account) -> Account:
@@ -601,7 +651,7 @@ async def test_streaming_limit_warmup_sender_fails_closed_without_usable_usage_d
 
     assert result.error_code == "account_usage_limit_reached"
     assert result.success is False
-    assert usage_repo.latest_by_account.await_count == 3
+    usage_repo.account_usage_limit_snapshot.assert_awaited_once_with(account.id)
 
 
 @pytest.mark.asyncio
@@ -641,6 +691,7 @@ async def test_streaming_limit_warmup_sender_resolves_route_with_owned_repo_fact
     monkeypatch.setattr(sender._encryptor, "decrypt", lambda value: "access")
     monkeypatch.setattr(limit_warmup_service, "resolve_upstream_route", resolve_route)
     monkeypatch.setattr(limit_warmup_service, "stream_responses", stream)
+    _install_usage_snapshot(monkeypatch, account)
 
     result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
 
@@ -677,6 +728,7 @@ async def test_streaming_limit_warmup_sender_returns_route_metadata(
     monkeypatch.setattr(sender._encryptor, "decrypt", lambda value: "access")
     monkeypatch.setattr(limit_warmup_service, "resolve_upstream_route", resolve_route)
     monkeypatch.setattr(limit_warmup_service, "stream_responses", stream)
+    _install_usage_snapshot(monkeypatch, account)
 
     result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
 

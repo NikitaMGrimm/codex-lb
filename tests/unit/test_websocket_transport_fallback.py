@@ -29,14 +29,11 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
-import aiohttp
 import pytest
-from multidict import CIMultiDict
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 
-import app.core.clients.proxy as proxy_module
 import app.core.clients.proxy_websocket as proxy_websocket_module
 import app.modules.proxy._service.http_bridge.streaming as http_bridge_streaming_module
 import app.modules.proxy._service.support as transport_health
@@ -757,9 +754,14 @@ async def test_direct_credential_handshake_rejection_stays_account_evidence(
 
 
 @pytest.mark.asyncio
-async def test_direct_edge_challenge_is_transport_evidence(
+async def test_direct_edge_challenge_handshake_is_classified_as_transport_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A 403 carrying explicit Cloudflare edge-challenge evidence is the edge
+    # refusing the websocket upgrade itself, not account evidence: it must
+    # share the transport-failure provenance so the failover decision
+    # surfaces it without an account penalty, arms the 426 handshake-denial
+    # marker, and the HTTP paths pin the upstream transport to HTTP.
     exc = await _direct_connect_failure(
         monkeypatch,
         InvalidStatus(
@@ -772,22 +774,27 @@ async def test_direct_edge_challenge_is_transport_evidence(
         ),
     )
 
+    assert exc.status_code == 403
     assert exc.failure_detail == UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL
     assert _classify(exc) is not None
 
 
 @pytest.mark.asyncio
-async def test_direct_ordinary_403_stays_account_evidence(
+async def test_direct_unmarked_403_html_handshake_stays_account_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # An ordinary reverse-proxy HTML 403 carries no challenge evidence, so it
+    # keeps the fail-closed classify-penalize-failover path: treating every
+    # 403 as a transport outage would let one misconfigured deny rule push
+    # the whole instance onto HTTP.
     exc = await _direct_connect_failure(
         monkeypatch,
         InvalidStatus(
             Response(
                 403,
                 "Forbidden",
-                Headers({"Content-Type": "application/json"}),
-                b'{"error":{"type":"permission_error","code":"forbidden"}}',
+                Headers({"Content-Type": "text/html", "Server": "nginx"}),
+                b"<html><h1>403 Forbidden</h1></html>",
             )
         ),
     )
@@ -796,41 +803,83 @@ async def test_direct_ordinary_403_stays_account_evidence(
     assert _classify(exc) is None
 
 
-def test_edge_challenge_classifier_requires_explicit_evidence() -> None:
-    assert proxy_module._is_upstream_edge_challenge(
-        403,
-        headers=CIMultiDict({"cf-mitigated": "challenge", "content-type": "text/html"}),
-        body="<html>blocked</html>",
-    )
-    assert proxy_module._is_upstream_edge_challenge(
-        403,
-        headers={"server": "cloudflare", "content-type": "text/html"},
-        body="<html><title>Just a moment...</title></html>",
-    )
-    assert not proxy_module._is_upstream_edge_challenge(
-        403,
-        headers={"server": "nginx", "content-type": "text/html"},
-        body="<html><h1>403 Forbidden</h1></html>",
-    )
-    assert not proxy_module._is_upstream_edge_challenge(
-        403,
-        headers={"content-type": "application/json"},
-        body='{"error":{"type":"permission_error","code":"forbidden"}}',
-    )
+def _headers_with_duplicate_cookies(pairs: dict[str, str]) -> Headers:
+    headers = Headers()
+    # Real Cloudflare challenge responses set multiple cookies (__cf_bm,
+    # _cfuvid); ``Headers.items()`` raises ``MultipleValuesError`` for any
+    # repeated name, so these fixtures guard the duplicate-safe accessor.
+    headers["Set-Cookie"] = "__cf_bm=fixture; Path=/; HttpOnly"
+    headers["Set-Cookie"] = "_cfuvid=fixture; Path=/; HttpOnly"
+    for key, value in pairs.items():
+        headers[key] = value
+    return headers
 
 
-def test_auto_stream_falls_back_for_explicit_edge_challenge() -> None:
-    request_info = cast(Any, SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses"))
-    exc = aiohttp.WSServerHandshakeError(
-        request_info,
-        (),
-        status=403,
-        message="<html><title>Just a moment...</title></html>",
-        headers=CIMultiDict({"cf-mitigated": "challenge", "content-type": "text/html"}),
+@pytest.mark.asyncio
+async def test_direct_edge_challenge_with_duplicate_cookies_is_classified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The flagship input: an actual Cloudflare challenge carries repeated
+    # Set-Cookie headers. Classification must not choke on the duplicates.
+    exc = await _direct_connect_failure(
+        monkeypatch,
+        InvalidStatus(
+            Response(
+                403,
+                "Forbidden",
+                _headers_with_duplicate_cookies(
+                    {"Content-Type": "text/html; charset=UTF-8", "cf-mitigated": "challenge"}
+                ),
+                b"<html><title>Just a moment...</title></html>",
+            )
+        ),
     )
 
-    assert proxy_module._should_fallback_to_http_after_websocket_handshake_error("auto", exc)
-    assert not proxy_module._should_fallback_to_http_after_websocket_handshake_error("websocket", exc)
+    assert exc.status_code == 403
+    assert exc.failure_detail == UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL
+    assert _classify(exc) is not None
+
+
+@pytest.mark.asyncio
+async def test_direct_unmarked_403_with_duplicate_headers_stays_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An ordinary 403 with a duplicated header must keep raising the
+    # sanitized ProxyResponseError account-evidence path — never escape as an
+    # unhandled MultipleValuesError from the challenge classifier.
+    exc = await _direct_connect_failure(
+        monkeypatch,
+        InvalidStatus(
+            Response(
+                403,
+                "Forbidden",
+                _headers_with_duplicate_cookies({"Content-Type": "text/html", "Server": "nginx"}),
+                b"<html><h1>403 Forbidden</h1></html>",
+            )
+        ),
+    )
+
+    assert exc.status_code == 403
+    assert exc.failure_detail is None
+    assert _classify(exc) is None
+
+
+@pytest.mark.asyncio
+async def test_edge_challenge_connect_failure_surfaces_without_penalty() -> None:
+    # Product path for the challenge recovery: the classified 403 rides the
+    # same decision as a direct 5xx handshake rejection — surface to the
+    # client without an account penalty and arm the marker so the next
+    # handshake is denied with 426 and Codex switches to HTTP transport.
+    harness = _DecisionHarness()
+
+    action = await _decide(
+        harness,
+        _transport_error(403, "upstream_error", "<html><title>Just a moment...</title></html>"),
+    )
+
+    assert action == "surface"
+    assert harness.penalty_calls == []
+    assert transport_health.upstream_websocket_transport_recently_failed() is True
 
 
 @pytest.mark.asyncio
@@ -877,6 +926,28 @@ async def test_routed_5xx_handshake_stays_in_account_failover(
     assert exc.failure_phase == "connect"
     assert exc.payload["error"].get("code") == "upstream_unavailable"
     assert is_confirmed_pre_dispatch_transport_error(exc) is False
+    assert _classify(exc) is None
+
+
+@pytest.mark.asyncio
+async def test_routed_edge_challenge_handshake_stays_out_of_instance_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A challenge on one account's routed egress IP proves nothing about the
+    # direct upstream other accounts reach: it keeps the account-scoped
+    # failover path here, and its preserved classification is consumed by the
+    # raw streaming path's in-request HTTP retry instead of the marker.
+    exc = await _routed_connect_failure(
+        monkeypatch,
+        CodexTransportError(
+            "Codex upstream websocket failed via proxy endpoint ep_1: HTTP 403",
+            status_code=403,
+            handshake_headers={"cf-mitigated": "challenge", "content-type": "text/html"},
+            handshake_message="Invalid response status",
+        ),
+    )
+
+    assert exc.failure_phase == "connect"
     assert _classify(exc) is None
 
 

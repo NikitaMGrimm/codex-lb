@@ -125,6 +125,80 @@ describe("AccountUsageLimitControl", () => {
     expect(screen.getByText(/in-flight requests may briefly exceed/i)).toBeInTheDocument();
   });
 
+  it("hides the observation-overshoot warning while a saved limit is disabled", () => {
+    render(
+      <AccountUsageLimitControl
+        account={createAccountSummary({
+          usageLimitEnabled: false,
+          usageLimitPercent: 10,
+          usageLimitState: "disabled",
+        })}
+        busy={false}
+        readOnly={false}
+        onChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText(/in-flight requests may briefly exceed/i)).not.toBeInTheDocument();
+  });
+
+  it("preserves focus and a draft until the authoritative account or percentage changes", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const account = createAccountSummary({
+      usageLimitEnabled: true,
+      usageLimitPercent: 10,
+      usageLimitState: "available",
+    });
+    const { rerender } = render(
+      <AccountUsageLimitControl
+        account={account}
+        busy={false}
+        readOnly={false}
+        onChange={onChange}
+      />,
+    );
+    const input = screen.getByRole("spinbutton", { name: "Maximum used percent" });
+
+    await user.clear(input);
+    await user.type(input, "12.5");
+    rerender(
+      <AccountUsageLimitControl
+        account={{ ...account, usageLimitState: "reached" }}
+        busy={false}
+        readOnly={false}
+        onChange={onChange}
+      />,
+    );
+
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue(12.5);
+
+    rerender(
+      <AccountUsageLimitControl
+        account={{ ...account, usageLimitPercent: 20 }}
+        busy={false}
+        readOnly={false}
+        onChange={onChange}
+      />,
+    );
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue(20);
+
+    await user.clear(input);
+    await user.type(input, "30");
+    rerender(
+      <AccountUsageLimitControl
+        account={{ ...account, accountId: "acc_secondary" }}
+        busy={false}
+        readOnly={false}
+        onChange={onChange}
+      />,
+    );
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue(10);
+  });
+
   it("does not save an unchanged draft via Enter and disables controls while busy", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

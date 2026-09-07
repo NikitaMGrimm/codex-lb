@@ -30,9 +30,26 @@ export function AccountUsageLimitControl({
   const { t } = useTranslation();
   const configuredPercent = account.usageLimitPercent ?? null;
   const usageLimitEnabled = account.usageLimitEnabled ?? false;
-  const [draft, setDraft] = useState(
-    configuredPercent === null ? "" : formatPercent(configuredPercent),
-  );
+  const [draftState, setDraftState] = useState(() => ({
+    accountId: account.accountId,
+    configuredPercent,
+    value: configuredPercent === null ? "" : formatPercent(configuredPercent),
+  }));
+  if (
+    draftState.accountId !== account.accountId ||
+    draftState.configuredPercent !== configuredPercent
+  ) {
+    setDraftState({
+      accountId: account.accountId,
+      configuredPercent,
+      value: configuredPercent === null ? "" : formatPercent(configuredPercent),
+    });
+  }
+  const draft = draftState.value;
+  const setDraft = (value: string) => {
+    setDraftState({ accountId: account.accountId, configuredPercent, value });
+  };
+
   const parsedDraft = Number(draft);
   const validDraft =
     draft.trim() !== "" &&
@@ -155,7 +172,7 @@ export function AccountUsageLimitControl({
           })}
         </p>
       ) : null}
-      {configuredPercent !== null || draft.trim() !== "" ? (
+      {usageLimitEnabled || (configuredPercent === null && draft.trim() !== "") ? (
         <p className="text-xs text-muted-foreground">
           {t("accounts.usageLimit.delayedWarning")}
         </p>

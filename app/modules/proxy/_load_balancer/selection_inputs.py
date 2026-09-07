@@ -33,15 +33,6 @@ class SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
-    _runtime_account_by_id: dict[str, Account] | None = field(default=None, init=False, repr=False, compare=False)
-
-    def runtime_account(self, account_id: str) -> Account | None:
-        account_by_id = self._runtime_account_by_id
-        if account_by_id is None:
-            source_accounts = self.accounts if self.runtime_accounts is None else self.runtime_accounts
-            account_by_id = {account.id: account for account in source_accounts}
-            object.__setattr__(self, "_runtime_account_by_id", account_by_id)
-        return account_by_id.get(account_id)
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]:

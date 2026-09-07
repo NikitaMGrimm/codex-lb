@@ -8,9 +8,51 @@ import { createAccountSummary } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
+function installAccountRefetchFailure(account: ReturnType<typeof createAccountSummary>) {
+  let requestCount = 0;
+  server.use(
+    http.get("/api/accounts", () => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return HttpResponse.json({ accounts: [account] });
+      }
+      return HttpResponse.json(
+        {
+          error: {
+            code: "forced_accounts_outage",
+            message: "Forced account-list outage",
+          },
+        },
+        { status: 500 },
+      );
+    }),
+  );
+  return () => requestCount;
+}
+
+function installUsageLimitUpdateHandler() {
+  server.use(
+    http.put("/api/accounts/:accountId/usage-limit", async ({ params, request }) => {
+      const payload = (await request.json()) as {
+        enabled: boolean;
+        percent?: number | null;
+      };
+      return HttpResponse.json({
+        accountId: String(params.accountId),
+        ...payload,
+      });
+    }),
+  );
+}
+
+function renderAccountsPage() {
+  window.history.pushState({}, "", "/accounts");
+  renderWithProviders(<App />);
+  return userEvent.setup({ delay: null });
+}
+
 describe("account usage limit flow", () => {
   it("shows a successful limit update when the account-list refetch fails", async () => {
-    const user = userEvent.setup({ delay: null });
     const account = createAccountSummary({
       accountId: "acc-usage-limit",
       email: "usage-limit@example.com",
@@ -19,38 +61,9 @@ describe("account usage limit flow", () => {
       usageLimitPercent: 10,
       usageLimitState: "disabled",
     });
-    let accountListRequests = 0;
-
-    server.use(
-      http.get("/api/accounts", () => {
-        accountListRequests += 1;
-        if (accountListRequests === 1) {
-          return HttpResponse.json({ accounts: [account] });
-        }
-        return HttpResponse.json(
-          {
-            error: {
-              code: "forced_accounts_outage",
-              message: "Forced account-list outage",
-            },
-          },
-          { status: 500 },
-        );
-      }),
-      http.put("/api/accounts/:accountId/usage-limit", async ({ params, request }) => {
-        const payload = (await request.json()) as {
-          enabled: boolean;
-          percent?: number | null;
-        };
-        return HttpResponse.json({
-          accountId: String(params.accountId),
-          ...payload,
-        });
-      }),
-    );
-
-    window.history.pushState({}, "", "/accounts");
-    renderWithProviders(<App />);
+    const accountListRequests = installAccountRefetchFailure(account);
+    installUsageLimitUpdateHandler();
+    const user = renderAccountsPage();
 
     const usageLimitSwitch = await screen.findByRole("switch", {
       name: "Usage limit",
@@ -60,7 +73,7 @@ describe("account usage limit flow", () => {
     await user.click(usageLimitSwitch);
 
     await waitFor(() => {
-      expect(accountListRequests).toBeGreaterThanOrEqual(2);
+      expect(accountListRequests()).toBeGreaterThanOrEqual(2);
       expect(usageLimitSwitch).toBeChecked();
       expect(screen.getByText("Usage unavailable · routing blocked")).toBeInTheDocument();
       expect(screen.getByText("Forced account-list outage")).toBeInTheDocument();
@@ -68,7 +81,6 @@ describe("account usage limit flow", () => {
   });
 
   it("does not preserve Active after lowering the limit when refetch fails", async () => {
-    const user = userEvent.setup({ delay: null });
     const account = createAccountSummary({
       accountId: "acc-lowered-usage-limit",
       email: "lowered-usage-limit@example.com",
@@ -77,38 +89,9 @@ describe("account usage limit flow", () => {
       usageLimitPercent: 50,
       usageLimitState: "available",
     });
-    let accountListRequests = 0;
-
-    server.use(
-      http.get("/api/accounts", () => {
-        accountListRequests += 1;
-        if (accountListRequests === 1) {
-          return HttpResponse.json({ accounts: [account] });
-        }
-        return HttpResponse.json(
-          {
-            error: {
-              code: "forced_accounts_outage",
-              message: "Forced account-list outage",
-            },
-          },
-          { status: 500 },
-        );
-      }),
-      http.put("/api/accounts/:accountId/usage-limit", async ({ params, request }) => {
-        const payload = (await request.json()) as {
-          enabled: boolean;
-          percent?: number | null;
-        };
-        return HttpResponse.json({
-          accountId: String(params.accountId),
-          ...payload,
-        });
-      }),
-    );
-
-    window.history.pushState({}, "", "/accounts");
-    renderWithProviders(<App />);
+    const accountListRequests = installAccountRefetchFailure(account);
+    installUsageLimitUpdateHandler();
+    const user = renderAccountsPage();
 
     const input = await screen.findByRole("spinbutton", {
       name: "Maximum used percent",
@@ -118,7 +101,7 @@ describe("account usage limit flow", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
-      expect(accountListRequests).toBeGreaterThanOrEqual(2);
+      expect(accountListRequests()).toBeGreaterThanOrEqual(2);
       expect(screen.getByText("10% maximum used · 90% reserved")).toBeInTheDocument();
       expect(screen.getByText("Usage unavailable · routing blocked")).toBeInTheDocument();
       expect(screen.getByText("Forced account-list outage")).toBeInTheDocument();

@@ -1318,10 +1318,10 @@ async def test_codex_realtime_call_failure_logs_redact_account_identifiers(
         fake_fresh_with_failover,
     )
     if failure_branch == "before-upstream":
-        remaining = iter((1.0, 0.0))
+        remaining = iter((0.0,))
         monkeypatch.setattr(proxy_module, "_remaining_budget_seconds", lambda _deadline: next(remaining))
     elif failure_branch == "before-forced-refresh":
-        remaining = iter((1.0, 1.0, 0.0))
+        remaining = iter((1.0, 0.0))
         monkeypatch.setattr(proxy_module, "_remaining_budget_seconds", lambda _deadline: next(remaining))
     else:
         monkeypatch.setattr(proxy_module, "_remaining_budget_seconds", lambda _deadline: 1.0)
@@ -1387,9 +1387,16 @@ async def test_codex_realtime_call_shared_freshness_budget_log_redacts_account_i
     async def unexpected_codex_control_request(*_args, **_kwargs):
         raise AssertionError("freshness budget exhaustion must prevent the upstream call")
 
+    # Selection is bounded by the scheduler-owned anyio budget, not a second
+    # wait_for, so it samples the remaining budget once; the next sample is
+    # the freshness stage, which must observe the exhausted shared deadline.
     remaining_budget = iter((1.0, 0.0))
     monkeypatch.setattr(proxy_module, "core_codex_control_request", unexpected_codex_control_request)
-    monkeypatch.setattr(proxy_module, "_remaining_budget_seconds", lambda _deadline: next(remaining_budget))
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_remaining_budget_seconds",
+        lambda _self, _deadline: next(remaining_budget),
+    )
 
     caplog.clear()
     with caplog.at_level(logging.WARNING):
@@ -3556,7 +3563,7 @@ async def test_source_responses_normalize_error_still_settles_reservation(monkey
 
 
 @pytest.mark.asyncio
-async def test_backend_desktop_openai_shape_uses_codex_heartbeat_with_sdk_normalization(
+async def test_backend_desktop_openai_shape_preserves_native_event_order(
     async_client,
     monkeypatch,
 ):
@@ -3571,12 +3578,11 @@ async def test_backend_desktop_openai_shape_uses_codex_heartbeat_with_sdk_normal
         account_suffix="desktop_openai_shape",
     )
 
-    assert lines[:2] == CODEX_KEEPALIVE_FRAME.strip().splitlines()
     event_types = [event.get("type") for event in _sse_data_events(lines)]
-    standard_event_types = [event_type for event_type in event_types if event_type != "codex.keepalive"]
-    assert standard_event_types[0] == "response.created"
-    assert "codex.rate_limits" not in event_types
-    assert "response.completed" in standard_event_types
+    assert event_types[0] == "codex.rate_limits"
+    assert "codex.keepalive" not in event_types
+    assert "response.created" not in event_types
+    assert "response.completed" in event_types
 
 
 @pytest.mark.asyncio
