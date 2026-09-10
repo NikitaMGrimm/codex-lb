@@ -1,7 +1,7 @@
 """add per-account usage limits
 
 Revision ID: 20260728_010000_add_account_usage_limits
-Revises: 20260909_130000_add_request_logs_live_facet_indexes
+Revises: 20260910_000000_request_logs_missing_cost_index
 Create Date: 2026-07-28
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260728_010000_add_account_usage_limits"
-down_revision = "20260909_130000_add_request_logs_live_facet_indexes"
+down_revision = "20260910_000000_request_logs_missing_cost_index"
 branch_labels = None
 depends_on = None
 

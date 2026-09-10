@@ -1612,23 +1612,20 @@ async def test_public_selection_bounds_continuous_input_generation_changes(
 
     selection = await asyncio.wait_for(_select_with_lease(balancer, sticky=sticky), timeout=1.0)
 
-    assert selection.account is not None
-    assert selection.account.id == account.id
-    assert selection.lease is not None
-    assert selection.error_code is None
+    assert selection.account is None
+    assert selection.lease is None
+    assert selection.error_code == "no_accounts"
+    assert selection_failure_response(selection)[0] == 503
     assert persist_calls == 4
     assert load_spy.await_count == 4
-    assert release_spy.await_count == 3
+    assert release_spy.await_count == 4
     assert usage_repo.snapshot_calls == 1
-    assert sticky_repo.account_id == (account.id if sticky else None)
+    assert sticky_repo.account_id is None
     # The cursor is replica-local fairness state, so each locally admitted
     # attempt consumes a turn even when a newer policy snapshot supersedes it.
     last_selected_at = balancer._runtime[account.id].last_selected_at
     assert last_selected_at is not None
     assert last_selected_at > original_last_selected_at
-    assert await balancer.account_pressure_snapshot(account.id) == (0, 1, 42.0)
-
-    await balancer.release_account_lease(selection.lease)
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
 

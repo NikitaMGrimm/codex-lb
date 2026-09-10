@@ -186,7 +186,7 @@ cached ordinary selection adds no database reads for this policy check.
 
 ## Migration
 
-A forward Alembic revision based on the current upstream migration head adds both account columns and database checks for the percentage range and enabled/value relationship. Existing accounts remain disabled with no percentage. Downgrade removes the checks and columns through batch operations so SQLite and PostgreSQL both round-trip.
+A forward Alembic revision based on upstream `20260910_000000_request_logs_missing_cost_index` adds both account columns and database checks for the percentage range and enabled/value relationship. Existing accounts remain disabled with no percentage. Downgrade removes the checks and columns through batch operations so SQLite and PostgreSQL both round-trip.
 
 ## Test plan
 

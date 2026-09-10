@@ -6,6 +6,14 @@
 
 Fresh owner authorization MUST distinguish permission, a local usage-policy block, an unavailable owner, and an authorization infrastructure failure. A missing, paused, deactivated, or reauthentication-required owner MUST NOT be admitted on retry exhaustion. Failed final selection authorization MUST release provisional leases and recovery probes and MUST NOT publish a new or changed sticky owner. An unavailable owner MUST NOT be reported as having reached its usage policy. Cancellation MUST propagate after provisional resource cleanup.
 
+#### Scenario: Selection inputs keep changing through retry exhaustion
+
+- **GIVEN** selection inputs change after every bounded selection attempt
+- **WHEN** the retry budget is exhausted
+- **THEN** sticky and unbound selection fail closed with a retryable local 503, even if the final owner-policy check allows the account
+- **AND** no affinity is published and provisional leases and recovery probes are released
+- **AND** a specific owner or usage-policy denial retains its existing error
+
 #### Scenario: Owner disappears on the final selection attempt
 
 - **GIVEN** selection state is invalidated on every bounded selection attempt

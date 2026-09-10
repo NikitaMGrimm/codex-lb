@@ -28916,12 +28916,7 @@ async def test_create_http_bridge_session_does_not_classify_post_selection_failu
 @pytest.mark.asyncio
 async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_previous_response_owner_misses(
     monkeypatch: pytest.MonkeyPatch,
-    db_setup: bool,
 ) -> None:
-    # ``_pin_file_account`` writes through the real ``SessionLocal`` into
-    # ``file_account_pins``; ``db_setup`` provisions that schema instead of
-    # relying on an earlier module having reset the shared test database.
-    del db_setup
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate(
         {

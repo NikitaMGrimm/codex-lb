@@ -333,11 +333,13 @@ async def _release_selection_resources(
         raise error
 
 
-async def _final_attempt_authorization_failure(owner: StickySelectionOwner, account_id: str) -> SelectionResult | None:
+async def _final_attempt_authorization_failure(owner: StickySelectionOwner, account_id: str) -> SelectionResult:
     authorization = await owner.authorize_account_fresh(account_id)
     match authorization.kind:
         case OwnerAuthorizationKind.ALLOWED:
-            return None
+            # A fresh owner policy cannot validate the superseded model,
+            # security, API-key and capacity selection inputs.
+            return SelectionResult(None, "Account selection changed repeatedly; retry later.", "no_accounts")
         case OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
             return SelectionResult(
                 None, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE

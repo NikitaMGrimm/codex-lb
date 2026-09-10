@@ -32,7 +32,7 @@ def usage_history_to_window_row(entry: UsageHistory | AdditionalUsageHistory) ->
         window_minutes=entry.window_minutes,
         recorded_at=entry.recorded_at,
     )
-    if isinstance(entry, UsageHistory) and float(entry.used_percent) == 0.0 and usage_core.is_no_data_placeholder(row):
+    if isinstance(entry, UsageHistory) and usage_core.is_no_data_placeholder(row):
         return replace(row, used_percent=None)
     return row
 
