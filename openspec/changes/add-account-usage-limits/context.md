@@ -38,3 +38,19 @@ The preview runs in a separate worktree with its own SQLite database and loopbac
 Reserved/usable display is inspired by PR #2147; this implementation extends the existing #1528 policy and editor rather than copying the other branch's admission gate.
 
 CI run 34471699010 failed only test_dashboard_overview_combines_data: its synthetic usage lacked both duration and reset metadata, which correctly denotes no data under the reviewed shared mapper. The local fixture now supplies standard durations; the runtime no-data guard remains intact.
+
+
+## Consolidation coverage
+
+The combined implementation retains the independent-window and reserve-display requirements from #2147 through the existing #1528 policy path. It deliberately retains #1528's fail-closed behavior after telemetry expires; elapsed reset metadata alone does not constitute a fresh zero measurement.
+
+| Requirement | Coverage |
+| --- | --- |
+| Unequal thresholds, weekly-only normalization, unrelated durations and unknown telemetry | account usage-limit unit suite |
+| API persistence, immediate policy updates, disable-retain, explicit removal and standalone window limits | combined policy Accounts API integration test |
+| Existing owner authorization | HTTP bridge second-turn test covers both shared and per-window policies; existing WebSocket and cancellation suites retain their authorization/cleanup contracts |
+| Existing scalar rows and independent window policies | SQLite/PostgreSQL override migration round trip |
+| Reserved versus provider/usable quota | quota bar, dashboard donut and account editor suites |
+| Weekly pace uses usable capacity without scaling observed provider burn | weekly credit pace reserve test |
+
+No separate cap cache or second admission evaluator is introduced. Existing ownership, retry, trusted-access and additional-quota tests continue to cover the canonical gate.

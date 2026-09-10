@@ -4903,10 +4903,12 @@ def _install_bridge_account_upstream(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("per_window", [False, True], ids=["shared-limit", "window-override"])
 async def test_v1_responses_http_bridge_revalidates_usage_limit_before_second_turn(
     async_client,
     app_instance,
     monkeypatch,
+    per_window: bool,
 ) -> None:
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -4946,7 +4948,9 @@ async def test_v1_responses_http_bridge_revalidates_usage_limit_before_second_tu
 
     changed = await async_client.put(
         f"/api/accounts/{account_id}/usage-limit",
-        json={"enabled": True, "percent": 10.0},
+        json={"enabled": True, "percent": 80.0, "percent5H": 10.0}
+        if per_window
+        else {"enabled": True, "percent": 10.0},
     )
     assert changed.status_code == 200
     second = await async_client.post(
