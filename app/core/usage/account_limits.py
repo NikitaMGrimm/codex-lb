@@ -31,12 +31,15 @@ def evaluate_standard_usage_limit(
     monthly: UsageWindowRow | None,
     refresh_interval_seconds: int,
     now: datetime | None = None,
+    limit_5h_percent: float | None = None,
+    limit_weekly_percent: float | None = None,
 ) -> AccountUsageLimitState:
     """Evaluate an account's operator-defined cap from standard quota rows."""
 
     if not enabled:
         return AccountUsageLimitState.DISABLED
-    if limit_percent is None or not math.isfinite(limit_percent) or not 0.0 < limit_percent <= 100.0:
+    configured = [value for value in (limit_percent, limit_5h_percent, limit_weekly_percent) if value is not None]
+    if not configured or any(not math.isfinite(value) or not 0.0 < value <= 100.0 for value in configured):
         return AccountUsageLimitState.DATA_UNAVAILABLE
 
     current_time = now or datetime.now(timezone.utc)
@@ -51,14 +54,32 @@ def evaluate_standard_usage_limit(
         secondary=secondary,
         monthly=monthly,
     )
-    current_rows = [row for row in relevant_rows if not _window_elapsed(row, current_time)]
+    if any(usage_core.is_no_data_placeholder(row) and not _window_elapsed(row, current_time) for row in relevant_rows):
+        return AccountUsageLimitState.DATA_UNAVAILABLE
+    limited_rows = [
+        (
+            row,
+            effective_usage_limit_percent(
+                enabled=enabled,
+                limit_percent=limit_percent,
+                limit_5h_percent=limit_5h_percent,
+                limit_weekly_percent=limit_weekly_percent,
+                window_minutes=row.window_minutes,
+            ),
+        )
+        for row in relevant_rows
+    ]
+    limited_rows = [(row, cap) for row, cap in limited_rows if cap is not None]
+    if relevant_rows and not limited_rows:
+        return AccountUsageLimitState.AVAILABLE
+    current_rows = [(row, cap) for row, cap in limited_rows if not _window_elapsed(row, current_time)]
     if not current_rows:
         return AccountUsageLimitState.DATA_UNAVAILABLE
 
     freshness_seconds = max(int(refresh_interval_seconds) * 2, MINIMUM_USAGE_LIMIT_FRESHNESS_SECONDS)
     freshness_cutoff = current_time - timedelta(seconds=freshness_seconds)
-    checked_used_percents: list[float] = []
-    for row in current_rows:
+    reached = False
+    for row, cap in current_rows:
         recorded_at = _as_utc(row.recorded_at)
         used_percent = row.used_percent
         if (
@@ -69,11 +90,29 @@ def evaluate_standard_usage_limit(
             or usage_core.is_no_data_placeholder(row)
         ):
             return AccountUsageLimitState.DATA_UNAVAILABLE
-        checked_used_percents.append(used_percent)
+        reached = reached or used_percent >= cap
 
-    if any(used_percent >= limit_percent for used_percent in checked_used_percents):
+    if reached:
         return AccountUsageLimitState.REACHED
     return AccountUsageLimitState.AVAILABLE
+
+
+def effective_usage_limit_percent(
+    *,
+    enabled: bool,
+    limit_percent: float | None,
+    window_minutes: int | None,
+    limit_5h_percent: float | None = None,
+    limit_weekly_percent: float | None = None,
+) -> float | None:
+    """Resolve a cap for the normalized provider window, shared by admission and display."""
+    if not enabled:
+        return None
+    if window_minutes == 300 and limit_5h_percent is not None:
+        return limit_5h_percent
+    if usage_core.is_weekly_window_minutes(window_minutes) and limit_weekly_percent is not None:
+        return limit_weekly_percent
+    return limit_percent
 
 
 def _relevant_standard_rows(

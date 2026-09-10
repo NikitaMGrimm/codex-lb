@@ -111,7 +111,17 @@ class Account(Base):
             name="ck_accounts_usage_limit_percent_range",
         ),
         CheckConstraint(
-            "NOT usage_limit_enabled OR usage_limit_percent IS NOT NULL",
+            "usage_limit_5h_percent IS NULL OR (usage_limit_5h_percent > 0 AND usage_limit_5h_percent <= 100)",
+            name="ck_accounts_usage_limit_5h_percent_range",
+        ),
+        CheckConstraint(
+            "usage_limit_weekly_percent IS NULL OR "
+            "(usage_limit_weekly_percent > 0 AND usage_limit_weekly_percent <= 100)",
+            name="ck_accounts_usage_limit_weekly_percent_range",
+        ),
+        CheckConstraint(
+            "NOT usage_limit_enabled OR usage_limit_percent IS NOT NULL "
+            "OR usage_limit_5h_percent IS NOT NULL OR usage_limit_weekly_percent IS NOT NULL",
             name="ck_accounts_usage_limit_enabled_requires_percent",
         ),
     )
@@ -148,6 +158,8 @@ class Account(Base):
         nullable=False,
     )
     usage_limit_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    usage_limit_5h_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    usage_limit_weekly_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

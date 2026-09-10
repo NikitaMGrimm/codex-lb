@@ -407,6 +407,10 @@ async def update_account_usage_limit(
         enabled=payload.enabled,
         percent=payload.percent,
         update_percent=percent_was_provided,
+        percent_5h=payload.percent_5h,
+        percent_weekly=payload.percent_weekly,
+        update_5h="percent_5h" in payload.model_fields_set,
+        update_weekly="percent_weekly" in payload.model_fields_set,
     )
     if configuration is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
@@ -417,6 +421,8 @@ async def update_account_usage_limit(
             "account_id": account_id,
             "enabled": configuration.enabled,
             "percent": configuration.percent,
+            "percent_5h": configuration.percent_5h,
+            "percent_weekly": configuration.percent_weekly,
             "percent_was_provided": percent_was_provided,
         },
     )
@@ -424,6 +430,8 @@ async def update_account_usage_limit(
         account_id=account_id,
         enabled=configuration.enabled,
         percent=configuration.percent,
+        percent_5h=configuration.percent_5h,
+        percent_weekly=configuration.percent_weekly,
     )
 
 

@@ -264,7 +264,7 @@ An enabled maximum-usage policy MUST require current standard quota data. Elapse
 
 ### Requirement: Dashboard account controls expose usage-limit state and precision
 
-Account summaries SHALL expose the configured percentage, enabled flag, and evaluated state (`disabled`, `available`, `reached`, or `data_unavailable`). The Accounts dashboard SHALL allow an operator to set, edit, enable, disable, and remove the policy. Dashboard account card and list surfaces SHALL display `Limit reached` for an otherwise active account in state `reached` and `Usage unavailable` for an otherwise active account in state `data_unavailable`, without masking a non-active upstream account status. The editable value and maximum-used summary MUST preserve every API-valid persisted numeric percentage without rounding it to a different value. Invalid percentage values MUST receive clear inline range feedback. The dashboard SHALL describe a value of 10 percent as a maximum of 10 percent used (90 percent reserved) and SHALL warn that delayed upstream observations or already in-flight requests can move actual usage past the displayed percentage before the gate observes it.
+Account summaries SHALL expose the configured percentage, enabled flag, and evaluated state (`disabled`, `available`, `reached`, or `data_unavailable`). The Accounts dashboard SHALL allow an operator to set, edit, enable, disable, and remove the policy. Dashboard account card and list surfaces SHALL display `Limit reached` for an otherwise active account in state `reached` and `Usage unavailable` for an otherwise active account in state `data_unavailable`, without masking a non-active upstream account status. The editable value and maximum-used summary MUST preserve every API-valid persisted numeric percentage without rounding it to a different value. Invalid percentage values MUST receive clear inline range feedback. The dashboard SHALL describe a value of 10 percent as a maximum of 10 percent used (90 percent reserved).
 
 #### Scenario: Enabled limit is visible and toggleable
 
@@ -361,3 +361,29 @@ every replica. Already dispatched work MUST retain its settlement ownership.
 - **WHEN** the replica performs its next existing-owner dispatch authorization read
 - **THEN** that read denies the new dispatch according to the committed policy
 - **AND** it does not substitute the cached disabled policy for authorization
+
+### Requirement: Consolidated default and window overrides
+An account SHALL persist an optional default percentage and optional 5-hour and weekly percentages, with one enabled flag. Percentages SHALL be greater than zero and at most 100. An override SHALL replace the default only for the matching normalized duration. Monthly and nonstandard windows SHALL use only the default. Missing overrides SHALL inherit the default; absent default SHALL leave unmatched windows unrestricted. Disable SHALL retain saved values; removal SHALL clear all values. Enabling SHALL require at least one percentage.
+
+#### Scenario: Unequal window thresholds
+- **WHEN** the default is 80, the 5-hour override is 70, the weekly override is 90, and fresh usage is 65 and 75 respectively
+- **THEN** the account SHALL remain available.
+
+#### Scenario: Standalone weekly override
+- **WHEN** only a weekly override is enabled on a monthly-only account
+- **THEN** monthly usage SHALL remain unrestricted by that override.
+
+### Requirement: Reserved quota presentation
+Account and dashboard views SHALL distinguish provider remaining from usable remaining and reserved capacity using the same effective window policy as admission. Reserved quota SHALL use a muted hatched segment and an accessible label.
+
+#### Scenario: Remaining quota with reserve
+- **WHEN** usage is 54 percent and the effective cap is 80 percent
+- **THEN** the view SHALL show 46 percent provider remaining, 20 percent reserved, and 26 percent usable of the provider capacity.
+
+### Requirement: Reserve-oriented editing
+The editor SHALL ask how much quota to keep for direct use, converting reserve percentages to the existing maximum-used API contract. The shared reserve and optional per-window reserves SHALL be visible together. Blank window values SHALL inherit the shared reserve, with that behavior explained next to the fields. Bars SHALL place reserved quota on the left, usable quota next, and consumed quota on the right. Stripes SHALL not exceed provider remaining.
+
+#### Scenario: Twenty percent reserve
+- **WHEN** the operator saves a 20 percent reserve and usage is 54 percent
+- **THEN** the maximum-used API value SHALL be 80
+- **AND** the bar SHALL show 20 percent striped on the left, 26 percent usable next, and 54 percent consumed on the right.

@@ -126,6 +126,8 @@ class AccountRequestUsageSummary:
 class AccountUsageLimitConfiguration:
     enabled: bool
     percent: float | None
+    percent_5h: float | None = None
+    percent_weekly: float | None = None
 
 
 # The account-listing request-usage summary dedupes and re-aggregates the
@@ -998,6 +1000,10 @@ class AccountsRepository:
         enabled: bool,
         percent: float | None,
         update_percent: bool,
+        percent_5h: float | None = None,
+        percent_weekly: float | None = None,
+        update_5h: bool = False,
+        update_weekly: bool = False,
     ) -> AccountUsageLimitConfiguration | None:
         async with sqlite_writer_section():
             statement = (
@@ -1008,10 +1014,16 @@ class AccountsRepository:
             )
             if update_percent:
                 statement = statement.values(usage_limit_percent=percent)
+            if update_5h:
+                statement = statement.values(usage_limit_5h_percent=percent_5h)
+            if update_weekly:
+                statement = statement.values(usage_limit_weekly_percent=percent_weekly)
             result = await self._session.execute(
                 statement.returning(
                     Account.usage_limit_enabled,
                     Account.usage_limit_percent,
+                    Account.usage_limit_5h_percent,
+                    Account.usage_limit_weekly_percent,
                 )
             )
             row = result.one_or_none()
@@ -1021,6 +1033,8 @@ class AccountsRepository:
             return AccountUsageLimitConfiguration(
                 enabled=bool(row.usage_limit_enabled),
                 percent=row.usage_limit_percent,
+                percent_5h=row.usage_limit_5h_percent,
+                percent_weekly=row.usage_limit_weekly_percent,
             )
 
     async def begin_delete(self, account_id: str, *, delete_history: bool = False) -> bool:

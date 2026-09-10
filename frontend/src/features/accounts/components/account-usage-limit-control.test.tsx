@@ -24,29 +24,34 @@ describe("AccountUsageLimitControl", () => {
       />,
     );
 
-    expect(screen.getAllByText("10% maximum used · 90% reserved")).toHaveLength(1);
     expect(screen.getAllByText("Off")).toHaveLength(1);
-    expect(screen.getByRole("switch", { name: "Usage limit" })).not.toBeChecked();
+    expect(screen.getByRole("switch", { name: "Protect reserved quota" })).not.toBeChecked();
 
-    await user.click(screen.getByRole("switch", { name: "Usage limit" }));
+    await user.click(screen.getByRole("switch", { name: "Protect reserved quota" }));
     expect(onChange).toHaveBeenCalledWith(account.accountId, {
       enabled: true,
       percent: 10,
+      percent5H: null,
+      percentWeekly: null,
     });
 
-    const input = screen.getByRole("spinbutton", { name: "Maximum used percent" });
+    const input = screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" });
     await user.clear(input);
-    await user.type(input, "12.5");
+    await user.type(input, "87.5");
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(onChange).toHaveBeenCalledWith(account.accountId, {
       enabled: false,
       percent: 12.5,
+      percent5H: null,
+      percentWeekly: null,
     });
 
-    await user.click(screen.getByRole("button", { name: "Clear saved limit" }));
+    await user.click(screen.getByRole("button", { name: "Remove saved reserves" }));
     expect(onChange).toHaveBeenCalledWith(account.accountId, {
       enabled: false,
       percent: null,
+      percent5H: null,
+      percentWeekly: null,
     });
   });
 
@@ -68,17 +73,17 @@ describe("AccountUsageLimitControl", () => {
       />,
     );
 
-    expect(screen.queryByText(/usage reporting is delayed/i)).not.toBeInTheDocument();
     await user.type(
-      screen.getByRole("spinbutton", { name: "Maximum used percent" }),
-      "10",
+      screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" }),
+      "90",
     );
-    expect(screen.getByText(/usage reporting is delayed/i)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Set and enable" }));
+    await user.click(screen.getByRole("button", { name: "Save and enable" }));
 
     expect(onChange).toHaveBeenCalledWith(account.accountId, {
       enabled: true,
       percent: 10,
+      percent5H: null,
+      percentWeekly: null,
     });
   });
 
@@ -100,14 +105,14 @@ describe("AccountUsageLimitControl", () => {
       />,
     );
 
-    await user.click(screen.getByRole("switch", { name: "Usage limit" }));
+    await user.click(screen.getByRole("switch", { name: "Protect reserved quota" }));
 
     expect(onChange).toHaveBeenCalledWith(account.accountId, {
       enabled: false,
     });
   });
 
-  it("distinguishes a reached local limit and warns about observation overshoot", () => {
+  it("distinguishes a reached local limit", () => {
     render(
       <AccountUsageLimitControl
         account={createAccountSummary({
@@ -122,24 +127,6 @@ describe("AccountUsageLimitControl", () => {
     );
 
     expect(screen.getByText("Reached · routing blocked")).toBeInTheDocument();
-    expect(screen.getByText(/in-flight requests may briefly exceed/i)).toBeInTheDocument();
-  });
-
-  it("hides the observation-overshoot warning while a saved limit is disabled", () => {
-    render(
-      <AccountUsageLimitControl
-        account={createAccountSummary({
-          usageLimitEnabled: false,
-          usageLimitPercent: 10,
-          usageLimitState: "disabled",
-        })}
-        busy={false}
-        readOnly={false}
-        onChange={vi.fn()}
-      />,
-    );
-
-    expect(screen.queryByText(/in-flight requests may briefly exceed/i)).not.toBeInTheDocument();
   });
 
   it("preserves focus and a draft until the authoritative account or percentage changes", async () => {
@@ -158,10 +145,10 @@ describe("AccountUsageLimitControl", () => {
         onChange={onChange}
       />,
     );
-    const input = screen.getByRole("spinbutton", { name: "Maximum used percent" });
+    const input = screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" });
 
     await user.clear(input);
-    await user.type(input, "12.5");
+    await user.type(input, "87.5");
     rerender(
       <AccountUsageLimitControl
         account={{ ...account, usageLimitState: "reached" }}
@@ -172,7 +159,7 @@ describe("AccountUsageLimitControl", () => {
     );
 
     expect(input).toHaveFocus();
-    expect(input).toHaveValue(12.5);
+    expect(input).toHaveValue(87.5);
 
     rerender(
       <AccountUsageLimitControl
@@ -183,10 +170,10 @@ describe("AccountUsageLimitControl", () => {
       />,
     );
     expect(input).toHaveFocus();
-    expect(input).toHaveValue(20);
+    expect(input).toHaveValue(80);
 
     await user.clear(input);
-    await user.type(input, "30");
+    await user.type(input, "70");
     rerender(
       <AccountUsageLimitControl
         account={{ ...account, accountId: "acc_secondary" }}
@@ -196,7 +183,7 @@ describe("AccountUsageLimitControl", () => {
       />,
     );
     expect(input).toHaveFocus();
-    expect(input).toHaveValue(10);
+    expect(input).toHaveValue(90);
   });
 
   it("does not save an unchanged draft via Enter and disables controls while busy", async () => {
@@ -217,7 +204,7 @@ describe("AccountUsageLimitControl", () => {
       />,
     );
 
-    const input = screen.getByRole("spinbutton", { name: "Maximum used percent" });
+    const input = screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" });
     await user.type(input, "{Enter}");
     expect(onChange).not.toHaveBeenCalled();
 
@@ -229,10 +216,10 @@ describe("AccountUsageLimitControl", () => {
         onChange={onChange}
       />,
     );
-    expect(screen.getByRole("switch", { name: "Usage limit" })).toBeDisabled();
-    expect(screen.getByRole("spinbutton", { name: "Maximum used percent" })).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "Protect reserved quota" })).toBeDisabled();
+    expect(screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Clear saved limit" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove saved reserves" })).toBeDisabled();
   });
 
   it("explains invalid percentages and clears the error after correction", async () => {
@@ -246,18 +233,18 @@ describe("AccountUsageLimitControl", () => {
       />,
     );
 
-    const input = screen.getByRole("spinbutton", { name: "Maximum used percent" });
-    const save = screen.getByRole("button", { name: "Set and enable" });
-    await user.type(input, "0");
+    const input = screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" });
+    const save = screen.getByRole("button", { name: "Save and enable" });
+    await user.type(input, "100");
 
     expect(input).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Enter a percentage greater than 0 and no more than 100.",
+      "Enter a reserve from 0% up to, but not including, 100%.",
     );
     expect(save).toBeDisabled();
 
     await user.clear(input);
-    await user.type(input, "10");
+    await user.type(input, "90");
 
     expect(input).toHaveAttribute("aria-invalid", "false");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -265,9 +252,9 @@ describe("AccountUsageLimitControl", () => {
   });
 
   it.each([
-    { configured: 1e-7, edited: "0.0000002", saved: 2e-7 },
-    { configured: 0.001, edited: "0.002", saved: 0.002 },
-    { configured: 99.999, edited: "99.998", saved: 99.998 },
+    { configured: 1e-7, edited: "99.9999998", saved: 2e-7 },
+    { configured: 0.001, edited: "99.998", saved: 0.002 },
+    { configured: 99.999, edited: "0.002", saved: 99.998 },
   ])(
     "preserves and saves the configured precision for $configured percent",
     async ({ configured, edited, saved }) => {
@@ -289,10 +276,9 @@ describe("AccountUsageLimitControl", () => {
       );
 
       const input = screen.getByRole("spinbutton", {
-        name: "Maximum used percent",
+        name: "Reserve for yourself (%)",
       });
-      expect(input).toHaveValue(configured);
-      expect(screen.getByText(new RegExp(`${configured}% maximum used`))).toBeInTheDocument();
+      expect(input).toHaveValue(Number((100 - configured).toFixed(7)));
 
       await user.clear(input);
       await user.type(input, edited);
@@ -301,7 +287,21 @@ describe("AccountUsageLimitControl", () => {
       expect(onChange).toHaveBeenCalledWith(account.accountId, {
         enabled: true,
         percent: saved,
+        percent5H: null,
+        percentWeekly: null,
       });
     },
   );
+  it("sets standalone overrides and keeps the default empty", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const account = createAccountSummary({ usageLimitEnabled: false, usageLimitPercent: null });
+    render(<AccountUsageLimitControl account={account} busy={false} readOnly={false} onChange={onChange} />);
+    await user.type(screen.getByRole("spinbutton", { name: "5-hour reserve (%)" }), "30");
+    await user.type(screen.getByRole("spinbutton", { name: "Weekly reserve (%)" }), "10");
+    await user.click(screen.getByRole("button", { name: "Save and enable" }));
+    expect(onChange).toHaveBeenCalledWith(account.accountId, {
+      enabled: true, percent: null, percent5H: 70, percentWeekly: 90,
+    });
+  });
 });

@@ -689,6 +689,8 @@ class QuotaWarmupService:
         account.plan_type = snapshot.plan_type
         account.usage_limit_enabled = snapshot.enabled
         account.usage_limit_percent = snapshot.limit_percent
+        account.usage_limit_weekly_percent = snapshot.limit_weekly_percent
+        account.usage_limit_5h_percent = snapshot.limit_5h_percent
         return _FreshStandardUsage(
             account=account,
             decision=decision,

@@ -59,6 +59,8 @@ def authorize_usage_snapshot(
     state = evaluate_standard_usage_limit(
         enabled=snapshot.enabled,
         limit_percent=snapshot.limit_percent,
+        limit_weekly_percent=snapshot.limit_weekly_percent,
+        limit_5h_percent=snapshot.limit_5h_percent,
         plan_type=snapshot.plan_type,
         primary=snapshot.primary,
         secondary=snapshot.secondary,

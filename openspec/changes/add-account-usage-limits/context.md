@@ -17,7 +17,7 @@ Both percentages denote the maximum fraction of provider quota that may be consu
 
 Unequal window caps cannot be represented by this change's scalar. For example, primary/weekly usage of 65%/75% is allowed by respective caps of 70%/90%; 72%/75% is blocked by the primary cap. Replacing the pair with 70% would also block the first case on its weekly window. Treating either implementation as a drop-in replacement loses behavior.
 
-## Proposed consolidation
+## Consolidation design
 
 Use one policy model and evaluator, extending this change's normalized-window evaluation and fresh owner-authorization path with optional primary and weekly overrides. Keep the scalar as the default for every applicable standard window, including monthly plans. An absent override inherits that default; standalone window caps without a scalar default affect only their specified windows. Preserve disable-versus-remove behavior and fail-closed telemetry handling for every enabled effective cap.
 
@@ -27,6 +27,14 @@ Reuse #2147's accessible reserved/usable visualization against this single effec
 
 ## Merge boundary and verification
 
-This update brings #1528 onto current main and removes the already-merged #2193 database changes from its diff. It deliberately retains its existing scalar contract. The per-window extension and reserve visualization above still require maintainer agreement and implementation; neither PR is declared superseded.
+The combined implementation includes the per-window extension and reserve visualization described above. It uses the existing usage-limit API with percent5H and percentWeekly additions, and returns effective window thresholds for dashboard consumers. Existing scalar rows retain their behavior through a new forward migration.
 
 A consolidated implementation needs coverage for equal and unequal window caps, scalar migration and disable/remove semantics, weekly-only/monthly/nonstandard-duration plans, absent/stale observations, additional-quota routes, reused HTTP/WebSocket turns, cancellation cleanup, replica refresh, and accessible reserve/pacing calculations. Reuse the existing public-path tests in both PRs rather than duplicating their internal helper tests.
+
+
+## Preview verification environment
+The preview runs in a separate worktree with its own SQLite database and loopback port 8766. Seven synthetic accounts exercise default, unequal overrides, standalone override, disabled, reached, missing-data and monthly cases. Background provider polling is disabled using the repository browser-smoke harness, upstream points to an unused local port, and the preview permits only usage-limit and local dashboard-auth/consent writes. Production containers and databases are not accessed.
+
+Reserved/usable display is inspired by PR #2147; this implementation extends the existing #1528 policy and editor rather than copying the other branch's admission gate.
+
+CI run 34471699010 failed only test_dashboard_overview_combines_data: its synthetic usage lacked both duration and reset metadata, which correctly denotes no data under the reviewed shared mapper. The local fixture now supplies standard durations; the runtime no-data guard remains intact.

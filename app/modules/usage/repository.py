@@ -91,6 +91,8 @@ class AccountUsageLimitSnapshot:
     primary: UsageWindowRow | None
     secondary: UsageWindowRow | None
     monthly: UsageWindowRow | None
+    limit_5h_percent: float | None = None
+    limit_weekly_percent: float | None = None
 
 
 def _projected_usage_window(
@@ -668,6 +670,8 @@ class UsageRepository:
                 Account.usage_limit_enabled,
                 Account.usage_limit_percent,
                 Account.plan_type,
+                Account.usage_limit_5h_percent,
+                Account.usage_limit_weekly_percent,
                 primary.used_percent.label("primary_used_percent"),
                 primary.reset_at.label("primary_reset_at"),
                 primary.window_minutes.label("primary_window_minutes"),
@@ -705,6 +709,8 @@ class UsageRepository:
             status=row[0],
             enabled=bool(row[1]),
             limit_percent=row[2],
+            limit_5h_percent=row.usage_limit_5h_percent,
+            limit_weekly_percent=row.usage_limit_weekly_percent,
             plan_type=row[3],
             primary=projected("primary"),
             secondary=projected("secondary"),

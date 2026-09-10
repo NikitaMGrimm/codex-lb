@@ -66,7 +66,7 @@ describe("account usage limit flow", () => {
     const user = renderAccountsPage();
 
     const usageLimitSwitch = await screen.findByRole("switch", {
-      name: "Usage limit",
+      name: "Protect reserved quota",
     });
     expect(usageLimitSwitch).not.toBeChecked();
 
@@ -94,15 +94,15 @@ describe("account usage limit flow", () => {
     const user = renderAccountsPage();
 
     const input = await screen.findByRole("spinbutton", {
-      name: "Maximum used percent",
+      name: "Reserve for yourself (%)",
     });
     await user.clear(input);
-    await user.type(input, "10");
+    await user.type(input, "90");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(accountListRequests()).toBeGreaterThanOrEqual(2);
-      expect(screen.getByText("10% maximum used · 90% reserved")).toBeInTheDocument();
+      expect(screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" })).toHaveValue(90);
       expect(screen.getByText("Usage unavailable · routing blocked")).toBeInTheDocument();
       expect(screen.getByText("Forced account-list outage")).toBeInTheDocument();
     });
@@ -159,17 +159,17 @@ describe("account usage limit flow", () => {
     renderWithProviders(<App />);
 
     const usageLimitSwitch = await screen.findByRole("switch", {
-      name: "Usage limit",
+      name: "Protect reserved quota",
     });
     expect(usageLimitSwitch).toBeChecked();
-    expect(screen.getByText("10% maximum used · 90% reserved")).toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" })).toHaveValue(90);
 
     await user.click(usageLimitSwitch);
 
     await waitFor(() => {
       expect(updatePayloads).toEqual([{ enabled: false }]);
-      expect(screen.getByRole("switch", { name: "Usage limit" })).not.toBeChecked();
-      expect(screen.getByText("20% maximum used · 80% reserved")).toBeInTheDocument();
+      expect(screen.getByRole("switch", { name: "Protect reserved quota" })).not.toBeChecked();
+      expect(screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" })).toHaveValue(80);
     });
   });
 });

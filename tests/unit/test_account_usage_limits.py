@@ -31,6 +31,8 @@ def _evaluate(
     *,
     enabled: bool = True,
     limit_percent: float | None = 10.0,
+    limit_5h_percent: float | None = None,
+    limit_weekly_percent: float | None = None,
     plan_type: str = "plus",
     primary: UsageWindowRow | None = None,
     secondary: UsageWindowRow | None = None,
@@ -40,6 +42,8 @@ def _evaluate(
     return evaluate_standard_usage_limit(
         enabled=enabled,
         limit_percent=limit_percent,
+        limit_5h_percent=limit_5h_percent,
+        limit_weekly_percent=limit_weekly_percent,
         plan_type=plan_type,
         primary=primary,
         secondary=secondary,
@@ -214,3 +218,69 @@ def test_free_plan_evaluates_one_effective_long_window(
     expected: AccountUsageLimitState,
 ) -> None:
     assert _evaluate(plan_type="free", primary=primary, monthly=monthly) is expected
+
+
+@pytest.mark.parametrize(
+    ("primary_used", "weekly_used", "expected"),
+    [
+        (65, 75, AccountUsageLimitState.AVAILABLE),
+        (70, 75, AccountUsageLimitState.REACHED),
+        (65, 90, AccountUsageLimitState.REACHED),
+    ],
+)
+def test_unequal_overrides_replace_default_per_window(primary_used, weekly_used, expected):
+    assert (
+        _evaluate(
+            limit_percent=80,
+            limit_5h_percent=70,
+            limit_weekly_percent=90,
+            primary=_row(primary_used),
+            secondary=_row(weekly_used, window_minutes=10080),
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("window_minutes", [300, 43200, 1440])
+def test_standalone_weekly_override_does_not_limit_other_durations(window_minutes):
+    assert (
+        _evaluate(
+            limit_percent=None,
+            limit_weekly_percent=20,
+            primary=_row(80, window_minutes=window_minutes),
+        )
+        is AccountUsageLimitState.AVAILABLE
+    )
+
+
+def test_weekly_override_follows_weekly_only_primary_normalization():
+    assert (
+        _evaluate(
+            limit_percent=90,
+            limit_weekly_percent=70,
+            primary=_row(75, window_minutes=10080),
+        )
+        is AccountUsageLimitState.REACHED
+    )
+
+
+def test_override_preserves_fail_closed_freshness():
+    assert (
+        _evaluate(
+            limit_percent=None,
+            limit_weekly_percent=90,
+            secondary=_row(5, window_minutes=10080, recorded_at=NOW - timedelta(minutes=10)),
+        )
+        is AccountUsageLimitState.DATA_UNAVAILABLE
+    )
+
+
+def test_standalone_override_cannot_treat_unknown_window_placeholder_as_unrestricted():
+    assert (
+        _evaluate(
+            limit_percent=None,
+            limit_weekly_percent=90,
+            primary=_row(0, window_minutes=None, reset_delta=None),
+        )
+        is AccountUsageLimitState.DATA_UNAVAILABLE
+    )

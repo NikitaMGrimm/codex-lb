@@ -113,6 +113,8 @@ async def test_account_usage_limit_stale_disable_retains_latest_value_and_explic
         "accountId": account.id,
         "enabled": True,
         "percent": 10.0,
+        "percent5H": None,
+        "percentWeekly": None,
     }
 
     listed = await async_client.get("/api/accounts")
@@ -1823,3 +1825,67 @@ async def test_accounts_list_stale_rate_limited_status_recovers_after_background
     # The recovered account's only sample still has an elapsed reset; the
     # display stays absent until a fresh sample arrives.
     assert reconciled_account["usage"]["primaryRemainingPercent"] is None
+
+
+@pytest.mark.asyncio
+async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(async_client, db_setup):
+    from app.modules.usage.authorization import load_owner_authorization
+
+    account = _make_account("combined-policy", "combined@example.test")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account.id,
+                    window=window,
+                    window_minutes=minutes,
+                    used_percent=used,
+                    recorded_at=utcnow(),
+                    reset_at=int(naive_utc_to_epoch(utcnow() + timedelta(hours=1))),
+                )
+                for window, minutes, used in [("primary", 300, 65), ("secondary", 10080, 75)]
+            ]
+        )
+        await session.commit()
+    path = f"/api/accounts/{account.id}/usage-limit"
+    policy = {"enabled": True, "percent": 80, "percent5H": 70, "percentWeekly": 90}
+    response = await async_client.put(path, json=policy)
+    assert response.status_code == 200
+    assert response.json() == {"accountId": account.id, **policy}
+    summary = next(
+        item for item in (await async_client.get("/api/accounts")).json()["accounts"] if item["accountId"] == account.id
+    )
+    assert summary["effectiveLimitPrimary"] == 70
+    assert summary["effectiveLimitSecondary"] == 90
+    assert summary["usageLimitState"] == "available"
+    async with SessionLocal() as session:
+        assert (
+            await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
+        ).allowed
+    response = await async_client.put(path, json={**policy, "percentWeekly": 70})
+    assert response.status_code == 200
+    async with SessionLocal() as session:
+        assert not (
+            await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
+        ).allowed
+    disabled = await async_client.put(path, json={"enabled": False})
+    assert disabled.json() == {"accountId": account.id, **policy, "enabled": False, "percentWeekly": 70}
+    removed = await async_client.put(
+        path,
+        json={
+            "enabled": False,
+            "percent": None,
+            "percent5H": None,
+            "percentWeekly": None,
+        },
+    )
+    assert removed.status_code == 200
+    assert removed.json()["percent5H"] is None
+    standalone = await async_client.put(path, json={"enabled": True, "percentWeekly": 90})
+    assert standalone.status_code == 200
+    assert standalone.json()["percent"] is None
+    async with SessionLocal() as session:
+        assert (
+            await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
+        ).allowed

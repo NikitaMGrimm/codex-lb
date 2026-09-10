@@ -85,6 +85,11 @@ export const AccountSummarySchema = z.object({
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]).optional(),
   usageLimitEnabled: z.boolean().optional(),
   usageLimitPercent: z.number().gt(0).max(100).nullable().optional(),
+  usageLimit5HPercent: z.number().gt(0).max(100).nullable().optional(),
+  usageLimitWeeklyPercent: z.number().gt(0).max(100).nullable().optional(),
+  effectiveLimitPrimary: z.number().nullable().optional(),
+  effectiveLimitSecondary: z.number().nullable().optional(),
+  effectiveLimitMonthly: z.number().nullable().optional(),
   usageLimitState: AccountUsageLimitStateSchema.optional(),
   status: z.string(),
   securityWorkAuthorized: z.boolean().optional(),
@@ -277,9 +282,11 @@ export const AccountUsageLimitUpdateRequestSchema = z
   .object({
     enabled: z.boolean(),
     percent: z.number().gt(0).max(100).nullable().optional(),
+    percent5H: z.number().gt(0).max(100).nullable().optional(),
+    percentWeekly: z.number().gt(0).max(100).nullable().optional(),
   })
   .superRefine((value, context) => {
-    if (value.enabled && value.percent == null) {
+    if (value.enabled && value.percent == null && value.percent5H == null && value.percentWeekly == null) {
       context.addIssue({
         code: "custom",
         path: ["percent"],
@@ -292,6 +299,8 @@ export const AccountUsageLimitUpdateResponseSchema = z.object({
   accountId: z.string(),
   enabled: z.boolean(),
   percent: z.number().gt(0).max(100).nullable(),
+  percent5H: z.number().gt(0).max(100).nullable().optional(),
+  percentWeekly: z.number().gt(0).max(100).nullable().optional(),
 });
 
 export const AccountUpdateRequestSchema = z.object({

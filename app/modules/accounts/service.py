@@ -663,12 +663,20 @@ class AccountsService:
         enabled: bool,
         percent: float | None,
         update_percent: bool,
+        percent_5h: float | None = None,
+        percent_weekly: float | None = None,
+        update_5h: bool = False,
+        update_weekly: bool = False,
     ) -> AccountUsageLimitConfiguration | None:
         result = await self._repo.update_usage_limit(
             account_id,
             enabled=enabled,
             percent=percent,
             update_percent=update_percent,
+            percent_5h=percent_5h,
+            percent_weekly=percent_weekly,
+            update_5h=update_5h,
+            update_weekly=update_weekly,
         )
         if result is not None:
             get_account_selection_cache().invalidate(propagate=False)

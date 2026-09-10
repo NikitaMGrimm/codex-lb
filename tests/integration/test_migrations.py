@@ -821,13 +821,13 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path, db
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
     migration_state = inspect_migration_state(db_url)
-    assert migration_state.head_revision == revision
-    assert migration_state.current_revision == revision
+    assert migration_state.head_revision == _HEAD_REVISION
+    assert migration_state.current_revision == _HEAD_REVISION
     verification_engine = create_async_engine(db_url, future=True)
     try:
         async with verification_engine.connect() as conn:
             revision_rows = await conn.execute(text("SELECT version_num FROM alembic_version"))
-            assert [str(row[0]) for row in revision_rows.fetchall()] == [revision]
+            assert [str(row[0]) for row in revision_rows.fetchall()] == [_HEAD_REVISION]
     finally:
         await verification_engine.dispose()
 
@@ -3139,5 +3139,55 @@ async def test_missing_cost_index_upgrade_downgrade_and_query_plan(tmp_path):
             assert await conn.scalar(text("SELECT count(*) FROM sqlite_master WHERE name='idx_logs_missing_cost'")) == 0
         await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
         assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
+async def test_usage_limit_overrides_preserve_scalar_and_round_trip(tmp_path, db_setup, dialect):
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    if dialect == "postgresql":
+        if not _is_postgresql_database_url(_DATABASE_URL):
+            pytest.skip("PostgreSQL-only override migration round trip")
+        url = _DATABASE_URL
+        async with SessionLocal() as session:
+            await session.execute(text("DROP SCHEMA public CASCADE"))
+            await session.execute(text("CREATE SCHEMA public"))
+            await session.commit()
+    else:
+        url = f"sqlite+aiosqlite:///{tmp_path / 'usage-overrides.sqlite'}"
+    parent = "20260728_010000_add_account_usage_limits"
+    await to_thread.run_sync(lambda: run_upgrade(url, parent, bootstrap_legacy=True))
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("""
+                INSERT INTO accounts (id, codex_installation_id, email, plan_type,
+                    access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
+                    last_refresh, status, usage_limit_enabled, usage_limit_percent)
+                VALUES ('override-test', '00000000-0000-0000-0000-000000000001', 'test@example.test', 'plus',
+                     :token, :token, :token, CURRENT_TIMESTAMP, 'active', :enabled, 80)
+            """),
+                {"token": b"synthetic", "enabled": True},
+            )
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=True))
+        async with engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT usage_limit_enabled, usage_limit_percent, usage_limit_5h_percent FROM accounts")
+                )
+            ).one()
+            assert tuple(row) == (1, 80, None)
+            await conn.execute(text("UPDATE accounts SET usage_limit_percent=NULL, usage_limit_weekly_percent=90"))
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(url), parent))
+        async with engine.connect() as conn:
+            assert (await conn.execute(text("SELECT usage_limit_enabled FROM accounts"))).scalar_one() == 0
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=True))
+        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
     finally:
         await engine.dispose()

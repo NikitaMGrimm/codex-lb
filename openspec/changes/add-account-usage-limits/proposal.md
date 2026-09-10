@@ -18,3 +18,7 @@ Operators can pause an account or give it a soft routing policy, but they cannot
 - Predicting the exact quota cost of an upstream request. Upstream usage is observed after requests, so one request or concurrent in-flight work can move the reported percentage past the configured value before Codex LB can observe and block it.
 - Token-precise reservation against an undocumented upstream percentage denominator.
 - Applying the standard-account limit to separate additional-quota pools.
+
+## Local consolidation preview
+
+Extend the saved default with optional 5-hour and weekly overrides. Keep one editor and evaluator; show reserved and usable quota alongside provider remaining. Preserve fresh owner checks and disabled-policy behavior.

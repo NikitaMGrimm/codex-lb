@@ -6,6 +6,7 @@ from app.core import usage as usage_core
 from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.usage.account_limits import effective_usage_limit_percent
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS, usage_freshness_horizon_seconds
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
@@ -272,7 +273,30 @@ def _account_to_summary(
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
         usage_limit_enabled=bool(account.usage_limit_enabled),
         usage_limit_percent=account.usage_limit_percent,
+        usage_limit_weekly_percent=account.usage_limit_weekly_percent,
+        usage_limit_5h_percent=account.usage_limit_5h_percent,
         usage_limit_state=usage_limit_state,
+        effective_limit_primary=effective_usage_limit_percent(
+            enabled=bool(account.usage_limit_enabled),
+            limit_percent=account.usage_limit_percent,
+            limit_5h_percent=account.usage_limit_5h_percent,
+            limit_weekly_percent=account.usage_limit_weekly_percent,
+            window_minutes=window_minutes_primary,
+        ),
+        effective_limit_secondary=effective_usage_limit_percent(
+            enabled=bool(account.usage_limit_enabled),
+            limit_percent=account.usage_limit_percent,
+            limit_5h_percent=account.usage_limit_5h_percent,
+            limit_weekly_percent=account.usage_limit_weekly_percent,
+            window_minutes=window_minutes_secondary,
+        ),
+        effective_limit_monthly=effective_usage_limit_percent(
+            enabled=bool(account.usage_limit_enabled),
+            limit_percent=account.usage_limit_percent,
+            limit_5h_percent=account.usage_limit_5h_percent,
+            limit_weekly_percent=account.usage_limit_weekly_percent,
+            window_minutes=window_minutes_monthly,
+        ),
         security_work_authorized=bool(account.security_work_authorized),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,

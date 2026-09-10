@@ -20,3 +20,9 @@
 - [x] 15. Classify authorization infrastructure failures as local in complete request-log metadata.
 - [x] 16. Prevent stale reads and overlapping mutations from reverting acknowledged dashboard policy changes on the locked frontend dependencies.
 - [x] 17. Document consistency and architectural decisions; run backend/frontend/PostgreSQL/spec/migration/quality checks.
+
+## Consolidated limits
+
+- [x] 18. Add optional per-window overrides to persistence, API, snapshots and normalized evaluator.
+- [x] 19. Extend the existing editor and show reserved/usable quota throughout account and dashboard views.
+- [x] 20. Verify policy, API, migration and UI behavior and launch an isolated synthetic preview.

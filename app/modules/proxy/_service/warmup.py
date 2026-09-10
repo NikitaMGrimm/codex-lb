@@ -139,6 +139,8 @@ class _WarmupAccountSnapshot:
     blocked_at: int | None
     usage_limit_enabled: bool
     usage_limit_percent: float | None
+    usage_limit_5h_percent: float | None = None
+    usage_limit_weekly_percent: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +166,8 @@ def _evaluate_warmup_usage_limit(
     return evaluate_standard_usage_limit(
         enabled=account.usage_limit_enabled,
         limit_percent=account.usage_limit_percent,
+        limit_weekly_percent=account.usage_limit_weekly_percent,
+        limit_5h_percent=account.usage_limit_5h_percent,
         plan_type=account.plan_type,
         primary=usage.primary,
         secondary=usage.secondary,
@@ -188,6 +192,8 @@ def _snapshot_warmup_account(account: Account) -> _WarmupAccountSnapshot:
         blocked_at=account.blocked_at,
         usage_limit_enabled=bool(account.usage_limit_enabled),
         usage_limit_percent=account.usage_limit_percent,
+        usage_limit_weekly_percent=account.usage_limit_weekly_percent,
+        usage_limit_5h_percent=account.usage_limit_5h_percent,
     )
 
 
@@ -207,6 +213,8 @@ def _materialize_warmup_account(account: _WarmupAccountSnapshot) -> Account:
         blocked_at=account.blocked_at,
         usage_limit_enabled=account.usage_limit_enabled,
         usage_limit_percent=account.usage_limit_percent,
+        usage_limit_weekly_percent=account.usage_limit_weekly_percent,
+        usage_limit_5h_percent=account.usage_limit_5h_percent,
     )
 
 
@@ -642,5 +650,7 @@ class _WarmupMixin:
                 plan_type=snapshot.plan_type,
                 usage_limit_enabled=snapshot.enabled,
                 usage_limit_percent=snapshot.limit_percent,
+                usage_limit_weekly_percent=snapshot.limit_weekly_percent,
+                usage_limit_5h_percent=snapshot.limit_5h_percent,
             )
             return _WarmupAuthorization(account=account_snapshot, decision=decision)

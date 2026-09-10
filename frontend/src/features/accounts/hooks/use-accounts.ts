@@ -34,6 +34,8 @@ type UsageLimitCacheUpdate = {
   accountId: string;
   enabled: boolean;
   percent: number | null;
+  percent5H?: number | null;
+  percentWeekly?: number | null;
 };
 
 function applyUsageLimitCacheUpdate(
@@ -47,6 +49,11 @@ function applyUsageLimitCacheUpdate(
     ...account,
     usageLimitEnabled: update.enabled,
     usageLimitPercent: update.percent,
+    usageLimit5HPercent: update.percent5H ?? null,
+    usageLimitWeeklyPercent: update.percentWeekly ?? null,
+    effectiveLimitPrimary: undefined,
+    effectiveLimitSecondary: undefined,
+    effectiveLimitMonthly: undefined,
     usageLimitState: update.enabled ? "data_unavailable" : "disabled",
   };
 }

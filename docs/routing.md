@@ -60,7 +60,9 @@ Limit warm-up sends **one small real request** (using the configured warm-up mod
 
 On the **Accounts** page, an account can have an optional maximum-used
 percentage. For example, a limit of `10%` reserves roughly 90% of that
-account's standard quota for direct use.
+account's standard quota for direct use. Optional **5-hour** and **weekly** overrides replace this default for their window. Blank overrides inherit the default; with no default, only explicitly configured windows are limited. Monthly windows use the default, never the weekly override.
+
+The quota bars keep provider remaining visible and mark reserved quota with hatching. At 54% used with an 80% cap, the provider has 46% remaining: 20% is reserved and 26% is usable by Codex LB.
 
 When enabled, the limit is a hard routing gate for every strategy, including
 sticky and single-account routing. Codex LB stops selecting the account once a
