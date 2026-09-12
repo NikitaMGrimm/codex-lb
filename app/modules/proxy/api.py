@@ -135,6 +135,7 @@ from app.core.openai.chat_responses import (
     stream_chat_chunks,
 )
 from app.core.openai.exceptions import ClientPayloadError
+from app.core.openai.host_models import resolve_default_host_model
 from app.core.openai.images import (
     DEFAULT_PUBLIC_IMAGE_MODEL,
     V1ImageResponse,
@@ -278,7 +279,10 @@ from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import required_capability_metadata_values
 from app.modules.proxy.downstream_delivery import DeliveryTracedStreamingResponse
 from app.modules.proxy.helpers import _openai_error_param, _parse_openai_error, _rate_limit_details
-from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
+from app.modules.proxy.http_bridge_forwarding import (
+    HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER,
+    parse_forwarded_request,
+)
 from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_MODEL_STATE,
     IMAGE_ROUTE_STARTED_AT_STATE,
@@ -703,14 +707,6 @@ class _CapacityStartupReadyEvent(asyncio.Event):
 
 
 _OPPORTUNISTIC_RETRY_AFTER_SECONDS = 60
-
-# Internal Responses host model used to invoke the built-in
-# ``image_generation`` tool on the /v1/images/* routes. It is never echoed
-# to clients (only the requested ``gpt-image-*`` value appears in public
-# responses) and is fixed (issue #1340 / PRINCIPLES.md P2): it tracks the
-# registry bootstrap catalog's stable ``gpt-5.5`` slug and changes only in
-# lockstep with catalog maintenance.
-_IMAGES_HOST_MODEL = "gpt-5.5"
 
 # OpenAI error ``type`` -> HTTP status for the /v1/images/* non-streaming
 # error path. The /v1/responses path has its own ``_status_for_error``
@@ -3383,7 +3379,7 @@ async def _proxy_images_generation_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = _IMAGES_HOST_MODEL
+    host_model = resolve_default_host_model()
 
     try:
         validate_model_access(api_key, effective_model)
@@ -3688,7 +3684,7 @@ async def _proxy_images_edit_request(
 
     public_model = payload.model
     assert public_model is not None
-    host_model = _IMAGES_HOST_MODEL
+    host_model = resolve_default_host_model()
 
     try:
         validate_model_access(api_key, effective_model)
@@ -6820,6 +6816,11 @@ async def _stream_responses(
             and isinstance(startup_error, ProxyResponseError)
             and startup_error_code
             in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
+            # A refusal the proxy raised itself before any upstream frame left
+            # the process is not a transport failure, so it keeps the ordinary
+            # error response instead of being replayed into the committed body
+            # as a terminated stream (issue #2364).
+            and not startup_error.local_pre_dispatch_refusal
         )
         if native_transport_startup_failure:
             assert isinstance(startup_error, ProxyResponseError)
@@ -6842,7 +6843,10 @@ async def _stream_responses(
             return _stream_startup_error_response(
                 request,
                 startup_error,
-                headers=rate_limit_headers,
+                headers={
+                    **rate_limit_headers,
+                    **_owner_forward_local_refusal_headers(startup_error, forwarded_request=forwarded_request),
+                },
             )
     stream = _normalize_public_responses_stream(
         _stream_response_error_events(
@@ -6901,6 +6905,29 @@ async def _stream_responses(
 
 def _strip_internal_bridge_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if not key.lower().startswith("x-codex-bridge-")}
+
+
+def _owner_forward_local_refusal_headers(
+    error: ProxyResponseError | OpenAIErrorEnvelopeModel,
+    *,
+    forwarded_request: bool,
+) -> dict[str, str]:
+    """Mark an owner instance's error response as a local pre-dispatch refusal.
+
+    The origin instance rebuilds the error from the status and the body, and
+    the body cannot express the difference between a refusal the owner raised
+    before any upstream frame was sent and a transport failure it observed —
+    both are `stream_incomplete`. Without this marker the origin's own native
+    Codex transport-failure lifecycle aborts the committed body, which is
+    issue #2364 one hop further out. Only forwarded requests carry it: the
+    header belongs to the internal bridge contract, not to the public API.
+    """
+
+    if not forwarded_request or not isinstance(error, ProxyResponseError):
+        return {}
+    if not error.local_pre_dispatch_refusal:
+        return {}
+    return {HTTP_BRIDGE_LOCAL_PRE_DISPATCH_REFUSAL_HEADER: "1"}
 
 
 async def _http_bridge_active_for_request(
@@ -8398,13 +8425,23 @@ async def _stream_response_error_events(
             yield line
     except ProxyResponseError as exc:
         error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
+        # A refusal the proxy raised before any upstream frame was sent shares
+        # its public code with the upstream transport failures below, but it is
+        # not one: it keeps the terminal event so a native Codex client is not
+        # left with a committed body that ends without one (issue #2364).
+        local_refusal = exc.local_pre_dispatch_refusal
         await release_owned_reservation()
-        if preserve_native_failure_lifecycle and error_code in {
-            "stream_incomplete",
-            "stream_idle_timeout",
-            "upstream_request_timeout",
-            "upstream_unavailable",
-        }:
+        if (
+            preserve_native_failure_lifecycle
+            and not local_refusal
+            and error_code
+            in {
+                "stream_incomplete",
+                "stream_idle_timeout",
+                "upstream_request_timeout",
+                "upstream_unavailable",
+            }
+        ):
             raise
         response_id = None
         if isinstance(exc.payload, dict):
@@ -8432,12 +8469,15 @@ async def _stream_response_error_events(
             response_id=response_id,
             error_param=error.param_state if error else None,
         )
-        if error_code in {
+        if not local_refusal and error_code in {
             "stream_incomplete",
             "stream_idle_timeout",
             "upstream_request_timeout",
             "upstream_unavailable",
         }:
+            # Marking a local refusal as a synthetic transport failure would
+            # only move the abort one layer out: the native normalizer converts
+            # a marked terminal straight back into a terminated stream.
             failed_event = synthetic_transport_failure_event(failed_event)
         yield retry_hint + format_sse_event(failed_event)
 
