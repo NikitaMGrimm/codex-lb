@@ -254,6 +254,35 @@ def test_standalone_weekly_override_does_not_limit_other_durations(window_minute
     )
 
 
+@pytest.mark.parametrize("restricted_window", ["primary", "secondary"])
+@pytest.mark.parametrize("unrestricted_data", ["placeholder", "zero-duration", "stale"])
+@pytest.mark.parametrize(
+    "used, expected",
+    [
+        (5, AccountUsageLimitState.AVAILABLE),
+        (90, AccountUsageLimitState.REACHED),
+    ],
+)
+def test_override_ignores_unrestricted_window_data(restricted_window, unrestricted_data, used, expected):
+    weekly = restricted_window == "secondary"
+    unrestricted_row = (
+        _row(None, window_minutes=300 if weekly else 10080, recorded_at=NOW - timedelta(minutes=10))
+        if unrestricted_data == "stale"
+        else _row(0, window_minutes=0 if unrestricted_data == "zero-duration" else None, reset_delta=None)
+    )
+    restricted_row = _row(used, window_minutes=10080 if weekly else 300)
+    assert (
+        _evaluate(
+            limit_percent=None,
+            limit_weekly_percent=90 if weekly else None,
+            limit_5h_percent=None if weekly else 90,
+            primary=unrestricted_row if weekly else restricted_row,
+            secondary=restricted_row if weekly else unrestricted_row,
+        )
+        is expected
+    )
+
+
 def test_weekly_override_follows_weekly_only_primary_normalization():
     assert (
         _evaluate(
@@ -276,12 +305,15 @@ def test_override_preserves_fail_closed_freshness():
     )
 
 
-def test_standalone_override_cannot_treat_unknown_window_placeholder_as_unrestricted():
+@pytest.mark.parametrize("plan_type, window", [("plus", "primary"), ("free", "monthly")])
+def test_standalone_override_cannot_treat_unknown_window_placeholder_as_unrestricted(plan_type, window):
     assert (
         _evaluate(
             limit_percent=None,
             limit_weekly_percent=90,
-            primary=_row(0, window_minutes=None, reset_delta=None),
+            plan_type=plan_type,
+            primary=_row(0, window_minutes=None, reset_delta=None) if window == "primary" else None,
+            monthly=_row(0, window_minutes=None, reset_delta=None) if window == "monthly" else None,
         )
         is AccountUsageLimitState.DATA_UNAVAILABLE
     )

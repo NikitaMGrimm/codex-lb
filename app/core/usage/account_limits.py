@@ -65,8 +65,6 @@ def evaluate_standard_usage_limit(
                     row.window_minutes == duration and not _window_elapsed(row, current_time) for row in relevant_rows
                 ):
                     return AccountUsageLimitState.DATA_UNAVAILABLE
-    if any(usage_core.is_no_data_placeholder(row) and not _window_elapsed(row, current_time) for row in relevant_rows):
-        return AccountUsageLimitState.DATA_UNAVAILABLE
     limited_rows = [
         (
             row,
@@ -81,7 +79,7 @@ def evaluate_standard_usage_limit(
         for row in relevant_rows
     ]
     limited_rows = [(row, cap) for row, cap in limited_rows if cap is not None]
-    if relevant_rows and not limited_rows:
+    if not limited_rows and any(not usage_core.is_no_data_placeholder(row) for row in relevant_rows):
         return AccountUsageLimitState.AVAILABLE
     current_rows = [(row, cap) for row, cap in limited_rows if not _window_elapsed(row, current_time)]
     if not current_rows:

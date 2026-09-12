@@ -217,6 +217,8 @@ If the final policy read fails, the new frame MUST fail closed with `account_usa
 
 An enabled maximum-usage policy MUST require current standard quota data. Elapsed window rows MUST NOT count as exhaustion evidence, but if no current relevant standard observation remains, or a relevant observation is stale or lacks a used percentage, the account MUST be excluded with policy state `data_unavailable`. When all otherwise eligible candidates are excluded by `reached` or `data_unavailable` usage-limit state, selection MUST return stable error code `account_usage_limit_reached` and MUST NOT report the accounts as upstream rate-limited.
 
+Only windows with an effective configured threshold MUST require a current measurement; placeholders and stale readings for unrestricted windows MUST NOT block a policy whose restricted windows are current. An unknown-duration placeholder alone MUST NOT establish an unrestricted account shape. A successful refresh with no standard quota windows MUST supersede older observations in all applicable standard slots, including a weekly window stored in the primary slot.
+
 #### Scenario: Missing observations preserve the account quota
 
 - **GIVEN** an account has an enabled maximum usage policy

@@ -18,6 +18,7 @@ from app.core.clients import usage as usage_client_module
 from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.usage.refresh_scheduler import _select_long_window_entries
 from app.core.utils.shared_future import _WAITERS_ATTR, wait_on_shared_future
@@ -26,6 +27,7 @@ from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.usage import updater as usage_updater_module
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.mappers import evaluate_account_usage_limit
 from app.modules.usage.repository import UsageWindowWrite
 from app.modules.usage.updater import UsageUpdater
 
@@ -1087,7 +1089,7 @@ async def test_enable_during_refresh_persists_authoritative_observation_and_rein
     assert result.usage_written is True
     assert invalidations == ["invalidated", "invalidated"]
     written = usage_repo.snapshot_calls[-1].windows
-    assert len(written) == 1
+    assert len(written) == (2 if observation == "absent-window" else 1)
     assert written[0].window == "primary"
     if observation == "measured":
         assert written[0].used_percent == pytest.approx(80.0)
@@ -3677,7 +3679,7 @@ async def test_forced_usage_refresh_syncs_free_to_plus_upgrade_without_workspace
     assert usage_written is False
     assert acc.plan_type == "plus"
     assert accounts_repo.metadata_updates[0]["plan_type"] == "plus"
-    assert len(usage_repo.entries) == 1
+    assert len(usage_repo.entries) == 2
     assert usage_repo.entries[0].window == "primary"
     assert usage_repo.entries[0].used_percent == 0.0
 
@@ -3715,7 +3717,8 @@ async def test_usage_updater_computes_reset_at_from_reset_after_seconds(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_usage_updater_persists_unavailable_placeholder_when_rate_limit_missing(monkeypatch) -> None:
+@pytest.mark.parametrize("plan_type", ["plus", "free"])
+async def test_usage_updater_persists_unavailable_placeholder_when_rate_limit_missing(monkeypatch, plan_type) -> None:
 
     async def stub_fetch_usage(**_: Any) -> UsagePayload:
         return UsagePayload.model_validate({})
@@ -3726,12 +3729,22 @@ async def test_usage_updater_persists_unavailable_placeholder_when_rate_limit_mi
     updater = UsageUpdater(usage_repo, accounts_repo=None)
     acc = _make_account("acc_no_rate", "workspace_no_rate", email="no-rate@example.com")
 
-    refreshed = await updater.refresh_accounts([acc], latest_usage={})
+    acc.plan_type = plan_type
+    acc.usage_limit_enabled = True
+    acc.usage_limit_weekly_percent = 90
+    for window, minutes in [("primary", 10080 if plan_type == "free" else 300), ("secondary", 10080)]:
+        await usage_repo.add_entry(acc.id, 5, window=window, window_minutes=minutes, reset_at=int(time.time()) + 3600)
+    refreshed = await updater._refresh_account(acc, usage_account_id=acc.chatgpt_account_id)
 
-    assert refreshed is True
-    assert len(usage_repo.entries) == 1
-    assert usage_repo.entries[0].window == "primary"
-    assert usage_repo.entries[0].used_percent == 0.0
+    assert refreshed.usage_written is True
+    state = evaluate_account_usage_limit(
+        acc,
+        primary=await usage_repo.latest_entry_for_account(acc.id, window="primary"),
+        secondary=await usage_repo.latest_entry_for_account(acc.id, window="secondary"),
+        monthly=await usage_repo.latest_entry_for_account(acc.id, window="monthly"),
+        refresh_interval_seconds=60,
+    )
+    assert state is AccountUsageLimitState.DATA_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -3833,11 +3846,11 @@ async def test_usage_updater_refresh_accounts_returns_true_when_partial_write(mo
     refreshed = await updater.refresh_accounts([acc_skip, acc_write], latest_usage={})
 
     assert refreshed is True
-    assert len(usage_repo.entries) == 2
+    assert len(usage_repo.entries) == 3
     assert usage_repo.entries[0].account_id == acc_skip.id
     assert usage_repo.entries[0].used_percent == 0.0
     assert usage_repo.entries[0].window == "primary"
-    assert usage_repo.entries[1].account_id == acc_write.id
+    assert usage_repo.entries[-1].account_id == acc_write.id
 
 
 @pytest.mark.asyncio
@@ -4173,7 +4186,7 @@ async def test_additional_rate_limits_sync_even_when_main_rate_limit_missing(mon
     # Additional-only accounts persist an unavailable standard placeholder and
     # mark themselves as fresh to prevent tight re-polling (R6-F1).
     assert refreshed is True
-    assert len(usage_repo.entries) == 1
+    assert len(usage_repo.entries) == 2
     assert usage_repo.entries[0].window == "primary"
     assert usage_repo.entries[0].used_percent == 0.0
     assert len(additional_repo.entries) == 1

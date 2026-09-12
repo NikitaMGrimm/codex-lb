@@ -742,8 +742,8 @@ class UsageUpdater:
         snapshot_windows: list[UsageWindowWrite] = []
 
         if standard_data_unavailable:
-            snapshot_windows.append(
-                _unavailable_standard_window_write(
+            snapshot_windows.extend(
+                _unavailable_standard_window_writes(
                     account,
                     credits_has=credits_has,
                     credits_unlimited=credits_unlimited,
@@ -1231,24 +1231,26 @@ def _standard_usage_window_write(
     )
 
 
-def _unavailable_standard_window_write(
+def _unavailable_standard_window_writes(
     account: Account,
     *,
     credits_has: bool | None,
     credits_unlimited: bool | None,
     credits_balance: float | None,
-) -> UsageWindowWrite:
-    # One fresh placeholder is enough to supersede older measured rows and
-    # make the canonical evaluator fail closed. Monthly-only plans must use
-    # their relevant slot; all other plans use the primary slot.
+) -> list[UsageWindowWrite]:
+    # An entirely unavailable snapshot must also replace old weekly data,
+    # including weekly-only observations persisted in the primary slot.
     window = "monthly" if usage_core.capacity_for_plan(account.plan_type, "monthly") is not None else "primary"
-    return UsageWindowWrite(
-        window=window,
-        used_percent=0.0,
-        credits_has=credits_has,
-        credits_unlimited=credits_unlimited,
-        credits_balance=credits_balance,
-    )
+    return [
+        UsageWindowWrite(
+            window=window,
+            used_percent=0.0,
+            credits_has=credits_has,
+            credits_unlimited=credits_unlimited,
+            credits_balance=credits_balance,
+        ),
+        *(UsageWindowWrite(window=slot, used_percent=0.0) for slot in ("primary", "secondary") if slot != window),
+    ]
 
 
 def _window_has_available_quota(window: UsageWindow) -> bool:

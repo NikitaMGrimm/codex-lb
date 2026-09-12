@@ -1828,7 +1828,12 @@ async def test_accounts_list_stale_rate_limited_status_recovers_after_background
 
 
 @pytest.mark.asyncio
-async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(async_client, db_setup):
+@pytest.mark.parametrize(
+    ("restricted_window", "override_field"), [("primary", "percent5H"), ("secondary", "percentWeekly")]
+)
+async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(
+    async_client, db_setup, restricted_window, override_field
+):
     from app.modules.usage.authorization import load_owner_authorization
 
     account = _make_account("combined-policy", "combined@example.test")
@@ -1882,7 +1887,7 @@ async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(async_c
     )
     assert removed.status_code == 200
     assert removed.json()["percent5H"] is None
-    standalone = await async_client.put(path, json={"enabled": True, "percentWeekly": 90})
+    standalone = await async_client.put(path, json={"enabled": True, override_field: 90})
     assert standalone.status_code == 200
     assert standalone.json()["percent"] is None
     async with SessionLocal() as session:
@@ -1892,7 +1897,22 @@ async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(async_c
 
     async with SessionLocal() as session:
         await session.execute(
-            delete(UsageHistory).where(UsageHistory.account_id == account.id, UsageHistory.window == "secondary")
+            update(UsageHistory)
+            .where(UsageHistory.account_id == account.id, UsageHistory.window != restricted_window)
+            .values(used_percent=0, window_minutes=None, reset_at=None)
+        )
+        await session.commit()
+        assert (
+            await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
+        ).allowed
+    summary = next(
+        item for item in (await async_client.get("/api/accounts")).json()["accounts"] if item["accountId"] == account.id
+    )
+    assert summary["usageLimitState"] == "available"
+
+    async with SessionLocal() as session:
+        await session.execute(
+            delete(UsageHistory).where(UsageHistory.account_id == account.id, UsageHistory.window == restricted_window)
         )
         await session.commit()
         assert not (
