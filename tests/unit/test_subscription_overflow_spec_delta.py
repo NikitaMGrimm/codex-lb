@@ -51,6 +51,10 @@ _BACKTICKED = re.compile(r"`([^`\n]+)`")
 # Every value of the closed ``outcome`` enum has one of these shapes; the
 # observability delta may not quote any such token that the enum lacks.
 _OUTCOME_SHAPE = re.compile(r"^(dispatched|bounced|declined|pinned|pin_commit|decision)_[a-z_]+$")
+# The canary drill table itself -- rows, clauses and the rehearsals that cover
+# them -- is guarded by ``tests/unit/test_overflow_drill_coverage.py``, which
+# owns the only parser for it. Here it is only the row labels that matter, in
+# ``test_routing_doc_states_shipped_status_canary_and_client_floor``.
 
 # ``route`` labels and dispatch kinds are ordinary words, so they have no shape
 # the outcome regex above could match on. The delta enumerates them in prose
@@ -264,7 +268,7 @@ def test_tasks_mark_the_routing_extension_done_and_list_the_wiring_packages() ->
     text = _read(_TASKS)
 
     assert "- [x] 3.1 " in text
-    for task in ("3.22", "3.23", "3.24", "3.25", "3.26", "3.27", "3.28"):
+    for task in ("3.22", "3.23", "3.24", "3.25", "3.26", "3.27", "3.28", "3.36"):
         assert f" {task} " in text, task
 
 
@@ -281,6 +285,61 @@ def test_routing_doc_states_shipped_status_canary_and_client_floor() -> None:
     assert "no per-replica flag" in docs
     assert overflow.OVERFLOW_TOTAL_METRIC in docs
     assert overflow.BREAKER_STATE_METRIC in docs
+
+
+def test_the_drill_entry_point_is_documented_and_exists() -> None:
+    docs = _read(_ROUTING_DOC)
+    makefile = _read(REPO_ROOT / "Makefile")
+    pyproject = _read(REPO_ROOT / "pyproject.toml")
+
+    assert "make test-overflow-drills" in docs
+    assert "-m overflow_drill" in docs
+    assert "test-overflow-drills:" in makefile
+    assert "-m overflow_drill tests/integration" in makefile
+    # An unregistered marker selects nothing under ``--strict-markers`` and
+    # warns otherwise, so the runbook's one command must not depend on it.
+    assert '"overflow_drill: ' in pyproject
+
+
+def test_the_stall_drill_no_longer_promises_a_timeout_for_a_dropped_connection() -> None:
+    """A dropped SYN answers ``502 model_source_unreachable``; only a connected-but-silent source times out.
+
+    Both error codes appearing in a document proves nothing -- they would appear
+    just as well with the two shapes swapped, which is the mistake this test
+    exists to catch. So each mention of the shape is read together with the code
+    that follows it, up to the next one.
+    """
+
+    shapes = {
+        "drops the SYN": "model_source_unreachable",
+        "drops the connection attempt": "model_source_unreachable",
+        "accepts TCP and then stays silent": "model_source_timeout",
+        "accepts the connection and then sends nothing": "model_source_timeout",
+    }
+    codes = re.compile(r"model_source_(?:unreachable|timeout)")
+
+    for path in (_ROUTING_DOC, _ROUTING_DELTA):
+        text = _read(path)
+        mentions = sorted(
+            (match.start(), match.end(), shape, expected)
+            for shape, expected in shapes.items()
+            for match in re.finditer(re.escape(shape), text)
+        )
+        assert mentions, path
+
+        answered: set[str] = set()
+        for index, (_start, end, shape, expected) in enumerate(mentions):
+            # Read only as far as the next shape: a code belonging to the shape
+            # after this one must not be able to answer for this one.
+            limit = mentions[index + 1][0] if index + 1 < len(mentions) else len(text)
+            answer = codes.search(text, end, limit)
+            assert answer is not None, (path, shape)
+            assert answer.group() == expected, (path, shape, answer.group())
+            answered.add(expected)
+
+        # Both shapes, not one of them twice: each document has to state the
+        # pair, which is what makes a swap visible.
+        assert answered == {"model_source_unreachable", "model_source_timeout"}, (path, sorted(answered))
 
 
 def test_dashboard_staged_notice_is_gone_from_the_component_and_every_locale() -> None:
