@@ -1,7 +1,7 @@
 """add per-account usage limits
 
 Revision ID: 20260728_010000_add_account_usage_limits
-Revises: 20260912_000000_merge_thread_cache_and_bridge_retirement_heads
+Revises: 20260912_010000_drop_legacy_dashboard_credentials
 Create Date: 2026-07-28
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260728_010000_add_account_usage_limits"
-down_revision = "20260912_000000_merge_thread_cache_and_bridge_retirement_heads"
+down_revision = "20260912_010000_drop_legacy_dashboard_credentials"
 branch_labels = None
 depends_on = None
 
