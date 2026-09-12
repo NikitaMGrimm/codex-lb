@@ -676,10 +676,12 @@ async def test_public_exhaustion_envelope_wins_when_account_also_reaches_local_c
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lease_kind", [None, "stream", "response_create"])
 @pytest.mark.parametrize("observe_only", [False, True])
 async def test_public_opportunistic_selection_preserves_local_usage_limit_code(
     selection_cache: AccountSelectionCache,
     observe_only: bool,
+    lease_kind,
 ) -> None:
     limited = _account("contract-opportunistic-local-limit")
     limited.usage_limit_enabled = True
@@ -690,8 +692,12 @@ async def test_public_opportunistic_selection_preserves_local_usage_limit_code(
         primary={limited.id: _usage_row(60, limited.id, window="primary", used_percent=10.0)},
     )
 
+    balancer._runtime[limited.id] = load_balancer_module.RuntimeState(inflight_streams=1, inflight_response_creates=1)
+
     selection = await balancer.check_opportunistic_admission(
         model=None,
+        lease_kind=lease_kind,
+        concurrency_caps=_CONCURRENCY_CAPS,
         observe_only=observe_only,
         account_ids=None,
         prefer_earlier_reset_accounts=False,

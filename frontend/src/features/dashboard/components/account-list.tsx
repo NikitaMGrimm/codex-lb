@@ -261,7 +261,7 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
         <div key={quota.label} className="grid grid-cols-[2.75rem_minmax(3rem,auto)_minmax(2.75rem,0.45fr)_minmax(0,1fr)] items-center gap-2">
           <span className="text-muted-foreground">{localizedQuotaLabel(quota.label, t)}</span>
           <span className="font-medium tabular-nums text-foreground">{quota.percentLabel}</span>
-          <QuotaMeter percent={quota.percent} cap={quota.label === "5h" ? account.effectiveLimitPrimary : quota.label === "Weekly" ? account.effectiveLimitSecondary : account.effectiveLimitMonthly} />
+          <QuotaMeter label={localizedQuotaLabel(quota.label, t)} percent={quota.percent} cap={quota.label === "5h" ? account.effectiveLimitPrimary : quota.label === "Weekly" ? account.effectiveLimitSecondary : account.effectiveLimitMonthly} />
           <span className="inline-flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
             <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
             <span className="truncate">{quota.resetLabel}</span>
@@ -272,8 +272,8 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
   );
 }
 
-function QuotaMeter({ percent, cap }: { percent: number | null; cap?: number | null }) {
-  if (cap != null) return <UsageQuotaBar percent={percent} cap={cap} />;
+function QuotaMeter({ percent, cap, label }: { percent: number | null; cap?: number | null; label: string }) {
+  if (cap != null) return <UsageQuotaBar percent={percent} cap={cap} aria-label={label} />;
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   return (
     <div

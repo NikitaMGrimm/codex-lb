@@ -90,7 +90,7 @@ Dashboard policy reconciliation MUST prevent an account or dashboard read starte
 
 ### Requirement: Accounts have a reversible maximum-usage policy
 
-Each account SHALL support an optional maximum standard-quota used percentage greater than 0 and at most 100, plus an enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling a configured policy SHALL retain its percentage for later re-enablement, while removing the policy SHALL clear the percentage and disable it. For a disabled update, the API MUST retain the latest stored percentage when the percentage field is omitted, clear it when the field is explicitly `null`, and replace it when a numeric value is supplied. The API MUST reject an enabled policy without an explicitly supplied percentage, MUST reject an enabled policy with a `null` percentage, and MUST reject percentages outside the supported range.
+Each account SHALL support an optional default maximum standard-quota used percentage and optional 5-hour and weekly overrides, each greater than 0 and at most 100, plus one enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling SHALL retain saved thresholds for later re-enablement; removal SHALL clear all thresholds and disable the policy. For each threshold, an omitted field MUST retain its latest stored value, explicit null MUST clear it, and a numeric value MUST replace it. Enabling MUST explicitly supply at least one non-null threshold. The API MUST reject percentages outside the supported range.
 
 #### Scenario: Operator temporarily disables a configured limit
 
@@ -368,6 +368,12 @@ An account SHALL persist an optional default percentage and optional 5-hour and 
 #### Scenario: Unequal window thresholds
 - **WHEN** the default is 80, the 5-hour override is 70, the weekly override is 90, and fresh usage is 65 and 75 respectively
 - **THEN** the account SHALL remain available.
+
+#### Scenario: Configured override has no current observation
+- **GIVEN** an enabled override for a plan-supported 5-hour or weekly window
+- **WHEN** its matching normalized observation is absent or its reset has elapsed without a new measurement
+- **THEN** admission SHALL report data unavailable even if another window is fresh or has a configured default.
+- **AND** a normalized monthly-only shape SHALL remain exempt from 5-hour and weekly overrides.
 
 #### Scenario: Standalone weekly override
 - **WHEN** only a weekly override is enabled on a monthly-only account

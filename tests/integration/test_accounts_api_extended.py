@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
@@ -1889,3 +1889,16 @@ async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(async_c
         assert (
             await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
         ).allowed
+
+    async with SessionLocal() as session:
+        await session.execute(
+            delete(UsageHistory).where(UsageHistory.account_id == account.id, UsageHistory.window == "secondary")
+        )
+        await session.commit()
+        assert not (
+            await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
+        ).allowed
+    summary = next(
+        item for item in (await async_client.get("/api/accounts")).json()["accounts"] if item["accountId"] == account.id
+    )
+    assert summary["usageLimitState"] == "data_unavailable"

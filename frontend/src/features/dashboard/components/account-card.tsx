@@ -72,7 +72,7 @@ function QuotaBar({
           {formatPercentNullable(percent, 1)}
         </span>
       </div>
-      <UsageQuotaBar percent={percent} cap={cap} />
+      <UsageQuotaBar percent={percent} cap={cap} aria-label={label} />
       <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
         <Clock className="h-3 w-3 shrink-0" />
         <span>{resetLabel}</span>

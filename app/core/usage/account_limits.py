@@ -54,6 +54,17 @@ def evaluate_standard_usage_limit(
         secondary=secondary,
         monthly=monthly,
     )
+    monthly_only = monthly is not None and relevant_rows == (monthly,)
+    if not monthly_only:
+        for override, window, duration in (
+            (limit_5h_percent, "primary", 300),
+            (limit_weekly_percent, "secondary", 10080),
+        ):
+            if override is not None and (usage_core.capacity_for_plan(plan_type, window) or 0) > 0:
+                if not any(
+                    row.window_minutes == duration and not _window_elapsed(row, current_time) for row in relevant_rows
+                ):
+                    return AccountUsageLimitState.DATA_UNAVAILABLE
     if any(usage_core.is_no_data_placeholder(row) and not _window_elapsed(row, current_time) for row in relevant_rows):
         return AccountUsageLimitState.DATA_UNAVAILABLE
     limited_rows = [

@@ -248,6 +248,7 @@ def test_standalone_weekly_override_does_not_limit_other_durations(window_minute
             limit_percent=None,
             limit_weekly_percent=20,
             primary=_row(80, window_minutes=window_minutes),
+            secondary=_row(5, window_minutes=10080),
         )
         is AccountUsageLimitState.AVAILABLE
     )
@@ -283,4 +284,38 @@ def test_standalone_override_cannot_treat_unknown_window_placeholder_as_unrestri
             primary=_row(0, window_minutes=None, reset_delta=None),
         )
         is AccountUsageLimitState.DATA_UNAVAILABLE
+    )
+
+
+@pytest.mark.parametrize("window", ["primary", "secondary"])
+@pytest.mark.parametrize("sample", ["missing", "elapsed"])
+@pytest.mark.parametrize("default", [None, 80])
+def test_configured_window_override_requires_current_sample(window, sample, default):
+    limited = (
+        None
+        if sample == "missing"
+        else _row(5, window_minutes=300 if window == "primary" else 10080, reset_delta=timedelta(seconds=-1))
+    )
+    assert (
+        _evaluate(
+            limit_percent=default,
+            limit_5h_percent=70 if window == "primary" else None,
+            limit_weekly_percent=90 if window == "secondary" else None,
+            primary=limited if window == "primary" else _row(5),
+            secondary=limited if window == "secondary" else _row(5, window_minutes=10080),
+        )
+        is AccountUsageLimitState.DATA_UNAVAILABLE
+    )
+
+
+def test_monthly_only_shape_does_not_require_window_override_samples():
+    assert (
+        _evaluate(
+            plan_type="free",
+            limit_percent=None,
+            limit_5h_percent=70,
+            limit_weekly_percent=90,
+            monthly=_row(80, window_minutes=43200),
+        )
+        is AccountUsageLimitState.AVAILABLE
     )

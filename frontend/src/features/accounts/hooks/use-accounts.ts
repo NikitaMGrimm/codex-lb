@@ -293,7 +293,7 @@ export function useAccountMutations() {
         queryClient.cancelQueries({ queryKey: ["dashboard", "overview"] }),
       ]);
       reconcileUsageLimitCaches(queryClient, data);
-      if (data.percent === null) {
+      if (data.percent === null && data.percent5H == null && data.percentWeekly == null) {
         toast.success(t("accounts.toasts.usageLimitRemoved"));
       } else {
         toast.success(

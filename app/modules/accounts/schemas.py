@@ -215,7 +215,7 @@ class AccountUsageLimitUpdateRequest(DashboardModel):
     @model_validator(mode="after")
     def validate_enabled_limit_has_percent(self) -> AccountUsageLimitUpdateRequest:
         if self.enabled and all(value is None for value in (self.percent, self.percent_5h, self.percent_weekly)):
-            raise ValueError("percent is required when the usage limit is enabled")
+            raise ValueError("at least one percentage is required when the usage limit is enabled")
         return self
 
 

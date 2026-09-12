@@ -73,7 +73,7 @@ function QuotaRow({
           {formatPercentNullable(percent, 1)}
         </span>
       </div>
-      <UsageQuotaBar percent={percent} cap={cap} />
+      <UsageQuotaBar percent={percent} cap={cap} aria-label={label} />
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <Clock className="h-3 w-3 shrink-0" />
         <span>{t("accounts.usage.resetAt", { label: formatQuotaResetLabel(resetAt ?? null) })}</span>

@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import { MiniQuotaBar } from "@/components/mini-quota-bar";
 import { UsageQuotaBar } from "@/components/usage-quota-bar";
 
 describe("UsageQuotaBar", () => {
@@ -11,4 +12,11 @@ describe("UsageQuotaBar", () => {
       );
     },
   );
+});
+
+it.each([46, null])("keeps both capped mini-bar windows identifiable at %s remaining", (percent) => {
+  render(<><MiniQuotaBar percent={percent} cap={80} testId="five" aria-label="5-hour quota" />
+    <MiniQuotaBar percent={percent} cap={80} testId="weekly" aria-label="Weekly quota" /></>);
+  expect(screen.getByRole("img", { name: /^5-hour quota;/ })).toBeInTheDocument();
+  expect(screen.getByRole("img", { name: /^Weekly quota;/ })).toBeInTheDocument();
 });

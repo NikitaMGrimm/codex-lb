@@ -10,7 +10,7 @@ type MiniQuotaBarProps = {
 };
 
 export function MiniQuotaBar({ percent, cap, testId, "aria-label": ariaLabel }: MiniQuotaBarProps) {
-  if (cap != null) return <UsageQuotaBar percent={percent} cap={cap} />;
+  if (cap != null) return <UsageQuotaBar percent={percent} cap={cap} aria-label={ariaLabel} />;
   if (percent === null) {
     return <div aria-hidden="true" data-testid={testId} className="h-1 flex-1 overflow-hidden rounded-full bg-muted" />;
   }
