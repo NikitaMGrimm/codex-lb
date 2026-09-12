@@ -4852,11 +4852,14 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
         (None, "account_usage_limit_authorization_failed"),
     ],
 )
+@pytest.mark.parametrize(("block_phase", "create_limit"), [("before", 1), ("before", 4), ("during", 4)])
 def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_request(
     app_instance,
     monkeypatch,
     second_check,
     expected_error_code,
+    create_limit,
+    block_phase,
 ) -> None:
     release_first_response = threading.Event()
 
@@ -4893,14 +4896,29 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
 
     upstream = _OverlappingUpstreamWebSocket()
     account = SimpleNamespace(id="acct_ws_usage_limit_read_failure")
-    authorization_checks = 0
+    policy_blocked = False
     failure_logs: list[dict[str, object]] = []
     released_create_leases: list[object] = []
     original_release_create_lease = proxy_module.ProxyService._release_request_state_account_response_create_lease
+    original_acquire_create_lease = proxy_module.ProxyService._acquire_account_response_create_lease_or_overload
+
+    async def acquire_create_lease(self, **kwargs):
+        nonlocal policy_blocked
+        if create_limit == 1 and upstream.sent_text:
+            raise proxy_module.ProxyResponseError(
+                503,
+                proxy_module.openai_error(
+                    "account_response_create_cap", "Account response-create cap reached", error_type="server_error"
+                ),
+            )
+        lease = await original_acquire_create_lease(self, **kwargs)
+        if upstream.sent_text and block_phase == "during":
+            policy_blocked = True
+        return lease
 
     class _FakeSettingsCache:
         async def get(self):
-            return _websocket_settings()
+            return _websocket_settings(proxy_account_response_create_limit=create_limit)
 
     async def allow_firewall(_websocket):
         return None
@@ -4913,11 +4931,9 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
         return account, upstream
 
     async def authorize_account_fresh(self, account_id):
-        nonlocal authorization_checks
         del self
         assert account_id == account.id
-        authorization_checks += 1
-        if authorization_checks == 2:
+        if policy_blocked:
             if second_check is None:
                 return OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
             return OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, second_check)
@@ -4933,6 +4949,9 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
         if lease is not None:
             released_create_leases.append(lease)
 
+    monkeypatch.setattr(
+        proxy_module.ProxyService, "_acquire_account_response_create_lease_or_overload", acquire_create_lease
+    )
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
@@ -4961,19 +4980,23 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
                 websocket.send_text(json.dumps(request))
                 first_created = json.loads(websocket.receive_text())
 
+                released_before_rejection = len(released_create_leases)
+                policy_blocked = block_phase == "before"
                 websocket.send_text(json.dumps(request))
                 rejected = json.loads(websocket.receive_text())
 
-                assert first_created["type"] == "response.created"
-                assert rejected["type"] == "response.failed"
-                assert rejected["response"]["error"]["code"] == expected_error_code
-                assert len(upstream.sent_text) == 1
-                assert upstream.closed is False
-                assert failure_logs[-1]["error_code"] == expected_error_code
-                assert failure_logs[-1]["account_id"] == account.id
-                assert len(released_create_leases) == 1
+                try:
+                    assert first_created["type"] == "response.created"
+                    assert rejected["type"] == "response.failed"
+                    assert rejected["response"]["error"]["code"] == expected_error_code
+                    assert len(upstream.sent_text) == 1
+                    assert upstream.closed is False
+                    assert failure_logs[-1]["error_code"] == expected_error_code
+                    assert failure_logs[-1]["account_id"] == account.id
+                    assert len(released_create_leases) == released_before_rejection + (block_phase == "during")
 
-                release_first_response.set()
+                finally:
+                    release_first_response.set()
                 first_completed = json.loads(websocket.receive_text())
                 assert first_completed["type"] == "response.completed"
                 assert first_completed["response"]["id"] == "resp_ws_first"

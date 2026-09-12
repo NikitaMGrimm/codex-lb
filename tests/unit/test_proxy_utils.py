@@ -4326,7 +4326,8 @@ async def test_opportunistic_admission_empty_scope_when_single_account_is_outsid
 
 
 @pytest.mark.asyncio
-async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
+@pytest.mark.parametrize("policy_blocked_peer", [False, True])
+async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch, policy_blocked_peer):
     settings = _make_proxy_settings()
     settings.proxy_account_stream_limit = 1
     settings.proxy_account_response_create_limit = 64
@@ -4334,6 +4335,12 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_opportunistic_stream_cap")
+    accounts = [account]
+    if policy_blocked_peer:
+        limited = _make_account("acc_opportunistic_policy_blocked")
+        limited.usage_limit_enabled = True
+        limited.usage_limit_percent = 10.0
+        accounts.append(limited)
     now = utcnow()
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
     monkeypatch.setattr(
@@ -4345,7 +4352,7 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
         "_load_selection_inputs",
         AsyncMock(
             return_value=SelectionInputs(
-                accounts=[account],
+                accounts=accounts,
                 latest_primary={
                     account.id: UsageHistory(
                         id=1,

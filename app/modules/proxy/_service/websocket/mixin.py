@@ -1363,6 +1363,30 @@ async def _process_upstream_websocket_transport_end(
     return True
 
 
+async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, account_id: str) -> None:
+    owner_authorization = await proxy._load_balancer.authorize_account_fresh(account_id)
+    if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+        raise ProxyResponseError(
+            503,
+            openai_error(
+                "account_usage_limit_authorization_failed",
+                "Unable to verify account usage limit; retry later.",
+                error_type="server_error",
+            ),
+        )
+    if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
+        raise _http_bridge_previous_response_owner_unavailable_error()
+    if owner_authorization.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
+        status_code, error_payload = selection_failure_response(
+            AccountSelection(
+                account=None,
+                error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+                error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+            )
+        )
+        raise ProxyResponseError(status_code, error_payload)
+
+
 class _WebSocketMixin:
     async def _touch_active_websocket_thread_affinity(
         self,
@@ -2679,6 +2703,7 @@ class _WebSocketMixin:
                         and account is not None
                         and request_state.account_response_create_lease is None
                     ):
+                        await _authorize_websocket_dispatch_owner(proxy, account.id)
                         # Account-cap spillover belongs to connect selection.
                         # Once this shared socket exists, a late create-cap race
                         # rejects only this frame; switching/retiring the socket
@@ -2794,27 +2819,7 @@ class _WebSocketMixin:
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):
                             if account is None:
                                 raise _http_bridge_previous_response_owner_unavailable_error()
-                            owner_authorization = await proxy._load_balancer.authorize_account_fresh(account.id)
-                            if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
-                                raise ProxyResponseError(
-                                    503,
-                                    openai_error(
-                                        "account_usage_limit_authorization_failed",
-                                        "Unable to verify account usage limit; retry later.",
-                                        error_type="server_error",
-                                    ),
-                                )
-                            if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
-                                raise _http_bridge_previous_response_owner_unavailable_error()
-                            if owner_authorization.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
-                                status_code, error_payload = selection_failure_response(
-                                    AccountSelection(
-                                        account=None,
-                                        error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
-                                        error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
-                                    )
-                                )
-                                raise ProxyResponseError(status_code, error_payload)
+                            await _authorize_websocket_dispatch_owner(proxy, account.id)
                             if not _bind_websocket_request_dispatch_owner(
                                 request_state,
                                 account_id=account.id,

@@ -42,7 +42,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     _account_cap_error_code,
     _clone_account,
-    _filter_states_for_usage_limit_and_account_caps,
+    _filter_states_for_account_caps,
     _select_account_preferring_budget_safe,
 )
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
@@ -258,15 +258,16 @@ def _account_cap_closed(
     states: list[AccountState],
 ) -> tuple[list[AccountState], OpportunisticAdmissionOutcome | None]:
     lease_kind = request.lease_kind
-    selection_states, cap_exhausted = _filter_states_for_usage_limit_and_account_caps(
-        states,
+    policy_blocked = [state for state in states if state.usage_limit_state.blocks_account_use]
+    cap_candidates = [state for state in states if not state.usage_limit_state.blocks_account_use]
+    selection_states = _filter_states_for_account_caps(
+        cap_candidates,
         lease_kind=lease_kind,
         caps=request.concurrency_caps,
         stream_reserve_slots=request.stream_reserve_slots,
-        traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
     )
-    if not cap_exhausted:
-        return selection_states, None
+    if selection_states or not cap_candidates:
+        return [*selection_states, *policy_blocked], None
     logger.warning(
         "Account cap exhausted during opportunistic admission lease_kind=%s reason=%s candidates=%s",
         lease_kind,
