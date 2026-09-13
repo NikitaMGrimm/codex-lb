@@ -11,9 +11,11 @@ from typing import Any, cast
 
 import anyio
 
+from app.core.balancer.types import UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
+from app.core.clients.native_egress import NativeWebSocketRoutingMetadata
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     CODEX_LB_REQUIRED_CAPABILITY_HEADER,
     ImageFetchSession,
@@ -68,6 +70,7 @@ from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  #
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
+    Account,
     AccountStatus,  # noqa: F401
 )
 from app.modules.proxy._service.api_key_usage import (
@@ -81,6 +84,9 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
+)
+from app.modules.proxy._service.http_bridge.accepted_replay import (
+    _websocket_accepted_capacity_retry_error_code,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
@@ -285,7 +291,9 @@ from app.modules.proxy._service.support import (
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _affinity_may_resolve_hard_owner,
     _clear_websocket_request_error_overrides,
+    _DeferredKeyedStreamHealthPenalty,
     _event_type_from_payload,
     _websocket_request_can_replay_before_visible_output,
     _WebSocketContinuityAnchor,
@@ -331,6 +339,7 @@ from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
 from app.modules.proxy.affinity import (
+    _AffinityPolicy,
     _sticky_key_from_session_header,  # noqa: F401
 )
 from app.modules.proxy.durable_bridge_coordinator import (
@@ -348,7 +357,10 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 
 
 def _facade() -> Any:
@@ -442,16 +454,35 @@ def _is_websocket_stale_previous_response(
 def _prepare_websocket_request_state_for_visible_output_replay(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
-    downstream_response_id = None
-    if request_state.response_id is not None and not request_state.awaiting_response_created:
+    # An identity captured by an earlier replay (or staged by the terminal
+    # capacity path before ``response_id`` was cleared) outlives this call, so
+    # a bounded extra replay keeps rewriting to the id the client is reading.
+    downstream_response_id = request_state.replay_downstream_response_id
+    if (
+        downstream_response_id is None
+        and request_state.response_id is not None
+        and not request_state.awaiting_response_created
+    ):
         downstream_response_id = request_state.response_id
-    if request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text:
-        request_state.request_text = request_state.fresh_upstream_request_text
-        request_state.previous_response_id = None
-        request_state.proxy_injected_previous_response_id = False
-        request_state.fresh_upstream_request_is_retry_safe = False
-        request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
-        _refresh_websocket_request_input_fingerprint_from_text(request_state)
+    suppress_in_progress = request_state.suppress_next_in_progress_downstream or (
+        downstream_response_id is not None and request_state.response_event_count >= 2
+    )
+    fresh_request_text = request_state.fresh_upstream_request_text
+    if request_state.fresh_upstream_request_is_retry_safe and fresh_request_text:
+        # Only a proxy-injected anchor is the proxy's to release: its pin was
+        # derived from an anchor the client never asked for. A client-supplied
+        # anchor is the client's own continuation, so its fresh body keeps the
+        # owner pin and reconnects there (the capacity path re-sends such a
+        # turn to its owner; ``_websocket_auth_request_can_switch_account``
+        # treats it as account-bound).
+        _install_fresh_replay_body(
+            request_state,
+            fresh_request_text,
+            account_neutral=_websocket_request_text_is_account_neutral_fresh_replay(fresh_request_text),
+            release_owner_pin=(
+                request_state.previous_response_id is None or request_state.proxy_injected_previous_response_id
+            ),
+        )
     request_text = request_state.request_text
     if not isinstance(request_text, str):
         return None
@@ -461,6 +492,7 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.response_event_count = 0
     request_state.replay_downstream_response_id = downstream_response_id
     request_state.suppress_next_created_downstream = downstream_response_id is not None
+    request_state.suppress_next_in_progress_downstream = suppress_in_progress
     _clear_websocket_request_error_overrides(request_state)
     return request_text
 
@@ -518,18 +550,143 @@ def _install_verified_fresh_replay(
     account_neutral = _websocket_request_text_is_account_neutral_fresh_replay(fresh_request_text)
     if require_account_neutral and not account_neutral:
         return None
-    replay_required_account_id = request_state.replay_required_account_id or request_state.preferred_account_id
-    if not account_neutral and replay_required_account_id is None:
+    if not account_neutral and (request_state.replay_required_account_id or request_state.preferred_account_id) is None:
         return None
+    return _install_fresh_replay_body(request_state, fresh_request_text, account_neutral=account_neutral)
+
+
+def _install_fresh_replay_body(
+    request_state: "_WebSocketRequestState",
+    fresh_request_text: str,
+    *,
+    account_neutral: bool,
+    release_owner_pin: bool = True,
+) -> str:
+    """Swap the retained fresh body in and re-derive the owner requirement from it.
+
+    The anchored body pinned the request to the anchor's owner
+    (``replay_required_account_id`` / ``preferred_account_id``, bound at
+    dispatch and on connect). The fresh body carries no anchor: an
+    account-neutral one is free to move, a non-neutral one stays with the
+    owner that was already required or preferred. Every path that installs
+    the fresh body must reconcile the pin with it; a stale pin under a body
+    that turned neutral is what let an accepted transport-close replay exclude
+    the very account its reconnect still required.
+
+    A turn-state owner is a session pin, not a body pin. The session loop
+    re-resolves it before every reconnect and ``_connect_proxy_websocket``
+    hard-requires it (``turn_state_owner_required``) whenever the session
+    carries an owner, so the fresh body cannot release it: clearing it here
+    only hid the requirement from the exclusion decision, and the replay then
+    excluded the account its reconnect was about to require.
+
+    ``release_owner_pin=False`` keeps both pins untouched for a replay whose
+    anchor the proxy is not entitled to release (a client-supplied
+    ``previous_response_id``): the fresh body is still what goes upstream,
+    but it stays with the owner the anchored body was bound to.
+    """
+    replay_required_account_id = request_state.replay_required_account_id or request_state.preferred_account_id
+    turn_state_owner_account_id = (
+        request_state.preferred_account_id
+        if request_state.affinity_policy.codex_session_source == "turn_state"
+        else None
+    )
     request_state.request_text = fresh_request_text
     request_state.previous_response_id = None
-    request_state.preferred_account_id = None
-    request_state.replay_required_account_id = None if account_neutral else replay_required_account_id
+    if release_owner_pin:
+        request_state.preferred_account_id = turn_state_owner_account_id
+        request_state.replay_required_account_id = None if account_neutral else replay_required_account_id
     request_state.proxy_injected_previous_response_id = False
     request_state.fresh_upstream_request_is_retry_safe = False
     request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
     _refresh_websocket_request_input_fingerprint_from_text(request_state)
     return fresh_request_text
+
+
+def _websocket_accepted_replay_can_switch_account(request_state: "_WebSocketRequestState") -> bool:
+    """Return whether an accepted replay may leave the account that accepted it.
+
+    Mirrors the owner requirements ``_connect_proxy_websocket`` enforces on
+    the reconnect: a bound replay owner, a file pin, an anchored owner, or a
+    turn-state owner keeps the replay on that account, so excluding it would
+    leave the reconnect no eligible account. Evaluate this after the replay
+    body has been prepared, once the anchor is stripped and the owner pin
+    reconciled with the body that will actually be sent; the turn-state owner
+    survives that reconciliation (``_install_fresh_replay_body``) because the
+    connect requires it regardless of the body. A turn-state session without
+    a resolved owner is free to move.
+    """
+    if request_state.replay_required_account_id is not None:
+        return False
+    if request_state.preferred_account_id is not None and (
+        request_state.previous_response_id is not None
+        or request_state.affinity_policy.codex_session_source == "turn_state"
+    ):
+        return False
+    return _websocket_auth_request_can_switch_account(request_state)
+
+
+def _websocket_affinity_may_resolve_hard_owner(affinity_policy: _AffinityPolicy) -> bool:
+    """Return whether sticky selection may bind this request to one owner account.
+
+    The predicate is shared with the HTTP bridge accepted replay
+    (``_affinity_may_resolve_hard_owner``): a resolved hard ``CODEX_SESSION``
+    row -- turn-state ownership or the raw compatibility row consulted through
+    ``legacy_selection_key`` -- narrows selection to an owner the request state
+    never carries, so excluding that owner would leave every re-selection at
+    ``hard_affinity_saturated`` until the connect budget runs out.
+    """
+    return _affinity_may_resolve_hard_owner(affinity_policy)
+
+
+def _websocket_accepted_replay_may_exclude_account(request_state: "_WebSocketRequestState") -> bool:
+    """Return whether an accepted replay may exclude the account that accepted it.
+
+    The exclusion is what moves an account-neutral accepted replay to another
+    account (bridge parity). It is refused when a request-state pin requires
+    the owner (``_websocket_accepted_replay_can_switch_account``) and when the
+    request's affinity may resolve to a hard owner the state does not carry
+    (``_websocket_affinity_may_resolve_hard_owner``). In both cases the replay
+    reconnects without an exclusion, as the created-only transport-close replay
+    did before accepted replays existed: sticky selection then re-resolves the
+    owner, or moves a soft row through the health penalty the failing account
+    receives. Only accepted lifecycles decide with this predicate; the
+    pre-created owner-switch branch keeps the pin-only predicate it already
+    used.
+    """
+    if _websocket_affinity_may_resolve_hard_owner(request_state.affinity_policy):
+        return False
+    return _websocket_accepted_replay_can_switch_account(request_state)
+
+
+async def _record_or_defer_websocket_accepted_replay_health(
+    proxy: Any,
+    request_state: "_WebSocketRequestState",
+    *,
+    account: Account,
+    error_message: str | None,
+    error_code: str,
+) -> None:
+    """Penalize the account an accepted replay leaves, now or after settlement.
+
+    The accepted request keeps its API-key reservation open across the
+    re-send, and account health must not be written while a reservation is
+    unsettled (api-keys spec settlement-ordering invariant; bridge parity with
+    ``_handle_or_defer_precreated_stream_health``). A keyed request queues the
+    classified penalty on its state; ``_finalize_websocket_request_state`` and
+    ``_release_websocket_request_state_reservation`` drain it once the
+    reservation settles or is released. Unkeyed requests write immediately.
+    ``account_health_error_handled`` is deliberately not set: the staged
+    terminal is never finalized on this surface, so a later terminal belongs to
+    the replacement attempt and earns its own penalty.
+    """
+    error: UpstreamError = {"message": error_message or "Upstream error"}
+    if request_state.api_key_reservation is not None:
+        request_state.deferred_keyed_stream_health.append(
+            _DeferredKeyedStreamHealthPenalty(account=account, error=error, code=error_code)
+        )
+        return
+    await proxy._handle_stream_error(account, error, error_code)
 
 
 def _prepare_websocket_request_state_for_account_switch(
@@ -543,18 +700,116 @@ def _prepare_websocket_request_state_for_account_switch(
     return _install_verified_fresh_replay(request_state)
 
 
+def _prepare_websocket_quota_account_switch(request_state: "_WebSocketRequestState") -> str | None:
+    """Reconstruct supplied history only after a pre-acceptance quota rejection."""
+
+    def refuse(reason: str) -> None:
+        _facade().logger.info(
+            "websocket_quota_replay_refused request_id=%s reason=%s", request_state.request_id, reason
+        )
+
+    if (
+        request_state.file_required_preferred_account
+        or request_state.response_id is not None
+        or request_state.response_event_count > 0
+        or request_state.downstream_visible
+        or request_state.last_downstream_sequence_number is not None
+        or not request_state.awaiting_response_created
+        or _websocket_affinity_may_resolve_hard_owner(request_state.affinity_policy)
+    ):
+        return refuse("ownership_or_output")
+    source_text = request_state.request_text
+    if request_state.previous_response_id is not None:
+        if not (
+            request_state.proxy_injected_previous_response_id and request_state.fresh_upstream_request_is_retry_safe
+        ):
+            return refuse("client_owned_continuation")
+        source_text = request_state.fresh_upstream_request_text
+    if source_text is None:
+        return refuse("missing_replay_body")
+    try:
+        candidate = json.loads(source_text)
+    except json.JSONDecodeError:
+        return refuse("invalid_json")
+    if not isinstance(candidate, dict) or candidate.get("previous_response_id") is not None:
+        return refuse("stored_response_reference")
+    candidate.pop("type", None)
+    projected = False
+    if not responses_payload_is_account_neutral_fresh_replay(candidate):
+        input_items = candidate.get("input")
+        if not isinstance(input_items, list) or not input_items:
+            return refuse("missing_history")
+        projection = project_responses_input_for_account_neutral_fresh_replay(
+            input_items, stored_count=len(input_items)
+        )
+        if projection is None:
+            return refuse("nonportable_history")
+        candidate["input"] = projection.input_items
+        if not responses_payload_is_account_neutral_fresh_replay(candidate):
+            return refuse("nonportable_request")
+        projected = True
+        candidate["input"].append(
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Account switched after a quota rejection. Supplied conversation and tool results "
+                        "were retained; account-owned response IDs and internal reasoning were omitted. "
+                        "Continue with the current tools and workspace, without repeating completed actions.",
+                    }
+                ],
+            }
+        )
+    candidate["type"] = "response.create"
+    replay_text = json.dumps(candidate, ensure_ascii=True, separators=(",", ":"))
+    if request_state.previous_response_id is None:
+        request_state.fresh_upstream_request_responses_lite_model = request_state.responses_lite_model
+    result = _install_fresh_replay_body(request_state, replay_text, account_neutral=True)
+    _facade().logger.info(
+        "websocket_quota_replay_prepared request_id=%s projected_history=%s",
+        request_state.request_id,
+        projected,
+    )
+    return result
+
+
+def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:
+    """Drop the completed-response anchor and the state that only exists for it."""
+    continuity_state.last_completed_response_id = None
+    continuity_state.last_completed_input_count = 0
+    continuity_state.last_completed_input_prefix_fingerprint = None
+    continuity_state.last_pending_function_call_ids = []
+    continuity_state.last_pending_tool_call_types = {}
+
+
 def _websocket_continuity_anchor_for_payload(
     continuity_state: _WebSocketContinuityState | None,
     *,
     responses_payload: ResponsesRequest,
     codex_session_affinity: bool,
+    api_key_id: str | None = None,
 ) -> _WebSocketContinuityAnchor | None:
+    """Select a matching session anchor, retiring any known upstream rejection."""
     if continuity_state is None or not codex_session_affinity:
         return None
     if responses_payload.previous_response_id is not None:
         return None
     previous_response_id = continuity_state.last_completed_response_id
     if previous_response_id is None:
+        return None
+    if _is_websocket_stale_previous_response(previous_response_id=previous_response_id, api_key_id=api_key_id):
+        # Upstream already denied this anchor (``previous_response_not_found``)
+        # and the fail-closed path remembered it. Injecting it again would
+        # fail the client's retry identically (#1921): retire it from session
+        # continuity so the full-context resend goes unanchored, and so the
+        # same id cannot return once the negative cache entry expires.
+        _retire_websocket_continuity_anchor(continuity_state)
+        _facade().logger.info(
+            "websocket_session_anchor_retired response_id=%s reason=stale_previous_response",
+            previous_response_id,
+        )
         return None
     stored_count = continuity_state.last_completed_input_count
     if not _facade()._input_prefix_matches_stored_context(
@@ -632,12 +887,9 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
+    """Record completed context and pending tools, or clear an absent response anchor."""
     if response_id is None:
-        continuity_state.last_completed_response_id = None
-        continuity_state.last_completed_input_count = 0
-        continuity_state.last_completed_input_prefix_fingerprint = None
-        continuity_state.last_pending_function_call_ids = []
-        continuity_state.last_pending_tool_call_types = {}
+        _retire_websocket_continuity_anchor(continuity_state)
         return
     # Record the completed response id and pending tool-call metadata
     # regardless of input shape (string inputs leave ``input_item_count`` at
@@ -681,9 +933,16 @@ def _record_websocket_responses_lite_acceptance(
     )
 
 
-def _websocket_response_id(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
+def _websocket_response_id(
+    event: OpenAIEvent | None,
+    payload: dict[str, JsonValue] | None,
+    *,
+    routing: NativeWebSocketRoutingMetadata | None = None,
+) -> str | None:
     if event is not None and event.response is not None and event.response.id:
         return event.response.id
+    if routing is not None:
+        return routing.payload_response_id
     if not isinstance(payload, dict):
         return None
     direct_response_id = payload.get("response_id")
@@ -798,6 +1057,21 @@ def _websocket_precreated_retry_error_code(
 ) -> str | None:
     if request_state is None:
         return None
+    if request_state.response_id is not None and not request_state.awaiting_response_created:
+        # An accepted response is only replayable under the output-free
+        # capacity rule; every pre-created classifier below refuses it.
+        return _websocket_accepted_capacity_retry_error_code(
+            request_state,
+            event_type=event_type,
+            error_code=_normalize_error_code(
+                _websocket_event_error_code(event_type, payload),
+                _websocket_event_error_type(event_type, payload),
+            ),
+            error_message=_websocket_event_error_message(event_type, payload),
+            payload_response_id=_websocket_response_id(None, payload),
+            payload=payload,
+            has_other_pending_requests=has_other_pending_requests,
+        )
     if request_state.last_downstream_sequence_number is not None:
         return None
     if request_state.downstream_visible:
@@ -1661,6 +1935,15 @@ def _draining_websocket_request_states(
     return [request_state for request_state in pending_requests if request_state.draining_until_terminal]
 
 
+def _is_response_output_event(event_type: str | None) -> bool:
+    """A ``response.*`` frame that is neither a terminal nor an error carries response output."""
+    return (
+        isinstance(event_type, str)
+        and event_type.startswith("response.")
+        and event_type not in {"response.completed", "response.failed", "response.incomplete"}
+    )
+
+
 def _match_websocket_request_state_for_anonymous_event(
     pending_requests: deque[_WebSocketRequestState],
     *,
@@ -1669,6 +1952,7 @@ def _match_websocket_request_state_for_anonymous_event(
     error_message: str | None = None,
     allow_unanchored_previous_response_error: bool = False,
     prefer_draining_requests: bool = True,
+    event_type: str | None = None,
 ) -> _WebSocketRequestState | None:
     if prefer_previous_response_not_found:
         return _match_websocket_request_state_for_previous_response_error(
@@ -1677,6 +1961,18 @@ def _match_websocket_request_state_for_anonymous_event(
             error_message=error_message,
             allow_unanchored_previous_response_error=allow_unanchored_previous_response_error,
         )
+
+    if _is_response_output_event(event_type):
+        # Output frames carry no response id. On a pipelined socket they belong
+        # to the one response upstream has already created, whether that request
+        # is still visible or draining, never to a sibling still waiting for its
+        # own response.created (issue #2350). Vendor telemetry such as
+        # ``codex.rate_limits`` keeps the pre-created ownership below.
+        created_requests = [
+            request_state for request_state in pending_requests if request_state.response_id is not None
+        ]
+        if len(created_requests) == 1:
+            return created_requests[0]
 
     visible_requests = [
         request_state for request_state in pending_requests if _http_bridge_request_counts_against_queue(request_state)

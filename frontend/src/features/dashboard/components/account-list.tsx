@@ -1,3 +1,4 @@
+import { UsageQuotaBar } from "@/components/usage-quota-bar";
 import { ArrowDown, ArrowUp, ArrowUpDown, Clock, ExternalLink, List, Play, RotateCcw, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -29,7 +30,7 @@ import {
 
 const ACCOUNT_LIST_VISIBLE_ROWS = 8;
 const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
-const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 7.5rem 7.5rem minmax(8rem,0.8fr) 6.5rem";
+const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 7.5rem 7.5rem minmax(8rem,0.8fr) 8rem";
 
 type AccountListProps = {
   accounts: AccountSummary[];
@@ -260,7 +261,7 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
         <div key={quota.label} className="grid grid-cols-[2.75rem_minmax(3rem,auto)_minmax(2.75rem,0.45fr)_minmax(0,1fr)] items-center gap-2">
           <span className="text-muted-foreground">{localizedQuotaLabel(quota.label, t)}</span>
           <span className="font-medium tabular-nums text-foreground">{quota.percentLabel}</span>
-          <QuotaMeter percent={quota.percent} />
+          <QuotaMeter label={localizedQuotaLabel(quota.label, t)} percent={quota.percent} cap={quota.label === "5h" ? account.effectiveLimitPrimary : quota.label === "Weekly" ? account.effectiveLimitSecondary : account.effectiveLimitMonthly} />
           <span className="inline-flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
             <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
             <span className="truncate">{quota.resetLabel}</span>
@@ -271,7 +272,8 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
   );
 }
 
-function QuotaMeter({ percent }: { percent: number | null }) {
+function QuotaMeter({ percent, cap, label }: { percent: number | null; cap?: number | null; label: string }) {
+  if (cap != null) return <UsageQuotaBar percent={percent} cap={cap} aria-label={label} />;
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   return (
     <div
@@ -423,7 +425,7 @@ export function AccountList({
 	                </p>
                 <p className="truncate text-[11px] text-muted-foreground">{warmupDetail}</p>
               </div>
-              <div className="flex justify-end gap-1">
+              <div className="flex flex-wrap justify-end gap-1">
                 <Button
                   type="button"
                   size="sm"
@@ -476,7 +478,7 @@ export function AccountList({
                 >
                   <Zap className="h-3.5 w-3.5" aria-hidden="true" />
                 </Button>
-                {status === "paused" ? (
+                {status === "paused" || status === "deactivated" ? (
                   <Button
                     type="button"
                     size="sm"

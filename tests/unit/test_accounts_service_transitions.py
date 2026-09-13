@@ -87,7 +87,7 @@ async def test_set_usage_limit_invalidates_local_and_peer_selection_caches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = AsyncMock()
-    configuration = AccountUsageLimitConfiguration(enabled=True, percent=10.0)
+    configuration = AccountUsageLimitConfiguration(enabled=True, percent=10.0, percent_5h=70.0)
     repo.update_usage_limit.return_value = configuration
     cache = Mock()
     bump = AsyncMock()
@@ -100,6 +100,8 @@ async def test_set_usage_limit_invalidates_local_and_peer_selection_caches(
         enabled=True,
         percent=10.0,
         update_percent=True,
+        percent_5h=70.0,
+        update_5h=True,
     )
 
     assert result == configuration
@@ -108,6 +110,10 @@ async def test_set_usage_limit_invalidates_local_and_peer_selection_caches(
         enabled=True,
         percent=10.0,
         update_percent=True,
+        percent_5h=70.0,
+        percent_weekly=None,
+        update_5h=True,
+        update_weekly=False,
     )
     cache.invalidate.assert_called_once_with(propagate=False)
     bump.assert_awaited_once_with("account_selection")

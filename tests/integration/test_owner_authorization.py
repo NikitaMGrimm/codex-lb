@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import json
 import sqlite3
-import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from statistics import median
 from types import SimpleNamespace
 from typing import cast
 
@@ -34,12 +31,6 @@ pytestmark = pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("policy", ["disabled", "available", "reached"])
 async def test_owner_authorization_query_budget_and_cached_selection(db_setup, monkeypatch, policy):
-    """Print a repeatable component benchmark without flaky latency assertions.
-
-    Counts include SQLAlchemy statements and the SQLite direct-read path, but
-    exclude connection pragmas and transaction control. No upstream is contacted.
-    Run with pytest -s on each supported database to record timings.
-    """
     owner_id = "authorization-query-budget"
     enabled, used = policy != "disabled", 10.0 if policy == "reached" else 5.0
     async with SessionLocal() as session:
@@ -128,10 +119,6 @@ async def test_owner_authorization_query_budget_and_cached_selection(db_setup, m
         finally:
             await balancer.release_account_lease(selected.lease)
 
-    async def cold_selection() -> None:
-        balancer._selection_inputs_cache.invalidate(propagate=False)
-        await select_owner()
-
     async def authorize_bridge() -> None:
         decision = await _HTTPBridgeRequestSubmitMixin._fresh_http_bridge_owner_authorization(
             bridge_owner,
@@ -139,42 +126,13 @@ async def test_owner_authorization_query_budget_and_cached_selection(db_setup, m
         )
         assert decision.allowed is allowed
 
-    async def measure(operation: Callable[[], Awaitable[None]], count: int) -> dict[str, object]:
-        await operation()  # Warm compilation/connection setup outside measurement.
-        queries, latencies = [], []
-        for _ in range(count):
-            before = len(statements)
-            started = time.perf_counter()
-            await operation()
-            latencies.append((time.perf_counter() - started) * 1000)
-            queries.append(len(statements) - before)
-        return {
-            "iterations": count,
-            "queries_min": min(queries),
-            "queries_max": max(queries),
-            "median_ms": round(median(latencies), 3),
-            "p95_ms": round(sorted(latencies)[int((len(latencies) - 1) * 0.95)], 3),
-        }
-
     try:
-        cold = await measure(cold_selection, 5)
-        cached = await measure(select_owner, 20)
-        bridge = await measure(authorize_bridge, 20)
+        await select_owner()
+        statements.clear()
+        await select_owner()
+        assert statements == [], "cached selection must not query the database"
+        await authorize_bridge()
+        assert len(statements) == 1, "dispatch must authorize the owner in one snapshot"
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", record_sqlalchemy)
-    assert cached["queries_max"] == 0
-    assert bridge["queries_min"] == bridge["queries_max"] == 1
     assert await balancer.account_pressure_snapshot(owner_id) == (0, 0, 0.0)
-    print(
-        "OWNER_AUTHORIZATION_BENCHMARK "
-        + json.dumps(
-            {
-                "database": engine.dialect.name,
-                "policy": policy,
-                "cold_selection": cold,
-                "cached_selection": cached,
-                "bridge_authorization_boundary": bridge,
-            },
-            sort_keys=True,
-        )
-    )

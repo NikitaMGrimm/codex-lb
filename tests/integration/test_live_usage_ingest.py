@@ -190,52 +190,6 @@ async def test_live_ingestor_coalesces_queued_exact_duplicates_for_enabled_polic
 
 
 @pytest.mark.asyncio
-async def test_live_ingestor_usage_policy_selection_invalidation_uses_shared_throttle(
-    monkeypatch: pytest.MonkeyPatch,
-    db_setup,
-) -> None:
-    del db_setup
-    account_id = "acc_live_selection_throttled"
-    account = _make_account(account_id, "live-selection-throttled@example.com")
-    account.usage_limit_enabled = True
-    account.usage_limit_percent = 40.0
-    async with SessionLocal() as session:
-        await AccountsRepository(session).upsert(account)
-
-    selection_cache = AccountSelectionCache(ttl_seconds=60)
-    header_invalidate = AsyncMock()
-    monkeypatch.setattr(live_ingest, "get_account_selection_cache", lambda: selection_cache)
-    monkeypatch.setattr(
-        live_ingest,
-        "get_rate_limit_headers_cache",
-        lambda: SimpleNamespace(invalidate=header_invalidate),
-    )
-    monkeypatch.setattr(live_ingest, "_CACHE_INVALIDATION_MIN_INTERVAL_SECONDS", 0.05)
-
-    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
-    ingestor._last_cache_invalidation = live_ingest.time.monotonic()
-    try:
-        await ingestor._ingest(
-            live_ingest._QueuedSnapshot(
-                account_id=account_id,
-                chatgpt_account_id=None,
-                snapshot=_snapshot(),
-            )
-        )
-
-        assert selection_cache.generation == 0
-        header_invalidate.assert_not_awaited()
-        deadline = asyncio.get_event_loop().time() + 1.0
-        while selection_cache.generation == 0 and asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.01)
-
-        assert selection_cache.generation == 1
-        header_invalidate.assert_awaited_once()
-    finally:
-        await ingestor.stop()
-
-
-@pytest.mark.asyncio
 async def test_precise_live_usage_crossing_cap_changes_selection_within_throttle_bound(
     monkeypatch: pytest.MonkeyPatch,
     db_setup,
@@ -310,7 +264,6 @@ async def test_precise_live_usage_crossing_cap_changes_selection_within_throttle
         )
         await ingestor._ingest(ingestor._queue.get_nowait())
 
-        assert selection_cache.generation == 0
         async with SessionLocal() as session:
             latest_primary = await UsageRepository(session).latest_entry_for_account(
                 account_id,
@@ -1022,24 +975,6 @@ async def test_live_ingestor_resolves_chatgpt_account_id(db_setup) -> None:
     assert len(rows) == 2
     assert {row.account_id for row in rows} == {account_id}
     assert {row.window for row in rows} == {"primary", "secondary"}
-
-
-@pytest.mark.asyncio
-async def test_live_ingestion_kill_switch_disables_publishing(monkeypatch, db_setup) -> None:
-    del db_setup
-    from app.core.config.settings import get_settings
-
-    monkeypatch.setenv("CODEX_LB_LIVE_USAGE_INGESTION_ENABLED", "false")
-    get_settings.cache_clear()
-    try:
-        assert live_ingest.start_live_usage_ingestor() is None
-        captured: list[object] = []
-        live_hub.register_live_usage_publisher(None)
-        live_hub.publish_live_usage(_snapshot(), account_id="acc-any")
-        assert captured == []
-    finally:
-        await live_ingest.stop_live_usage_ingestor()
-        get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

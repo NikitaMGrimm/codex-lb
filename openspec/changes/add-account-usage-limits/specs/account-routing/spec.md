@@ -6,6 +6,14 @@
 
 Fresh owner authorization MUST distinguish permission, a local usage-policy block, an unavailable owner, and an authorization infrastructure failure. A missing, paused, deactivated, or reauthentication-required owner MUST NOT be admitted on retry exhaustion. Failed final selection authorization MUST release provisional leases and recovery probes and MUST NOT publish a new or changed sticky owner. An unavailable owner MUST NOT be reported as having reached its usage policy. Cancellation MUST propagate after provisional resource cleanup.
 
+#### Scenario: Selection inputs keep changing through retry exhaustion
+
+- **GIVEN** selection inputs change after every bounded selection attempt
+- **WHEN** the retry budget is exhausted
+- **THEN** sticky and unbound selection fail closed with a retryable local 503, even if the final owner-policy check allows the account
+- **AND** no affinity is published and provisional leases and recovery probes are released
+- **AND** a specific owner or usage-policy denial retains its existing error
+
 #### Scenario: Owner disappears on the final selection attempt
 
 - **GIVEN** selection state is invalidated on every bounded selection attempt
@@ -27,6 +35,8 @@ Fresh owner authorization MUST distinguish permission, a local usage-policy bloc
 ### Requirement: Disabled policies preserve routing-pool semantics
 
 When all usage policies are disabled, applying the usage-policy and concurrency-cap projections MUST preserve established canonical routing, backoff fallback, and terminal-error semantics. Administratively unavailable and usage-policy-blocked accounts MUST NOT contribute fair-share capacity or become selectable. Evidence needed for canonical fallback and terminal errors MUST remain available independently of those capacity projections.
+
+Opportunistic admission MUST retain its existing cap-before-upstream-exhaustion error precedence for accounts not blocked by a local usage policy. Policy-blocked accounts MUST NOT contribute cap capacity or have their policy denial masked by cap exhaustion.
 
 #### Scenario: A canonical pool contains a backoff owner and a paused peer
 
@@ -82,7 +92,7 @@ Dashboard policy reconciliation MUST prevent an account or dashboard read starte
 
 ### Requirement: Accounts have a reversible maximum-usage policy
 
-Each account SHALL support an optional maximum standard-quota used percentage greater than 0 and at most 100, plus an enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling a configured policy SHALL retain its percentage for later re-enablement, while removing the policy SHALL clear the percentage and disable it. For a disabled update, the API MUST retain the latest stored percentage when the percentage field is omitted, clear it when the field is explicitly `null`, and replace it when a numeric value is supplied. The API MUST reject an enabled policy without an explicitly supplied percentage, MUST reject an enabled policy with a `null` percentage, and MUST reject percentages outside the supported range.
+Each account SHALL support an optional default maximum standard-quota used percentage and optional 5-hour and weekly overrides, each greater than 0 and at most 100, plus one enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling SHALL retain saved thresholds for later re-enablement; removal SHALL clear all thresholds and disable the policy. For each threshold, an omitted field MUST retain its latest stored value, explicit null MUST clear it, and a numeric value MUST replace it. Enabling MUST explicitly supply at least one non-null threshold. The API MUST reject percentages outside the supported range.
 
 #### Scenario: Operator temporarily disables a configured limit
 
@@ -113,7 +123,7 @@ For an account with an enabled maximum usage policy, the selector MUST evaluate 
 Each newly admitted logical HTTP bridge turn MUST re-evaluate its continuity-pinned account through the same standard usage-limit policy, including when a reused bridge retains its stream lease and when an idle bridge would otherwise reacquire that lease. A policy denial MUST occur before the new turn is queued or sent, MUST use the `account_usage_limit_reached` response contract, and MUST retire the bridge after already-admitted turns drain without rebinding or disrupting their ownership and settlement. If the pinned account no longer exists or becomes administratively unavailable, admission MUST fail closed with the established bridge continuity-lost response and retire the bridge without creating a new runtime lease for that owner.
 If the final direct owner-policy snapshot read fails, the new turn MUST fail closed with `account_usage_limit_authorization_failed` before upstream dispatch without retiring the bridge. Cancellation MUST continue to propagate.
 
-Each newly admitted `response.create` on an existing proxy WebSocket MUST re-evaluate the socket-pinned account through the same standard usage-limit policy. A `reached` or `data_unavailable` result MUST reject only the new frame with `account_usage_limit_reached` before upstream dispatch, without disrupting already-admitted responses on the shared socket.
+Each newly admitted `response.create` on an existing proxy WebSocket MUST re-evaluate the socket-pinned account through the same standard usage-limit policy. Authorization MUST precede response-create lease acquisition so concurrency exhaustion cannot mask an owner-policy denial, and MUST run again immediately before dispatch to catch policy changes during admission. A `reached` or `data_unavailable` result MUST reject only the new frame with `account_usage_limit_reached` before upstream dispatch, without disrupting already-admitted responses on the shared socket.
 If the final policy read fails, the new frame MUST fail closed with `account_usage_limit_authorization_failed` before upstream dispatch, without retiring the shared upstream or disrupting already-admitted responses. Cancellation MUST continue to propagate.
 
 #### Scenario: Equality reaches the limit
@@ -207,6 +217,8 @@ If the final policy read fails, the new frame MUST fail closed with `account_usa
 
 An enabled maximum-usage policy MUST require current standard quota data. Elapsed window rows MUST NOT count as exhaustion evidence, but if no current relevant standard observation remains, or a relevant observation is stale or lacks a used percentage, the account MUST be excluded with policy state `data_unavailable`. When all otherwise eligible candidates are excluded by `reached` or `data_unavailable` usage-limit state, selection MUST return stable error code `account_usage_limit_reached` and MUST NOT report the accounts as upstream rate-limited.
 
+Only windows with an effective configured threshold MUST require a current measurement; placeholders and stale readings for unrestricted windows MUST NOT block a policy whose restricted windows are current. An unknown-duration placeholder alone MUST NOT establish an unrestricted account shape. A successful refresh with no standard quota windows MUST supersede older observations in all applicable standard slots, including a weekly window stored in the primary slot.
+
 #### Scenario: Missing observations preserve the account quota
 
 - **GIVEN** an account has an enabled maximum usage policy
@@ -256,7 +268,7 @@ An enabled maximum-usage policy MUST require current standard quota data. Elapse
 
 ### Requirement: Dashboard account controls expose usage-limit state and precision
 
-Account summaries SHALL expose the configured percentage, enabled flag, and evaluated state (`disabled`, `available`, `reached`, or `data_unavailable`). The Accounts dashboard SHALL allow an operator to set, edit, enable, disable, and remove the policy. Dashboard account card and list surfaces SHALL display `Limit reached` for an otherwise active account in state `reached` and `Usage unavailable` for an otherwise active account in state `data_unavailable`, without masking a non-active upstream account status. The editable value and maximum-used summary MUST preserve every API-valid persisted numeric percentage without rounding it to a different value. Invalid percentage values MUST receive clear inline range feedback. The dashboard SHALL describe a value of 10 percent as a maximum of 10 percent used (90 percent reserved) and SHALL warn that delayed upstream observations or already in-flight requests can move actual usage past the displayed percentage before the gate observes it.
+Account summaries SHALL expose the configured percentage, enabled flag, and evaluated state (`disabled`, `available`, `reached`, or `data_unavailable`). The Accounts dashboard SHALL allow an operator to set, edit, enable, disable, and remove the policy. Dashboard account card and list surfaces SHALL display `Limit reached` for an otherwise active account in state `reached` and `Usage unavailable` for an otherwise active account in state `data_unavailable`, without masking a non-active upstream account status. The editable value and maximum-used summary MUST preserve every API-valid persisted numeric percentage without rounding it to a different value. Invalid percentage values MUST receive clear inline range feedback. The dashboard SHALL describe a value of 10 percent as a maximum of 10 percent used (90 percent reserved).
 
 #### Scenario: Enabled limit is visible and toggleable
 
@@ -353,3 +365,35 @@ every replica. Already dispatched work MUST retain its settlement ownership.
 - **WHEN** the replica performs its next existing-owner dispatch authorization read
 - **THEN** that read denies the new dispatch according to the committed policy
 - **AND** it does not substitute the cached disabled policy for authorization
+
+### Requirement: Consolidated default and window overrides
+An account SHALL persist an optional default percentage and optional 5-hour and weekly percentages, with one enabled flag. Percentages SHALL be greater than zero and at most 100. An override SHALL replace the default only for the matching normalized duration. Monthly and nonstandard windows SHALL use only the default. Missing overrides SHALL inherit the default; absent default SHALL leave unmatched windows unrestricted. Disable SHALL retain saved values; removal SHALL clear all values. Enabling SHALL require at least one percentage.
+
+#### Scenario: Unequal window thresholds
+- **WHEN** the default is 80, the 5-hour override is 70, the weekly override is 90, and fresh usage is 65 and 75 respectively
+- **THEN** the account SHALL remain available.
+
+#### Scenario: Configured override has no current observation
+- **GIVEN** an enabled override for a plan-supported 5-hour or weekly window
+- **WHEN** its matching normalized observation is absent or its reset has elapsed without a new measurement
+- **THEN** admission SHALL report data unavailable even if another window is fresh or has a configured default.
+- **AND** a normalized monthly-only shape SHALL remain exempt from 5-hour and weekly overrides.
+
+#### Scenario: Standalone weekly override
+- **WHEN** only a weekly override is enabled on a monthly-only account
+- **THEN** monthly usage SHALL remain unrestricted by that override.
+
+### Requirement: Reserved quota presentation
+Account and dashboard views SHALL distinguish provider remaining from usable remaining and reserved capacity using the same effective window policy as admission. Reserved quota SHALL use a muted hatched segment and an accessible label.
+
+#### Scenario: Remaining quota with reserve
+- **WHEN** usage is 54 percent and the effective cap is 80 percent
+- **THEN** the view SHALL show 46 percent provider remaining, 20 percent reserved, and 26 percent usable of the provider capacity.
+
+### Requirement: Reserve-oriented editing
+The editor SHALL ask how much quota to keep for direct use, converting reserve percentages to the existing maximum-used API contract. The shared reserve and optional per-window reserves SHALL be visible together. Blank window values SHALL inherit the shared reserve, with that behavior explained next to the fields. Bars SHALL place reserved quota on the left, usable quota next, and consumed quota on the right. Stripes SHALL not exceed provider remaining.
+
+#### Scenario: Twenty percent reserve
+- **WHEN** the operator saves a 20 percent reserve and usage is 54 percent
+- **THEN** the maximum-used API value SHALL be 80
+- **AND** the bar SHALL show 20 percent striped on the left, 26 percent usable next, and 54 percent consumed on the right.

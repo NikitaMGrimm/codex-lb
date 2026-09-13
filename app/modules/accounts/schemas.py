@@ -93,6 +93,11 @@ class AccountSummary(DashboardModel):
     routing_policy: str = Field(default="normal", pattern=r"^(normal|burn_first|preserve)$")
     usage_limit_enabled: bool = False
     usage_limit_percent: float | None = None
+    usage_limit_5h_percent: float | None = None
+    usage_limit_weekly_percent: float | None = None
+    effective_limit_primary: float | None = None
+    effective_limit_secondary: float | None = None
+    effective_limit_monthly: float | None = None
     usage_limit_state: AccountUsageLimitState = AccountUsageLimitState.DISABLED
     status: str
     security_work_authorized: bool = False
@@ -167,12 +172,6 @@ class AccountOpenCodeAuthExportAccount(DashboardModel):
     email: str
 
 
-class AccountOpenCodeAuthExportResponse(DashboardModel):
-    filename: str
-    account: AccountOpenCodeAuthExportAccount
-    auth_json: OpenCodeAuthJson
-
-
 class AccountUpdateRequest(DashboardModel):
     security_work_authorized: bool | None = None
 
@@ -210,11 +209,13 @@ class AccountRoutingPolicyUpdateResponse(DashboardModel):
 class AccountUsageLimitUpdateRequest(DashboardModel):
     enabled: bool
     percent: float | None = Field(default=None, gt=0, le=100)
+    percent_5h: float | None = Field(default=None, gt=0, le=100)
+    percent_weekly: float | None = Field(default=None, gt=0, le=100)
 
     @model_validator(mode="after")
     def validate_enabled_limit_has_percent(self) -> AccountUsageLimitUpdateRequest:
-        if self.enabled and ("percent" not in self.model_fields_set or self.percent is None):
-            raise ValueError("percent is required when the usage limit is enabled")
+        if self.enabled and all(value is None for value in (self.percent, self.percent_5h, self.percent_weekly)):
+            raise ValueError("at least one percentage is required when the usage limit is enabled")
         return self
 
 
@@ -222,21 +223,12 @@ class AccountUsageLimitUpdateResponse(DashboardModel):
     account_id: str
     enabled: bool
     percent: float | None = None
+    percent_5h: float | None = None
+    percent_weekly: float | None = None
 
 
 class AccountDeleteResponse(DashboardModel):
     status: str
-
-
-class AccountExportResponse(DashboardModel):
-    account_id: str
-    email: str
-    workspace_id: str | None = None
-    workspace_label: str | None = None
-    seat_type: str | None = None
-    plan_type: str
-    status: str
-    auth_json: str
 
 
 class AccountProbeRequest(DashboardModel):

@@ -32,7 +32,7 @@ def usage_history_to_window_row(entry: UsageHistory | AdditionalUsageHistory) ->
         window_minutes=entry.window_minutes,
         recorded_at=entry.recorded_at,
     )
-    if isinstance(entry, UsageHistory) and float(entry.used_percent) == 0.0 and usage_core.is_no_data_placeholder(row):
+    if isinstance(entry, UsageHistory) and usage_core.is_no_data_placeholder(row):
         return replace(row, used_percent=None)
     return row
 
@@ -50,6 +50,8 @@ def evaluate_account_usage_limit(
     return evaluate_standard_usage_limit(
         enabled=bool(account.usage_limit_enabled),
         limit_percent=account.usage_limit_percent,
+        limit_weekly_percent=account.usage_limit_weekly_percent,
+        limit_5h_percent=account.usage_limit_5h_percent,
         plan_type=account.plan_type,
         primary=usage_history_to_window_row(primary) if primary is not None else None,
         secondary=usage_history_to_window_row(secondary) if secondary is not None else None,

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-quer
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren } from "react";
+import { toast } from "sonner";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -392,4 +393,23 @@ describe("useAccounts", () => {
       ?.refetchInterval;
     expect(refetchInterval).toBeUndefined();
   });
+});
+
+it.each([
+  [true, 80, null, "Account usage limit enabled"],
+  [false, null, 90, "Account usage limit disabled"],
+])("reports standalone override updates correctly", async (enabled, percent5H, percentWeekly, expected) => {
+  const success = vi.spyOn(toast, "success");
+  server.use(http.put("/api/accounts/:accountId/usage-limit", () =>
+    HttpResponse.json({ accountId: "acc_primary", enabled, percent: null, percent5H, percentWeekly })));
+  const queryClient = createTestQueryClient();
+  const { result } = renderHook(() => useAccountMutations(), { wrapper: createWrapper(queryClient) });
+  await act(async () => {
+    await result.current.usageLimitMutation.mutateAsync({
+      accountId: "acc_primary", update: { enabled, percent5H, percentWeekly },
+    });
+  });
+  expect(success).toHaveBeenLastCalledWith(expected);
+  success.mockRestore();
+  queryClient.clear();
 });

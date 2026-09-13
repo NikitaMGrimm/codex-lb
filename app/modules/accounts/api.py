@@ -4,9 +4,10 @@ import logging
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from app.core.audit.service import AuditService
+from app.core.audit.service import AuditActor, AuditService, AuditTarget
+from app.core.auth.dashboard_access import DashboardPrincipal, Permission
 from app.core.auth.dependencies import (
-    require_dashboard_write_access,
+    require_dashboard_permission,
     set_dashboard_error_format,
     validate_dashboard_session,
 )
@@ -29,11 +30,9 @@ from app.modules.accounts.schemas import (
     AccountAliasResponse,
     AccountAuthExportResponse,
     AccountDeleteResponse,
-    AccountExportResponse,
     AccountImportResponse,
     AccountLimitWarmupUpdateRequest,
     AccountLimitWarmupUpdateResponse,
-    AccountOpenCodeAuthExportResponse,
     AccountPauseResponse,
     AccountProbeRequest,
     AccountProbeResponse,
@@ -101,9 +100,12 @@ _ACCOUNT_IMPORT_OPENAPI_EXTRA = {
 
 @router.get("", response_model=AccountsResponse)
 async def list_accounts(
+    principal: DashboardPrincipal = Depends(validate_dashboard_session),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountsResponse:
-    accounts = await context.service.list_accounts()
+    accounts = await context.service.list_accounts(
+        redact_identity=not principal.has(Permission.ACCOUNTS_WRITE),
+    )
     return AccountsResponse(accounts=accounts)
 
 
@@ -147,7 +149,7 @@ async def consume_account_usage_reset_credit(
     request: Request,
     account_id: str,
     payload: AccountUsageResetConsumeRequest | None = None,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountUsageResetConsumeResponse:
     try:
@@ -172,6 +174,8 @@ async def consume_account_usage_reset_credit(
     AuditService.log_async(
         "account_usage_reset_consumed",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", result.account_id),
         details={
             "account_id": result.account_id,
             "code": result.code,
@@ -182,34 +186,12 @@ async def consume_account_usage_reset_credit(
     return result
 
 
-@router.post("/{account_id}/export", response_model=AccountExportResponse, deprecated=True)
-async def export_account(
-    request: Request,
-    response: Response,
-    account_id: str,
-    _write_access=Depends(require_dashboard_write_access),
-    context: AccountsContext = Depends(get_accounts_context),
-) -> AccountExportResponse:
-    result = await context.service.export_account(account_id)
-    if not result:
-        raise DashboardNotFoundError("Account not found", code="account_not_found")
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    AuditService.log_async(
-        "account_exported",
-        actor_ip=request.client.host if request.client else None,
-        details={"account_id": result.account_id},
-    )
-    return result
-
-
 @router.post("/{account_id}/export/auth", response_model=AccountAuthExportResponse)
 async def export_account_auth(
     request: Request,
     response: Response,
     account_id: str,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_EXPORT)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountAuthExportResponse:
     result = await context.service.export_auth(account_id)
@@ -221,28 +203,8 @@ async def export_account_auth(
     AuditService.log_async(
         "account_auth_exported",
         actor_ip=request.client.host if request.client else None,
-        details={"account_id": account_id},
-    )
-    return result
-
-
-@router.post("/{account_id}/export/opencode-auth", response_model=AccountOpenCodeAuthExportResponse, deprecated=True)
-async def export_account_opencode_auth(
-    request: Request,
-    response: Response,
-    account_id: str,
-    _write_access=Depends(require_dashboard_write_access),
-    context: AccountsContext = Depends(get_accounts_context),
-) -> AccountOpenCodeAuthExportResponse:
-    result = await context.service.export_opencode_auth(account_id)
-    if not result:
-        raise DashboardNotFoundError("Account not found", code="account_not_found")
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    AuditService.log_async(
-        "account_auth_exported",
-        actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", account_id),
         details={"account_id": account_id},
     )
     return result
@@ -255,7 +217,7 @@ async def export_account_opencode_auth(
 )
 async def import_account(
     request: Request,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountImportResponse:
     raise_for_unsupported_multipart_content_encoding(request)
@@ -275,6 +237,8 @@ async def import_account(
         AuditService.log_async(
             "account_created",
             actor_ip=request.client.host if request.client else None,
+            actor=AuditActor.from_principal(principal),
+            target=AuditTarget("account", response.account_id),
             details={"account_id": response.account_id},
         )
         return response
@@ -287,7 +251,7 @@ async def import_account(
 @router.post("/{account_id}/reactivate", response_model=AccountReactivateResponse)
 async def reactivate_account(
     account_id: str,
-    _write_access=Depends(require_dashboard_write_access),
+    _write_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountReactivateResponse:
     try:
@@ -304,7 +268,7 @@ async def update_account(
     account_id: str,
     payload: AccountUpdateRequest,
     request: Request,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountUpdateResponse:
     changed_fields = [field for field, value in payload.model_dump(exclude_unset=True).items() if value is not None]
@@ -319,6 +283,8 @@ async def update_account(
     AuditService.log_async(
         "account_updated",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", account_id),
         details={
             "account_id": account_id,
             "changed_fields": changed_fields,
@@ -332,7 +298,7 @@ async def probe_account(
     request: Request,
     account_id: str,
     body: AccountProbeRequest | None = None,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountProbeResponse:
     requested_model = body.model if body is not None else None
@@ -370,6 +336,8 @@ async def probe_account(
     AuditService.log_async(
         "account_probed",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", result.account_id),
         details={
             "account_id": result.account_id,
             "probe_status_code": result.probe_status_code,
@@ -382,7 +350,7 @@ async def probe_account(
 @router.post("/{account_id}/pause", response_model=AccountPauseResponse)
 async def pause_account(
     account_id: str,
-    _write_access=Depends(require_dashboard_write_access),
+    _write_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountPauseResponse:
     try:
@@ -398,7 +366,7 @@ async def pause_account(
 async def set_account_alias(
     account_id: str,
     payload: AccountAliasRequest,
-    _write_access=Depends(require_dashboard_write_access),
+    _write_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountAliasResponse:
     success = await context.service.set_account_alias(account_id, payload.alias)
@@ -414,7 +382,7 @@ async def set_account_alias(
 async def update_account_limit_warmup(
     account_id: str,
     payload: AccountLimitWarmupUpdateRequest,
-    _write_access=Depends(require_dashboard_write_access),
+    _write_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountLimitWarmupUpdateResponse:
     success = await context.service.set_limit_warmup_enabled(account_id, payload.enabled)
@@ -430,7 +398,7 @@ async def update_account_limit_warmup(
 async def update_account_routing_policy(
     account_id: str,
     payload: AccountRoutingPolicyUpdateRequest,
-    _write_access=Depends(require_dashboard_write_access),
+    _write_access=Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountRoutingPolicyUpdateResponse:
     success = await context.service.set_routing_policy(account_id, payload.routing_policy)
@@ -444,7 +412,7 @@ async def update_account_usage_limit(
     request: Request,
     account_id: str,
     payload: AccountUsageLimitUpdateRequest,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountUsageLimitUpdateResponse:
     percent_was_provided = "percent" in payload.model_fields_set
@@ -453,16 +421,24 @@ async def update_account_usage_limit(
         enabled=payload.enabled,
         percent=payload.percent,
         update_percent=percent_was_provided,
+        percent_5h=payload.percent_5h,
+        percent_weekly=payload.percent_weekly,
+        update_5h="percent_5h" in payload.model_fields_set,
+        update_weekly="percent_weekly" in payload.model_fields_set,
     )
     if configuration is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     AuditService.log_async(
         "account_usage_limit_updated",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", account_id),
         details={
             "account_id": account_id,
             "enabled": configuration.enabled,
             "percent": configuration.percent,
+            "percent_5h": configuration.percent_5h,
+            "percent_weekly": configuration.percent_weekly,
             "percent_was_provided": percent_was_provided,
         },
     )
@@ -470,6 +446,8 @@ async def update_account_usage_limit(
         account_id=account_id,
         enabled=configuration.enabled,
         percent=configuration.percent,
+        percent_5h=configuration.percent_5h,
+        percent_weekly=configuration.percent_weekly,
     )
 
 
@@ -478,7 +456,7 @@ async def delete_account(
     request: Request,
     account_id: str,
     delete_history: bool = False,
-    _write_access=Depends(require_dashboard_write_access),
+    principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountDeleteResponse:
     success = await context.service.delete_account(account_id, delete_history=delete_history)
@@ -487,6 +465,8 @@ async def delete_account(
     AuditService.log_async(
         "account_deleted",
         actor_ip=request.client.host if request.client else None,
+        actor=AuditActor.from_principal(principal),
+        target=AuditTarget("account", account_id),
         details={"account_id": account_id, "delete_history": delete_history},
     )
     return AccountDeleteResponse(status="deleted")

@@ -31,6 +31,8 @@ def _evaluate(
     *,
     enabled: bool = True,
     limit_percent: float | None = 10.0,
+    limit_5h_percent: float | None = None,
+    limit_weekly_percent: float | None = None,
     plan_type: str = "plus",
     primary: UsageWindowRow | None = None,
     secondary: UsageWindowRow | None = None,
@@ -40,6 +42,8 @@ def _evaluate(
     return evaluate_standard_usage_limit(
         enabled=enabled,
         limit_percent=limit_percent,
+        limit_5h_percent=limit_5h_percent,
+        limit_weekly_percent=limit_weekly_percent,
         plan_type=plan_type,
         primary=primary,
         secondary=secondary,
@@ -214,3 +218,136 @@ def test_free_plan_evaluates_one_effective_long_window(
     expected: AccountUsageLimitState,
 ) -> None:
     assert _evaluate(plan_type="free", primary=primary, monthly=monthly) is expected
+
+
+@pytest.mark.parametrize(
+    ("primary_used", "weekly_used", "expected"),
+    [
+        (65, 75, AccountUsageLimitState.AVAILABLE),
+        (70, 75, AccountUsageLimitState.REACHED),
+        (65, 90, AccountUsageLimitState.REACHED),
+    ],
+)
+def test_unequal_overrides_replace_default_per_window(primary_used, weekly_used, expected):
+    assert (
+        _evaluate(
+            limit_percent=80,
+            limit_5h_percent=70,
+            limit_weekly_percent=90,
+            primary=_row(primary_used),
+            secondary=_row(weekly_used, window_minutes=10080),
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("window_minutes", [300, 43200, 1440])
+def test_standalone_weekly_override_does_not_limit_other_durations(window_minutes):
+    assert (
+        _evaluate(
+            limit_percent=None,
+            limit_weekly_percent=20,
+            primary=_row(80, window_minutes=window_minutes),
+            secondary=_row(5, window_minutes=10080),
+        )
+        is AccountUsageLimitState.AVAILABLE
+    )
+
+
+@pytest.mark.parametrize("restricted_window", ["primary", "secondary"])
+@pytest.mark.parametrize("unrestricted_data", ["placeholder", "zero-duration", "stale"])
+@pytest.mark.parametrize(
+    "used, expected",
+    [
+        (5, AccountUsageLimitState.AVAILABLE),
+        (90, AccountUsageLimitState.REACHED),
+    ],
+)
+def test_override_ignores_unrestricted_window_data(restricted_window, unrestricted_data, used, expected):
+    weekly = restricted_window == "secondary"
+    unrestricted_row = (
+        _row(None, window_minutes=300 if weekly else 10080, recorded_at=NOW - timedelta(minutes=10))
+        if unrestricted_data == "stale"
+        else _row(0, window_minutes=0 if unrestricted_data == "zero-duration" else None, reset_delta=None)
+    )
+    restricted_row = _row(used, window_minutes=10080 if weekly else 300)
+    assert (
+        _evaluate(
+            limit_percent=None,
+            limit_weekly_percent=90 if weekly else None,
+            limit_5h_percent=None if weekly else 90,
+            primary=unrestricted_row if weekly else restricted_row,
+            secondary=restricted_row if weekly else unrestricted_row,
+        )
+        is expected
+    )
+
+
+def test_weekly_override_follows_weekly_only_primary_normalization():
+    assert (
+        _evaluate(
+            limit_percent=90,
+            limit_weekly_percent=70,
+            primary=_row(75, window_minutes=10080),
+        )
+        is AccountUsageLimitState.REACHED
+    )
+
+
+def test_override_preserves_fail_closed_freshness():
+    assert (
+        _evaluate(
+            limit_percent=None,
+            limit_weekly_percent=90,
+            secondary=_row(5, window_minutes=10080, recorded_at=NOW - timedelta(minutes=10)),
+        )
+        is AccountUsageLimitState.DATA_UNAVAILABLE
+    )
+
+
+@pytest.mark.parametrize("plan_type, window", [("plus", "primary"), ("free", "monthly")])
+def test_standalone_override_cannot_treat_unknown_window_placeholder_as_unrestricted(plan_type, window):
+    assert (
+        _evaluate(
+            limit_percent=None,
+            limit_weekly_percent=90,
+            plan_type=plan_type,
+            primary=_row(0, window_minutes=None, reset_delta=None) if window == "primary" else None,
+            monthly=_row(0, window_minutes=None, reset_delta=None) if window == "monthly" else None,
+        )
+        is AccountUsageLimitState.DATA_UNAVAILABLE
+    )
+
+
+@pytest.mark.parametrize("window", ["primary", "secondary"])
+@pytest.mark.parametrize("sample", ["missing", "elapsed"])
+@pytest.mark.parametrize("default", [None, 80])
+def test_configured_window_override_requires_current_sample(window, sample, default):
+    limited = (
+        None
+        if sample == "missing"
+        else _row(5, window_minutes=300 if window == "primary" else 10080, reset_delta=timedelta(seconds=-1))
+    )
+    assert (
+        _evaluate(
+            limit_percent=default,
+            limit_5h_percent=70 if window == "primary" else None,
+            limit_weekly_percent=90 if window == "secondary" else None,
+            primary=limited if window == "primary" else _row(5),
+            secondary=limited if window == "secondary" else _row(5, window_minutes=10080),
+        )
+        is AccountUsageLimitState.DATA_UNAVAILABLE
+    )
+
+
+def test_monthly_only_shape_does_not_require_window_override_samples():
+    assert (
+        _evaluate(
+            plan_type="free",
+            limit_percent=None,
+            limit_5h_percent=70,
+            limit_weekly_percent=90,
+            monthly=_row(80, window_minutes=43200),
+        )
+        is AccountUsageLimitState.AVAILABLE
+    )

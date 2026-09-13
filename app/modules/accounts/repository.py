@@ -36,6 +36,7 @@ from app.db.models import (
     UsageHistory,
 )
 from app.db.session import sqlite_writer_section
+from app.db.sqlite_lock_retry import retry_on_sqlite_lock
 from app.modules.accounts.usage_rollup import (
     AccountUsageRollupRepository,
     deduped_usage_aggregate_stmt,
@@ -126,6 +127,8 @@ class AccountRequestUsageSummary:
 class AccountUsageLimitConfiguration:
     enabled: bool
     percent: float | None
+    percent_5h: float | None = None
+    percent_weekly: float | None = None
 
 
 # The account-listing request-usage summary dedupes and re-aggregates the
@@ -304,9 +307,6 @@ class AccountsRepository:
             _store_request_usage_summaries(cache_key, summaries, ttl_seconds, generation)
             return dict(summaries)
         return summaries
-
-    async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
-        return await self.get_active_by_chatgpt_account_id(chatgpt_account_id) is not None
 
     async def get_active_by_chatgpt_account_id(self, chatgpt_account_id: str) -> Account | None:
         result = await self._session.execute(
@@ -905,7 +905,8 @@ class AccountsRepository:
             .on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
             .returning(RuntimeSentinel.name)
         )
-        try:
+
+        async def seed_once() -> int:
             async with sqlite_writer_section():
                 stamp_result = await self._session.execute(stamp_stmt)
                 stamped_by_this_boot = stamp_result.scalar_one_or_none() is not None
@@ -920,12 +921,24 @@ class AccountsRepository:
                 for account_id in account_ids:
                     await self._refresh_hard_sticky_outage_grace(account_id)
                 await self._session.commit()
+                return len(account_ids)
+
+        try:
+            # This stamp is the first statement of its transaction on a
+            # startup-fresh connection, so it can simply lose SQLite's writer
+            # slot (issue #1949) — retry the whole attempt, rolling the failed
+            # transaction back first so the next one starts clean. Exhausting
+            # the budget still raises and fails startup, as it always has.
+            return await retry_on_sqlite_lock(
+                seed_once,
+                what="hard-sticky outage grace startup seed",
+                before_retry=self._session.rollback,
+            )
         except OperationalError as exc:
             if not _is_missing_hard_sticky_seed_table(exc):
                 raise
             await self._session.rollback()
             return 0
-        return len(account_ids)
 
     async def _close_http_bridge_sessions_for_account(self, account_id: str) -> None:
         session_ids = select(HttpBridgeSessionRecord.id).where(HttpBridgeSessionRecord.account_id == account_id)
@@ -1001,6 +1014,10 @@ class AccountsRepository:
         enabled: bool,
         percent: float | None,
         update_percent: bool,
+        percent_5h: float | None = None,
+        percent_weekly: float | None = None,
+        update_5h: bool = False,
+        update_weekly: bool = False,
     ) -> AccountUsageLimitConfiguration | None:
         async with sqlite_writer_section():
             statement = (
@@ -1011,10 +1028,16 @@ class AccountsRepository:
             )
             if update_percent:
                 statement = statement.values(usage_limit_percent=percent)
+            if update_5h:
+                statement = statement.values(usage_limit_5h_percent=percent_5h)
+            if update_weekly:
+                statement = statement.values(usage_limit_weekly_percent=percent_weekly)
             result = await self._session.execute(
                 statement.returning(
                     Account.usage_limit_enabled,
                     Account.usage_limit_percent,
+                    Account.usage_limit_5h_percent,
+                    Account.usage_limit_weekly_percent,
                 )
             )
             row = result.one_or_none()
@@ -1024,6 +1047,8 @@ class AccountsRepository:
             return AccountUsageLimitConfiguration(
                 enabled=bool(row.usage_limit_enabled),
                 percent=row.usage_limit_percent,
+                percent_5h=row.usage_limit_5h_percent,
+                percent_weekly=row.usage_limit_weekly_percent,
             )
 
     async def begin_delete(self, account_id: str, *, delete_history: bool = False) -> bool:
