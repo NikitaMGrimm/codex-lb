@@ -186,7 +186,7 @@ cached ordinary selection adds no database reads for this policy check.
 
 ## Migration
 
-A forward Alembic revision based on upstream `20260912_010000_drop_legacy_dashboard_credentials` adds both account columns and database checks for the percentage range and enabled/value relationship. Existing accounts remain disabled with no percentage. Downgrade removes the checks and columns through batch operations so SQLite and PostgreSQL both round-trip.
+A forward Alembic revision based on upstream `20260913_000000_add_oidc_provider_flow` adds both account columns and database checks for the percentage range and enabled/value relationship. Existing accounts remain disabled with no percentage. Downgrade removes the checks and columns through batch operations so SQLite and PostgreSQL both round-trip.
 
 ## Test plan
 

@@ -54,3 +54,17 @@ The combined implementation retains the independent-window and reserve-display r
 | Weekly pace uses usable capacity without scaling observed provider burn | weekly credit pace reserve test |
 
 No separate cap cache or second admission evaluator is introduced. Existing ownership, retry, trusted-access and additional-quota tests continue to cover the canonical gate.
+
+## Upstream synchronization (2026-09-14)
+
+Upstream reverted subscription-exhaustion overflow in #2416. Preserve that
+removal, including its WebSocket-only overflow tests and routing documentation;
+the account usage-limit gate continues to apply to the remaining subscription
+HTTP and WebSocket paths. For example, a capped pinned owner must still return
+`account_usage_limit_reached` without selecting another account.
+
+The account-limit migration now follows upstream's OIDC provider-flow revision
+(`20260913_000000_add_oidc_provider_flow`), keeping one upgrade head. Preserve the
+existing account-limit revision identifiers used by development deployments;
+upgrade/downgrade regressions start from the new upstream parent. This is an
+upstream compatibility update, with no new usage-limit contract.
