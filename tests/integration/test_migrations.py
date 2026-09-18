@@ -3403,7 +3403,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path, db
     else:
         db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-usage-limits.sqlite'}"
     revision = "20260728_010000_add_account_usage_limits"
-    parent_revision = "20260912_010000_drop_legacy_dashboard_credentials"
+    parent_revision = "20260918_000000_merge_scim_and_overflow_removal"
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
 
