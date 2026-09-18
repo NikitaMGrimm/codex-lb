@@ -57,4 +57,4 @@ No separate cap cache or second admission evaluator is introduced. Existing owne
 
 ## September 18 migration integration
 
-Current main independently merged SCIM tokens and subscription-overflow removal on the same parent. A forward-only merge revision joins those released histories without changing their IDs or operations. The unmerged usage-limit migration follows that merge; the override migration still follows the scalar migration. The existing timestamp-collision lint rule continues to flag the two upstream revisions and is not relaxed by this change.
+Current main independently merged SCIM tokens and subscription-overflow removal on the same parent. A forward-only merge revision joins those released histories without changing their IDs or operations. The unmerged usage-limit migration follows that merge; the override migration still follows the scalar migration. The timestamp-collision checker permits only this exact pair when the named merge revision directly joins both parents. Missing or altered repairs and additional collisions still fail; the single-head and cycle checks remain unchanged.
