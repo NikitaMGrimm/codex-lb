@@ -1,12 +1,12 @@
 ## ADDED Requirements
 
 ### Requirement: Faithful account trend series
-The account trend chart SHALL preserve every provided observation timestamp and SHALL represent an absent window sample as a gap rather than zero remaining. Legends SHALL list only available series. Monthly-account long-window tooltips SHALL use monthly labels.
+The account trend chart SHALL preserve every provided observation timestamp and SHALL linearly interpolate missing window samples between observations using elapsed time and SHALL hold the last observed value after the final observation. Values before the first observation SHALL remain unknown; actual zero observations SHALL be preserved. Legends SHALL list only available series. Monthly-account long-window tooltips SHALL use monthly labels.
 
 #### Scenario: Different observation timestamps
 - **GIVEN** a primary observation and a monthly observation have different timestamps
 - **WHEN** the chart combines the series
-- **THEN** both observations SHALL be retained and the missing counterpart SHALL remain absent rather than zero.
+- **THEN** both observations SHALL be retained and each missing counterpart SHALL interpolate between surrounding observations, retain its last observed value if no later observation exists, or remain unknown if no earlier observation exists.
 
 #### Scenario: Monthly-only trend
 - **GIVEN** only monthly observations exist

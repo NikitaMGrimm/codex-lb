@@ -60,7 +60,45 @@ describe("AccountTrendChart", () => {
     />);
     expect(JSON.parse(screen.getByTestId("chart-observations").textContent ?? "[]")).toEqual([
       { t: first, primary: null, secondary: 85 },
-      { t: second, primary: 60, secondary: null },
+      { t: second, primary: 60, secondary: 85 },
+    ]);
+  });
+
+  it("interpolates between observations while preserving observed zero", () => {
+    const times = Array.from({ length: 5 }, (_, i) =>
+      new Date(BASE.getTime() + i * 3600_000).toISOString(),
+    );
+    render(<AccountTrendChart
+      primary={[{ t: times[4], v: 50 }, { t: times[0], v: 60 }]}
+      secondary={[{ t: times[0], v: 90 }, { t: times[2], v: 0 }, { t: times[4], v: 85 }]}
+      secondaryScheduled={[{ t: times[1], v: 80 }, { t: times[3], v: 70 }]}
+    />);
+    expect(JSON.parse(screen.getByTestId("chart-observations").textContent ?? "[]")).toEqual([
+      { t: times[0], primary: 60, secondary: 90 },
+      { t: times[1], primary: 57.5, secondary: 45, secondaryScheduled: 80 },
+      { t: times[2], primary: 55, secondary: 0 },
+      { t: times[3], primary: 52.5, secondary: 42.5, secondaryScheduled: 70 },
+      { t: times[4], primary: 50, secondary: 85 },
+    ]);
+  });
+
+  it("replaces trailing carry-forward with time-weighted interpolation when a new sample arrives", () => {
+    const start = "2026-01-15T00:00:00Z";
+    const middle = "2026-01-15T01:00:00Z";
+    const end = "2026-01-15T04:00:00Z";
+    const primary = [{ t: middle, v: 50 }];
+    const { rerender } = render(<AccountTrendChart
+      primary={primary} secondary={[{ t: start, v: 90 }]}
+    />);
+    expect(JSON.parse(screen.getByTestId("chart-observations").textContent ?? "[]")[1])
+      .toEqual({ t: middle, primary: 50, secondary: 90 });
+    rerender(<AccountTrendChart
+      primary={primary} secondary={[{ t: start, v: 90 }, { t: end, v: 70 }]}
+    />);
+    expect(JSON.parse(screen.getByTestId("chart-observations").textContent ?? "[]")).toEqual([
+      { t: start, primary: null, secondary: 90 },
+      { t: middle, primary: 50, secondary: 85 },
+      { t: end, primary: 50, secondary: 70 },
     ]);
   });
 

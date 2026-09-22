@@ -28,23 +28,35 @@ function mergePoints(
   secondary: UsageTrendPoint[],
   secondaryScheduled: UsageTrendPoint[],
 ): MergedPoint[] {
-  const secondaryMap = new Map(secondary.map((p) => [p.t, p.v]));
-  const primaryMap = new Map(primary.map((p) => [p.t, p.v]));
   const secondaryScheduledMap = new Map(secondaryScheduled.map((p) => [p.t, p.v]));
-
-  if (primary.length === 0 && secondary.length === 0 && secondaryScheduled.length === 0) {
-    return [];
-  }
-
   const timestamps = [...new Set([...primary, ...secondary, ...secondaryScheduled].map((p) => p.t))]
     .sort((a, b) => Date.parse(a) - Date.parse(b));
+  const primaryValues = interpolatePoints(primary, timestamps);
+  const secondaryValues = interpolatePoints(secondary, timestamps);
 
-  return timestamps.map((t) => ({
+  return timestamps.map((t, index) => ({
     t,
-    primary: primaryMap.get(t) ?? null,
-    secondary: secondaryMap.get(t) ?? null,
+    primary: primaryValues[index],
+    secondary: secondaryValues[index],
     secondaryScheduled: secondaryScheduledMap.get(t),
   }));
+}
+
+function interpolatePoints(points: UsageTrendPoint[], timestamps: string[]): (number | null)[] {
+  const sorted = [...points].sort((a, b) => Date.parse(a.t) - Date.parse(b.t));
+  let nextIndex = 0;
+  return timestamps.map((timestamp) => {
+    const time = Date.parse(timestamp);
+    while (nextIndex < sorted.length && Date.parse(sorted[nextIndex].t) <= time) {
+      nextIndex += 1;
+    }
+    const previous = sorted[nextIndex - 1];
+    const next = sorted[nextIndex];
+    if (!previous) return null;
+    if (!next) return previous.v;
+    const fraction = (time - Date.parse(previous.t)) / (Date.parse(next.t) - Date.parse(previous.t));
+    return previous.v + fraction * (next.v - previous.v);
+  });
 }
 
 function formatXTick(isoStr: string): string {
