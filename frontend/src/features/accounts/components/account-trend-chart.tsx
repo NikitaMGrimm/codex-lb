@@ -23,30 +23,31 @@ type MergedPoint = {
   secondaryScheduled?: number;
 };
 
+/** Align observations and scheduled values on distinct instants across all series. */
 function mergePoints(
   primary: UsageTrendPoint[],
   secondary: UsageTrendPoint[],
   secondaryScheduled: UsageTrendPoint[],
 ): MergedPoint[] {
-  const secondaryScheduledMap = new Map(secondaryScheduled.map((p) => [p.t, p.v]));
-  const timestamps = [...new Set([...primary, ...secondary, ...secondaryScheduled].map((p) => p.t))]
-    .sort((a, b) => Date.parse(a) - Date.parse(b));
+  const secondaryScheduledMap = new Map(secondaryScheduled.map((p) => [Date.parse(p.t), p.v]));
+  const timestamps = [...new Set([...primary, ...secondary, ...secondaryScheduled].map((p) => Date.parse(p.t)))]
+    .sort((a, b) => a - b);
   const primaryValues = interpolatePoints(primary, timestamps);
   const secondaryValues = interpolatePoints(secondary, timestamps);
 
   return timestamps.map((t, index) => ({
-    t,
+    t: new Date(t).toISOString(),
     primary: primaryValues[index],
     secondary: secondaryValues[index],
     secondaryScheduled: secondaryScheduledMap.get(t),
   }));
 }
 
-function interpolatePoints(points: UsageTrendPoint[], timestamps: string[]): (number | null)[] {
+/** Fill gaps between observations while leaving time before the first sample unknown. */
+function interpolatePoints(points: UsageTrendPoint[], timestamps: number[]): (number | null)[] {
   const sorted = [...points].sort((a, b) => Date.parse(a.t) - Date.parse(b.t));
   let nextIndex = 0;
-  return timestamps.map((timestamp) => {
-    const time = Date.parse(timestamp);
+  return timestamps.map((time) => {
     while (nextIndex < sorted.length && Date.parse(sorted[nextIndex].t) <= time) {
       nextIndex += 1;
     }
@@ -82,6 +83,7 @@ type ChartTooltipProps = {
   monthly?: boolean;
 };
 
+/** Render quota series labels according to the account's quota window. */
 function CustomTooltip({ active, payload, label, monthly }: ChartTooltipProps) {
   const { t } = useTranslation();
   if (!active || !payload?.length) return null;
@@ -117,6 +119,7 @@ export type AccountTrendChartProps = {
 
 const EMPTY_TREND_POINTS: UsageTrendPoint[] = [];
 
+/** Plot merged account quota observations and any scheduled quota values. */
 export function AccountTrendChart({
   primary,
   secondary,

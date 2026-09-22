@@ -59,8 +59,19 @@ describe("AccountTrendChart", () => {
       monthly
     />);
     expect(JSON.parse(screen.getByTestId("chart-observations").textContent ?? "[]")).toEqual([
-      { t: first, primary: null, secondary: 85 },
-      { t: second, primary: 60, secondary: 85 },
+      { t: new Date(first).toISOString(), primary: null, secondary: 85 },
+      { t: new Date(second).toISOString(), primary: 60, secondary: 85 },
+    ]);
+  });
+
+  it("combines equivalent instants across offsets and retains the scheduled value", () => {
+    render(<AccountTrendChart
+      primary={[{ t: "2026-01-15T00:00:00Z", v: 60 }]}
+      secondary={[{ t: "2026-01-14T19:00:00-05:00", v: 85 }]}
+      secondaryScheduled={[{ t: "2026-01-14T19:00:00-05:00", v: 80 }]}
+    />);
+    expect(JSON.parse(screen.getByTestId("chart-observations").textContent ?? "[]")).toEqual([
+      { t: "2026-01-15T00:00:00.000Z", primary: 60, secondary: 85, secondaryScheduled: 80 },
     ]);
   });
 
@@ -91,14 +102,14 @@ describe("AccountTrendChart", () => {
       primary={primary} secondary={[{ t: start, v: 90 }]}
     />);
     expect(JSON.parse(screen.getByTestId("chart-observations").textContent ?? "[]")[1])
-      .toEqual({ t: middle, primary: 50, secondary: 90 });
+      .toEqual({ t: new Date(middle).toISOString(), primary: 50, secondary: 90 });
     rerender(<AccountTrendChart
       primary={primary} secondary={[{ t: start, v: 90 }, { t: end, v: 70 }]}
     />);
     expect(JSON.parse(screen.getByTestId("chart-observations").textContent ?? "[]")).toEqual([
-      { t: start, primary: null, secondary: 90 },
-      { t: middle, primary: 50, secondary: 85 },
-      { t: end, primary: 50, secondary: 70 },
+      { t: new Date(start).toISOString(), primary: null, secondary: 90 },
+      { t: new Date(middle).toISOString(), primary: 50, secondary: 85 },
+      { t: new Date(end).toISOString(), primary: 50, secondary: 70 },
     ]);
   });
 

@@ -224,10 +224,12 @@ function ResetCreditsRow({
   );
 }
 
+/** Remount display state when switching to a different account. */
 export function AccountUsagePanel(props: AccountUsagePanelProps) {
   return <AccountUsagePanelContent key={props.account.accountId} {...props} />;
 }
 
+/** Present the selected account's usage, quota windows, and trend chart. */
 function AccountUsagePanelContent({
   account,
   trends,

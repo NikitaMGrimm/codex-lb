@@ -15,3 +15,5 @@ The actual baseline and fixed chart components receive identical synthetic input
 `evidence/sparse-before.png` shows upstream rendering a false zero on day 20 and discarding days 21–22. `evidence/sparse-after.png` interpolates the weekly value to 88 percent on day 20, retains the final 86-to-85 percent segment, and holds the primary value at 62 percent on days 21–22. Both are built-in browser screenshots of local synthetic data, cropped to the chart and captions.
 
 Follow-up interpolation verification: 6 focused chart tests, TypeScript, changed-file ESLint, and strict change validation passed. A local built-in browser capture verifies continuous interpolation and trailing carry-forward using the same synthetic inputs.
+
+Review follow-up: the chart now merges points by instant, so `2026-01-15T00:00:00Z` and `2026-01-14T19:00:00-05:00` occupy one point. Using the same instant for scheduled-value lookup keeps its value visible even when the input offsets differ.
