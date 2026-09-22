@@ -1,0 +1,2 @@
+- [x] Preserve sparse chart observations, window labels, and account-scoped smoothing state.
+- [x] Verify regression tests and local synthetic browser scenarios.

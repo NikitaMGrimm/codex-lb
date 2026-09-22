@@ -6,7 +6,9 @@ import { AccountTrendChart } from "@/features/accounts/components/account-trend-
 
 vi.mock("@/components/lazy-recharts", () => ({
   Area: () => null,
-  AreaChart: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  AreaChart: ({ children, data }: { children: ReactNode; data: unknown }) => (
+    <div><output data-testid="chart-observations">{JSON.stringify(data)}</output>{children}</div>
+  ),
   CartesianGrid: () => null,
   Line: () => null,
   ResponsiveContainer: ({ children }: { children: ReactNode }) => (
@@ -48,4 +50,18 @@ describe("AccountTrendChart", () => {
     render(<AccountTrendChart primary={primary} secondary={[]} />);
     expect(screen.getByTestId("responsive-container")).toBeInTheDocument();
   });
+  it("retains non-aligned monthly observations without inventing zero remaining", () => {
+    const first = "2026-01-15T00:00:00Z";
+    const second = "2026-01-15T01:00:00Z";
+    render(<AccountTrendChart
+      primary={[{ t: second, v: 60 }]}
+      secondary={[{ t: first, v: 85 }]}
+      monthly
+    />);
+    expect(JSON.parse(screen.getByTestId("chart-observations").textContent ?? "[]")).toEqual([
+      { t: first, primary: null, secondary: 85 },
+      { t: second, primary: 60, secondary: null },
+    ]);
+  });
+
 });

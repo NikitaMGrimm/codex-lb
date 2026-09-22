@@ -18,8 +18,8 @@ import { formatChartDateTime } from "@/utils/formatters";
 
 type MergedPoint = {
   t: string;
-  primary: number;
-  secondary: number;
+  primary: number | null;
+  secondary: number | null;
   secondaryScheduled?: number;
 };
 
@@ -36,13 +36,14 @@ function mergePoints(
     return [];
   }
 
-  const basePoints = primary.length > 0 ? primary : secondary.length > 0 ? secondary : secondaryScheduled;
+  const timestamps = [...new Set([...primary, ...secondary, ...secondaryScheduled].map((p) => p.t))]
+    .sort((a, b) => Date.parse(a) - Date.parse(b));
 
-  return basePoints.map((p) => ({
-    t: p.t,
-    primary: primaryMap.get(p.t) ?? 0,
-    secondary: secondaryMap.get(p.t) ?? 0,
-    secondaryScheduled: secondaryScheduledMap.get(p.t),
+  return timestamps.map((t) => ({
+    t,
+    primary: primaryMap.get(t) ?? null,
+    secondary: secondaryMap.get(t) ?? null,
+    secondaryScheduled: secondaryScheduledMap.get(t),
   }));
 }
 
@@ -66,9 +67,10 @@ type ChartTooltipProps = {
   active?: boolean;
   payload?: ChartTooltipPayloadEntry[];
   label?: string;
+  monthly?: boolean;
 };
 
-function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
+function CustomTooltip({ active, payload, label, monthly }: ChartTooltipProps) {
   const { t } = useTranslation();
   if (!active || !payload?.length) return null;
   const heading = formatChartDateTime(label as string);
@@ -83,7 +85,7 @@ function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
               className="inline-block h-2 w-2 rounded-full"
               style={{ backgroundColor: entry.color }}
             />
-            <span className="text-muted-foreground">{meta ? t(`accounts.trend.series.${entry.dataKey}`, { defaultValue: meta.label }) : ""}</span>
+            <span className="text-muted-foreground">{meta ? (monthly && entry.dataKey === "secondary" ? t("common.quota.monthly") : monthly && entry.dataKey === "secondaryScheduled" ? t("accounts.usage.monthlyPlan") : t(`accounts.trend.series.${entry.dataKey}`, { defaultValue: meta.label })) : ""}</span>
             <span className="ml-auto tabular-nums font-medium">{entry.value?.toFixed(1)}%</span>
           </div>
         );
@@ -98,6 +100,7 @@ export type AccountTrendChartProps = {
   primary: UsageTrendPoint[];
   secondary: UsageTrendPoint[];
   secondaryScheduled?: UsageTrendPoint[];
+  monthly?: boolean;
 };
 
 const EMPTY_TREND_POINTS: UsageTrendPoint[] = [];
@@ -106,6 +109,7 @@ export function AccountTrendChart({
   primary,
   secondary,
   secondaryScheduled = EMPTY_TREND_POINTS,
+  monthly = false,
 }: AccountTrendChartProps) {
   const { t } = useTranslation();
   const chartColors = useChartColors();
@@ -158,7 +162,7 @@ export function AccountTrendChart({
           width={38}
         />
         <Tooltip
-          content={<CustomTooltip />}
+          content={<CustomTooltip monthly={monthly} />}
           cursor={{ stroke: "hsl(var(--border))", strokeWidth: 1 }}
         />
         {primary.length > 0 && (
