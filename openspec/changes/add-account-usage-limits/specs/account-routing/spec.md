@@ -391,9 +391,18 @@ Account and dashboard views SHALL distinguish provider remaining from usable rem
 - **THEN** the view SHALL show 46 percent provider remaining, 20 percent reserved, and 26 percent usable of the provider capacity.
 
 ### Requirement: Reserve-oriented editing
-The editor SHALL ask how much quota to keep for direct use, converting reserve percentages to the existing maximum-used API contract. The shared reserve and optional per-window reserves SHALL be visible together. Blank window values SHALL inherit the shared reserve, with that behavior explained next to the fields. Bars SHALL place reserved quota on the left, usable quota next, and consumed quota on the right. Stripes SHALL not exceed provider remaining.
+The editor SHALL ask how much quota to keep for direct use, converting reserve percentages to the existing maximum-used API contract. The shared reserve and optional reserves for the account's reported standard windows SHALL be visible together. The editor MUST NOT offer a 5-hour or weekly override when that window is absent. A monthly-only account SHALL edit its shared policy through a field labeled Monthly reserve; monthly usage MUST NOT use a weekly override. When window telemetry is unknown, only the shared reserve SHALL be offered. Hiding an inapplicable override MUST preserve its saved value when another field is edited. Blank window values SHALL inherit the shared reserve, with that behavior explained next to the fields. Bars SHALL place reserved quota on the left, usable quota next, and consumed quota on the right. Stripes SHALL not exceed provider remaining.
 
 #### Scenario: Twenty percent reserve
 - **WHEN** the operator saves a 20 percent reserve and usage is 54 percent
 - **THEN** the maximum-used API value SHALL be 80
 - **AND** the bar SHALL show 20 percent striped on the left, 26 percent usable next, and 54 percent consumed on the right.
+
+
+#### Scenario: Reserve controls follow reported windows
+- **GIVEN** an account reports only a weekly standard window
+- **THEN** the editor SHALL offer the shared and weekly reserves without a 5-hour override.
+- **GIVEN** an account reports only a monthly standard window
+- **THEN** the editor SHALL offer a monthly reserve backed by the shared percentage without 5-hour or weekly overrides.
+- **WHEN** the operator saves, disables, or re-enables that policy
+- **THEN** the monthly effective limit SHALL retain the same shared-policy semantics.

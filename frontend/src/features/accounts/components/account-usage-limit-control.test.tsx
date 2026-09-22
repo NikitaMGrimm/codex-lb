@@ -304,4 +304,54 @@ describe("AccountUsageLimitControl", () => {
       enabled: true, percent: null, percent5H: 70, percentWeekly: 90,
     });
   });
+  it("shows weekly overrides only for a weekly-only account and preserves hidden saved overrides", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const account = createAccountSummary({
+      planType: "pro", windowMinutesPrimary: null, windowMinutesSecondary: 10080,
+      usage: { primaryRemainingPercent: null, secondaryRemainingPercent: 83 },
+      usageLimitPercent: 80, usageLimit5HPercent: 60, usageLimitEnabled: true,
+    });
+    render(<AccountUsageLimitControl account={account} busy={false} readOnly={false} onChange={onChange} />);
+    expect(screen.queryByRole("spinbutton", { name: "5-hour reserve (%)" })).not.toBeInTheDocument();
+    await user.type(screen.getByRole("spinbutton", { name: "Weekly reserve (%)" }), "30");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(onChange).toHaveBeenCalledWith(account.accountId, {
+      enabled: true, percent: 80, percent5H: 60, percentWeekly: 70,
+    });
+  });
+
+  it("edits monthly reserves through the shared policy and retains it across disable and re-enable", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const account = createAccountSummary({
+      planType: "free", windowMinutesPrimary: null, windowMinutesSecondary: null, windowMinutesMonthly: 43200,
+      usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, monthlyRemainingPercent: 85 },
+    });
+    const { rerender } = render(<AccountUsageLimitControl account={account} busy={false} readOnly={false} onChange={onChange} />);
+    expect(screen.getAllByRole("spinbutton")).toHaveLength(1);
+    await user.type(screen.getByRole("spinbutton", { name: "Monthly reserve (%)" }), "20");
+    await user.click(screen.getByRole("button", { name: "Save and enable" }));
+    expect(onChange).toHaveBeenLastCalledWith(account.accountId, {
+      enabled: true, percent: 80, percent5H: null, percentWeekly: null,
+    });
+    rerender(<AccountUsageLimitControl account={{ ...account, usageLimitEnabled: true, usageLimitPercent: 80 }} busy={false} readOnly={false} onChange={onChange} />);
+    await user.click(screen.getByRole("switch", { name: "Protect reserved quota" }));
+    expect(onChange).toHaveBeenLastCalledWith(account.accountId, { enabled: false });
+    rerender(<AccountUsageLimitControl account={{ ...account, usageLimitEnabled: false, usageLimitPercent: 80 }} busy={false} readOnly={false} onChange={onChange} />);
+    await user.click(screen.getByRole("switch", { name: "Protect reserved quota" }));
+    expect(onChange).toHaveBeenLastCalledWith(account.accountId, {
+      enabled: true, percent: 80, percent5H: null, percentWeekly: null,
+    });
+  });
+
+  it("offers only a shared reserve when quota windows are unknown", () => {
+    render(<AccountUsageLimitControl account={createAccountSummary({
+      windowMinutesPrimary: null, windowMinutesSecondary: null, windowMinutesMonthly: null,
+      usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null },
+    })} busy={false} readOnly={false} onChange={vi.fn()} />);
+    expect(screen.getAllByRole("spinbutton")).toHaveLength(1);
+    expect(screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" })).toBeInTheDocument();
+  });
+
 });

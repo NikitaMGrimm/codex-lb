@@ -26,6 +26,13 @@ const labels: Record<LimitField, string> = {
 
 export function AccountUsageLimitControl({ account, busy, readOnly, onChange }: AccountUsageLimitControlProps) {
   const { t } = useTranslation();
+  const hasPrimary = account.windowMinutesPrimary != null || account.usage?.primaryRemainingPercent != null;
+  const hasWeekly = account.windowMinutesSecondary != null || account.usage?.secondaryRemainingPercent != null;
+  const hasMonthly = account.windowMinutesMonthly != null || account.usage?.monthlyRemainingPercent != null;
+  const monthlyOnly = hasMonthly && !hasPrimary && !hasWeekly;
+  const visibleFields = fields.filter((field) =>
+    field === "percent" || (field === "percent5H" ? hasPrimary : hasWeekly),
+  );
   const saved = {
     percent: account.usageLimitPercent ?? null,
     percent5H: account.usageLimit5HPercent ?? null,
@@ -76,14 +83,14 @@ export function AccountUsageLimitControl({ account, busy, readOnly, onChange }: 
         ) : null}
       </div>
       <p className="text-xs text-muted-foreground">{t("accounts.usageLimit.combinedDescription")}</p>
-      <div className="grid gap-3 sm:grid-cols-3">
-        {fields.map((field) => {
+      <div className={`grid gap-3 ${visibleFields.length === 3 ? "sm:grid-cols-3" : visibleFields.length === 2 ? "sm:grid-cols-2" : ""}`}>
+        {visibleFields.map((field) => {
           const inputId = `usage-limit-${field}-${account.accountId}`;
           const value = parsed[field];
           const invalid = value !== null && (!Number.isFinite(value) || value <= 0 || value > 100);
           return (
             <label key={field} className="min-w-0 space-y-1" htmlFor={inputId}>
-              <span className="text-xs font-medium">{t(labels[field])}</span>
+              <span className="text-xs font-medium">{t(field === "percent" && monthlyOnly ? "accounts.usageLimit.reserveMonthly" : labels[field])}</span>
               <Input
                 id={inputId}
                 name={field}
@@ -109,7 +116,7 @@ export function AccountUsageLimitControl({ account, busy, readOnly, onChange }: 
           );
         })}
       </div>
-      <p className="text-xs text-muted-foreground">{t("accounts.usageLimit.windowHint")}</p>
+      <p className="text-xs text-muted-foreground">{t(monthlyOnly ? "accounts.usageLimit.monthlyHint" : visibleFields.length === 1 ? "accounts.usageLimit.sharedHint" : "accounts.usageLimit.windowHint")}</p>
       <div className="flex flex-wrap items-center gap-2">
         <Button type="button" size="sm" className="h-8 text-xs" disabled={disabled || !valid || !changed} onClick={save}>
           {configured ? t("common.actions.save") : t("accounts.usageLimit.setAndEnable")}

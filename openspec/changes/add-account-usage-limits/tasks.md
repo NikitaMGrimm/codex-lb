@@ -26,3 +26,5 @@
 - [x] 18. Add optional per-window overrides to persistence, API, snapshots and normalized evaluator.
 - [x] 19. Extend the existing editor and show reserved/usable quota throughout account and dashboard views.
 - [x] 20. Verify policy, API, migration and UI behavior and launch an isolated synthetic preview.
+
+- [x] Show only applicable reserve windows, label monthly shared reserves, and verify local synthetic browser saves.
