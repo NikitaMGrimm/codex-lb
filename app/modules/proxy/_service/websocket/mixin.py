@@ -2737,6 +2737,72 @@ class _WebSocketMixin:
                         is_response_create
                         and text_data is not None
                         and request_state is not None
+                        and account is not None
+                    ):
+                        # The reader can retire the socket or finalize an
+                        # unsent request while authorization awaits. Sample
+                        # reconnect and claim dispatch under the same lock as
+                        # expiry, with no further await before send_text().
+                        request_budget_seconds = _facade()._stream_request_budget_seconds(
+                            runtime_settings, request_transport="websocket"
+                        )
+                        dispatch_owner_bound = False
+                        async with pending_lock:
+                            dispatch_requires_reconnect = (
+                                upstream_control is not None and upstream_control.reconnect_requested
+                            )
+                            if not dispatch_requires_reconnect:
+                                dispatch_pending = request_state in pending_requests
+                                dispatch_expired = (
+                                    dispatch_pending
+                                    and clock.monotonic() >= request_state.started_at + request_budget_seconds
+                                )
+                                if dispatch_pending and not dispatch_expired:
+                                    dispatch_owner_bound = _bind_websocket_request_dispatch_owner(
+                                        request_state,
+                                        account_id=account.id,
+                                        exact_request_text=text_data,
+                                    )
+                                    if dispatch_owner_bound:
+                                        request_state.response_create_sent_at = clock.monotonic()
+                        if not dispatch_requires_reconnect:
+                            if not dispatch_pending:
+                                # The reader already owns finalization.
+                                continue
+                            if dispatch_expired:
+                                expired_timeout = _websocket_receive_timeout_for_pending_requests(
+                                    (request_state.started_at,),
+                                    proxy_request_budget_seconds=request_budget_seconds,
+                                    stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
+                                    now=clock.monotonic(),
+                                )
+                                assert expired_timeout is not None
+                                await proxy._fail_expired_pending_websocket_requests(
+                                    account_id_value=account.id,
+                                    pending_requests=pending_requests,
+                                    pending_lock=pending_lock,
+                                    request_budget_seconds=request_budget_seconds,
+                                    error_code=expired_timeout.error_code,
+                                    error_message=expired_timeout.error_message,
+                                    api_key=api_key,
+                                    websocket=websocket,
+                                    client_send_lock=client_send_lock,
+                                    response_create_gate=response_create_gate,
+                                )
+                                continue
+                            if not dispatch_owner_bound:
+                                raise ProxyResponseError(
+                                    502,
+                                    openai_error(
+                                        "previous_response_owner_unavailable",
+                                        "Request payload owner account is unavailable; retry later.",
+                                        error_type="server_error",
+                                    ),
+                                )
+                    if (
+                        is_response_create
+                        and text_data is not None
+                        and request_state is not None
                         and upstream_control is not None
                         and upstream_control.reconnect_requested
                     ):
@@ -2818,61 +2884,6 @@ class _WebSocketMixin:
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):
                             if account is None:
                                 raise _http_bridge_previous_response_owner_unavailable_error()
-                            # Expiry and terminal handling can remove an unsent
-                            # request during the final owner authorization wait.
-                            # Claim it under the same lock used by those paths
-                            # before binding its owner or starting the send.
-                            request_budget_seconds = _facade()._stream_request_budget_seconds(
-                                runtime_settings, request_transport="websocket"
-                            )
-                            dispatch_owner_bound = False
-                            async with pending_lock:
-                                dispatch_pending = request_state in pending_requests
-                                dispatch_expired = (
-                                    dispatch_pending
-                                    and clock.monotonic() >= request_state.started_at + request_budget_seconds
-                                )
-                                if dispatch_pending and not dispatch_expired:
-                                    dispatch_owner_bound = _bind_websocket_request_dispatch_owner(
-                                        request_state,
-                                        account_id=account.id,
-                                        exact_request_text=text_data,
-                                    )
-                                    if dispatch_owner_bound:
-                                        request_state.response_create_sent_at = clock.monotonic()
-                            if not dispatch_pending:
-                                # The reader already owns finalization.
-                                continue
-                            if dispatch_expired:
-                                expired_timeout = _websocket_receive_timeout_for_pending_requests(
-                                    (request_state.started_at,),
-                                    proxy_request_budget_seconds=request_budget_seconds,
-                                    stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
-                                    now=clock.monotonic(),
-                                )
-                                assert expired_timeout is not None
-                                await proxy._fail_expired_pending_websocket_requests(
-                                    account_id_value=account.id,
-                                    pending_requests=pending_requests,
-                                    pending_lock=pending_lock,
-                                    request_budget_seconds=request_budget_seconds,
-                                    error_code=expired_timeout.error_code,
-                                    error_message=expired_timeout.error_message,
-                                    api_key=api_key,
-                                    websocket=websocket,
-                                    client_send_lock=client_send_lock,
-                                    response_create_gate=response_create_gate,
-                                )
-                                continue
-                            if not dispatch_owner_bound:
-                                raise ProxyResponseError(
-                                    502,
-                                    openai_error(
-                                        "previous_response_owner_unavailable",
-                                        "Request payload owner account is unavailable; retry later.",
-                                        error_type="server_error",
-                                    ),
-                                )
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
