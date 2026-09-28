@@ -109,7 +109,14 @@ describe("default account usage-limit handler", () => {
       windowMinutesMonthly: 43_200,
     })]);
     await updateAccountUsageLimit("acc_primary", { enabled: true, percentWeekly: 40 });
-    const unavailable = (await listAccounts()).accounts.find((item) => item.accountId === "acc_primary");
-    expect(unavailable).toMatchObject({ usageLimitState: "data_unavailable" });
+    const unrestricted = (await listAccounts()).accounts.find((item) => item.accountId === "acc_primary");
+    expect(unrestricted).toMatchObject({ usageLimitState: "available" });
+
+    await updateAccountUsageLimit("acc_primary", { enabled: true, percent: 40 });
+    const restricted = (await listAccounts()).accounts.find((item) => item.accountId === "acc_primary");
+    expect(restricted).toMatchObject({
+      effectiveLimitMonthly: 40,
+      usageLimitState: "data_unavailable",
+    });
   });
 });

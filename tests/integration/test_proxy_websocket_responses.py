@@ -5047,6 +5047,86 @@ def test_v1_responses_websocket_owner_authorization_timeout_fails_frame(app_inst
     assert upstream.sent_text == []
 
 
+def test_v1_responses_websocket_expiry_during_owner_authorization_does_not_dispatch(app_instance, monkeypatch) -> None:
+    release_authorization = threading.Event()
+    final_authorization_started = threading.Event()
+
+    class _ClosingSequencedUpstreamWebSocket(_SequencedUpstreamWebSocket):
+        async def receive(self) -> _FakeUpstreamMessage:
+            while not self.closed_event.is_set():
+                try:
+                    return await asyncio.wait_for(super().receive(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    pass
+            return _FakeUpstreamMessage("close", close_code=1000)
+
+    upstream = _ClosingSequencedUpstreamWebSocket(
+        [], deferred_message_batches=[_websocket_response_batch("resp_ws_after_expiry")]
+    )
+    account = SimpleNamespace(id="acct_ws_expired_before_dispatch")
+    authorization_calls = 0
+    terminal_errors: list[str] = []
+    original_emit_error = proxy_module.ProxyService._emit_websocket_terminal_error
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings(proxy_request_budget_seconds=0.05, stream_idle_timeout_seconds=1.0)
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return account, upstream
+
+    async def authorize_account_fresh(self, account_id):
+        nonlocal authorization_calls
+        del self
+        assert account_id == account.id
+        authorization_calls += 1
+        if authorization_calls == 2:
+            final_authorization_started.set()
+            await asyncio.to_thread(release_authorization.wait)
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+
+    async def record_terminal_error(self, websocket, **kwargs):
+        terminal_errors.append(kwargs["error_code"])
+        await original_emit_error(self, websocket, **kwargs)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
+    monkeypatch.setattr(proxy_module.ProxyService, "_emit_websocket_terminal_error", record_terminal_error)
+    monkeypatch.setattr(proxy_module, "_stream_request_budget_seconds", lambda _settings, *, request_transport: 0.05)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            try:
+                websocket.send_text(json.dumps(_websocket_response_create("expired")))
+                assert final_authorization_started.wait(timeout=2)
+                expired = json.loads(websocket.receive_text())
+                assert expired["type"] == "response.failed"
+                assert expired["response"]["error"]["code"] == "upstream_request_timeout"
+                release_authorization.set()
+
+                websocket.send_text(json.dumps(_websocket_response_create("next")))
+                events = [json.loads(websocket.receive_text()) for _ in range(2)]
+                assert [event["type"] for event in events] == ["response.created", "response.completed"]
+            finally:
+                release_authorization.set()
+                upstream.closed_event.set()
+
+    assert authorization_calls >= 4
+    assert len(upstream.sent_text) == 1
+    assert _without_installation_metadata(json.loads(upstream.sent_text[0]))["input"][0]["content"][0]["text"] == "next"
+    assert terminal_errors == ["upstream_request_timeout"]
+
+
 def test_v1_responses_websocket_reconnects_when_owner_auth_outlives_socket(app_instance, monkeypatch) -> None:
     close_first = threading.Event()
 

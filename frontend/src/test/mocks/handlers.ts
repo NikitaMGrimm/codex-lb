@@ -735,10 +735,9 @@ function refreshMockUsageLimitSnapshot(account: AccountSummary): void {
     ];
   const observed = windows.filter(({ minutes, remaining }) => minutes != null || remaining != null);
   const limited = observed.filter(({ limit }) => limit != null);
-  const hasMeasurement = observed.some(({ remaining }) => remaining != null && Number.isFinite(remaining));
   const missingLimitedMeasurement = limited.some(({ remaining }) =>
     remaining == null || !Number.isFinite(remaining) || remaining < 0 || remaining > 100);
-  if (observed.length === 0 || (limited.length === 0 && !hasMeasurement) || missingLimitedMeasurement) {
+  if (observed.length === 0 || missingLimitedMeasurement) {
     account.usageLimitState = "data_unavailable";
   } else if (limited.some(({ remaining, limit }) => remaining != null && limit != null && 100 - remaining >= limit)) {
     account.usageLimitState = "reached";
