@@ -4438,6 +4438,47 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch, po
         limited.usage_limit_percent = 10.0
         accounts.append(limited)
     now = utcnow()
+    latest_primary = {
+        account.id: UsageHistory(
+            id=1,
+            account_id=account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 3600,
+            window_minutes=300,
+        )
+    }
+    latest_secondary = {
+        account.id: UsageHistory(
+            id=2,
+            account_id=account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 86400,
+            window_minutes=10080,
+        )
+    }
+    if policy_blocked_peer:
+        latest_primary[limited.id] = UsageHistory(
+            id=3,
+            account_id=limited.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 3600,
+            window_minutes=300,
+        )
+        latest_secondary[limited.id] = UsageHistory(
+            id=4,
+            account_id=limited.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 86400,
+            window_minutes=10080,
+        )
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_settings_cache",
@@ -4449,28 +4490,8 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch, po
         AsyncMock(
             return_value=SelectionInputs(
                 accounts=accounts,
-                latest_primary={
-                    account.id: UsageHistory(
-                        id=1,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="primary",
-                        used_percent=10.0,
-                        reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 3600,
-                        window_minutes=300,
-                    )
-                },
-                latest_secondary={
-                    account.id: UsageHistory(
-                        id=2,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="secondary",
-                        used_percent=10.0,
-                        reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 86400,
-                        window_minutes=10080,
-                    )
-                },
+                latest_primary=latest_primary,
+                latest_secondary=latest_secondary,
                 latest_monthly={},
             )
         ),
