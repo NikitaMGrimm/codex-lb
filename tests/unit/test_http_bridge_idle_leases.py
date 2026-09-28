@@ -757,7 +757,7 @@ async def test_turn_rechecks_usage_policy_after_prewarm_before_queue_admission(
             queue_limit=8,
         )
 
-    assert exc_info.value.status_code == 503
+    assert exc_info.value.status_code == 429
     assert exc_info.value.payload["error"]["code"] == "account_usage_limit_reached"
     assert usage_gate.await_count == 2
     acquire_account_lease.assert_awaited_once()

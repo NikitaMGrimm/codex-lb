@@ -4256,10 +4256,10 @@ async def test_opportunistic_admission_preserves_local_account_usage_limit_denia
     )
 
     assert response is not None
-    assert response.status_code == 503
+    assert response.status_code == 429
     body = json.loads(bytes(response.body))
     assert body["error"]["code"] == "account_usage_limit_reached"
-    assert body["error"]["type"] == "server_error"
+    assert body["error"]["type"] == "rate_limit_error"
     assert body["error"]["message"] == "Account usage limit reached; reserved quota is unavailable"
     assert "resets_at" not in body["error"]
     assert "Retry-After" not in response.headers

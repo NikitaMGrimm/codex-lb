@@ -4963,10 +4963,10 @@ async def test_v1_responses_http_bridge_revalidates_usage_limit_before_second_tu
         "/v1/responses",
         json={**payload, "input": "second turn", "previous_response_id": first.json()["id"]},
     )
-    assert second.status_code == 503
+    assert second.status_code == 429
     assert second.json()["error"] == {
         "message": "All otherwise available accounts have reached their usage limit or lack current usage data",
-        "type": "server_error",
+        "type": "rate_limit_error",
         "code": "account_usage_limit_reached",
     }
 
@@ -5129,7 +5129,7 @@ async def test_v1_responses_http_bridge_usage_limit_rejects_only_overlapping_new
             json={**payload, "input": "second turn"},
         )
 
-        assert second.status_code == 503
+        assert second.status_code == 429
         assert second.json()["error"]["code"] == "account_usage_limit_reached"
         assert len(upstream.sent_text) == 1
         assert upstream.closed is False

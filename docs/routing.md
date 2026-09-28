@@ -102,7 +102,8 @@ ordinary selection on another replica may briefly retain cached inputs until
 invalidation or cache expiry. Work already dispatched is not cancelled.
 
 `account_usage_limit_reached` means the local policy blocks the account (because
-the cap is reached or current telemetry is unavailable).
+the cap is reached or current telemetry is unavailable). A selection denial uses
+HTTP 429 with a `rate_limit_error` type and no upstream reset deadline.
 `account_usage_limit_authorization_failed` means the local authorization read
 could not be completed; retry after the database/service recovers. It is not an
 upstream HTTP response.

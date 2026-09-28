@@ -3608,3 +3608,36 @@ async def test_usage_limit_overrides_preserve_scalar_and_round_trip(tmp_path, db
         assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_overrides_upgrade_without_previous_enabled_constraint(tmp_path):
+    import sqlalchemy as sa
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'usage-overrides-missing-check.sqlite'}"
+    parent = "20260728_010000_add_account_usage_limits"
+    revision = "20260910_010000_add_usage_limit_overrides"
+    await to_thread.run_sync(lambda: run_upgrade(url, parent, bootstrap_legacy=True))
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+
+            def drop_previous_check(sync_conn):
+                operations = Operations(MigrationContext.configure(sync_conn))
+                with operations.batch_alter_table("accounts") as batch:
+                    batch.drop_constraint("ck_accounts_usage_limit_enabled_requires_percent", type_="check")
+
+            await conn.run_sync(drop_previous_check)
+
+        await to_thread.run_sync(lambda: run_upgrade(url, revision, bootstrap_legacy=True))
+        async with engine.connect() as conn:
+            constraints = await conn.run_sync(lambda sync_conn: sa.inspect(sync_conn).get_check_constraints("accounts"))
+            assert "ck_accounts_usage_limit_enabled_requires_percent" in {
+                constraint["name"] for constraint in constraints
+            }
+            columns = await conn.run_sync(lambda sync_conn: sa.inspect(sync_conn).get_columns("accounts"))
+            assert {"usage_limit_5h_percent", "usage_limit_weekly_percent"} <= {column["name"] for column in columns}
+    finally:
+        await engine.dispose()

@@ -11,10 +11,13 @@ depends_on = None
 
 def upgrade() -> None:
     inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("accounts"):
+        return
     columns = {column["name"] for column in inspector.get_columns("accounts")}
     constraints = {constraint["name"] for constraint in inspector.get_check_constraints("accounts")}
     with op.batch_alter_table("accounts") as batch:
-        batch.drop_constraint("ck_accounts_usage_limit_enabled_requires_percent", type_="check")
+        if "ck_accounts_usage_limit_enabled_requires_percent" in constraints:
+            batch.drop_constraint("ck_accounts_usage_limit_enabled_requires_percent", type_="check")
         for window in ("5h", "weekly"):
             column = f"usage_limit_{window}_percent"
             if column not in columns:
@@ -31,6 +34,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sa.inspect(op.get_bind()).has_table("accounts"):
+        return
     op.execute("UPDATE accounts SET usage_limit_enabled = false WHERE usage_limit_percent IS NULL")
     with op.batch_alter_table("accounts") as batch:
         batch.drop_constraint("ck_accounts_usage_limit_enabled_requires_percent", type_="check")

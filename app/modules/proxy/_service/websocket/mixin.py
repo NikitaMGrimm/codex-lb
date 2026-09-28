@@ -523,7 +523,7 @@ from app.modules.proxy.tool_call_dedupe import (
 from app.modules.proxy.tool_call_dedupe import (
     response_id_from_payload as tool_call_response_id_from_payload,
 )
-from app.modules.usage.authorization import OwnerAuthorizationKind
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 
 
 def _facade() -> Any:
@@ -536,6 +536,7 @@ _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily 
 # Scope teardown coordinates several request/lease finalizers; keep its normal
 # observation budget separate from the short generic child-task cancel bound.
 _WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS = 5.0
+_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS = 5.0
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "This request requires Trusted Access for Cyber, but no eligible account is marked as "
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
@@ -1360,7 +1361,14 @@ async def _process_upstream_websocket_transport_end(
 
 
 async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, account_id: str) -> None:
-    owner_authorization = await proxy._load_balancer.authorize_account_fresh(account_id)
+    try:
+        owner_authorization = await scheduler_for(proxy).wait_for(
+            proxy._load_balancer.authorize_account_fresh(account_id),
+            timeout=_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning("WebSocket owner authorization timed out account_id=%s", account_id)
+        owner_authorization = OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
     if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
         raise ProxyResponseError(
             503,
@@ -2721,6 +2729,8 @@ class _WebSocketMixin:
                             request_state.fresh_upstream_request_text = fresh_upstream_request_text
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
+                    if is_response_create and account is not None:
+                        await _authorize_websocket_dispatch_owner(proxy, account.id)
                     if (
                         is_response_create
                         and text_data is not None
@@ -2806,7 +2816,6 @@ class _WebSocketMixin:
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):
                             if account is None:
                                 raise _http_bridge_previous_response_owner_unavailable_error()
-                            await _authorize_websocket_dispatch_owner(proxy, account.id)
                             if not _bind_websocket_request_dispatch_owner(
                                 request_state,
                                 account_id=account.id,

@@ -4878,6 +4878,9 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
                         separators=(",", ":"),
                     ),
                 )
+            if self._receive_count > 2:
+                await asyncio.to_thread(self.closed_event.wait)
+                return _FakeUpstreamMessage("close", close_code=1000)
             await asyncio.to_thread(release_first_response.wait)
             return _FakeUpstreamMessage(
                 "text",
@@ -5002,6 +5005,107 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
                 assert first_completed["response"]["id"] == "resp_ws_first"
     finally:
         release_first_response.set()
+
+
+def test_v1_responses_websocket_owner_authorization_timeout_fails_frame(app_instance, monkeypatch) -> None:
+    upstream = _FakeUpstreamWebSocket([])
+    account = SimpleNamespace(id="acct_ws_auth_timeout")
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return account, upstream
+
+    async def stalled_authorization(self, account_id):
+        del self
+        assert account_id == account.id
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", stalled_authorization)
+    monkeypatch.setattr(websocket_mixin_module, "_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS", 0.01)
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            websocket.send_text(json.dumps(_websocket_response_create("timeout")))
+            failed = json.loads(websocket.receive_text())
+
+    assert failed["type"] == "response.failed"
+    assert failed["response"]["error"]["code"] == "account_usage_limit_authorization_failed"
+    assert upstream.sent_text == []
+
+
+def test_v1_responses_websocket_reconnects_when_owner_auth_outlives_socket(app_instance, monkeypatch) -> None:
+    close_first = threading.Event()
+
+    class _ClosingUpstreamWebSocket(_FakeUpstreamWebSocket):
+        async def receive(self) -> _FakeUpstreamMessage:
+            await asyncio.to_thread(close_first.wait)
+            return _FakeUpstreamMessage("close", close_code=1000)
+
+    first_upstream = _ClosingUpstreamWebSocket([])
+    second_upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[_websocket_response_batch("resp_ws_reconnected_after_auth")],
+    )
+    upstreams = deque([first_upstream, second_upstream])
+    account = SimpleNamespace(id="acct_ws_auth_reconnect")
+    authorization_calls = 0
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return account, upstreams.popleft()
+
+    async def authorize_account_fresh(self, account_id):
+        nonlocal authorization_calls
+        del self
+        assert account_id == account.id
+        authorization_calls += 1
+        if authorization_calls == 2:
+            close_first.set()
+            await asyncio.to_thread(first_upstream.closed_event.wait)
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
+
+    try:
+        with TestClient(app_instance) as client:
+            with client.websocket_connect("/v1/responses") as websocket:
+                websocket.send_text(json.dumps(_websocket_response_create("reconnect after auth")))
+                events = [json.loads(websocket.receive_text()) for _ in range(2)]
+    finally:
+        close_first.set()
+
+    assert [event["type"] for event in events] == ["response.created", "response.completed"]
+    assert first_upstream.sent_text == []
+    assert len(second_upstream.sent_text) == 1
+    assert authorization_calls >= 3
 
 
 def test_v1_responses_websocket_archives_multiplexed_upstream_frames_by_response_id(app_instance, monkeypatch):
