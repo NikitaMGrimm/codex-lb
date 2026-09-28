@@ -22,7 +22,7 @@ from app.core.openai.models import CompactResponsePayload
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKeyLimit, RequestLog
+from app.db.models import Account, AccountStatus, ApiKeyLimit, RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.accounts.repository import AccountsRepository
@@ -205,6 +205,35 @@ async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(asy
     assert rows[0].request_kind == "warmup"
     assert rows[0].model == "gpt-5.4-nano"
     assert limit.current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_warmup_excludes_accounts_requiring_reauthentication(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    active_id = await _import_account(async_client, "acc-warmup-active", "warmup-active@example.com")
+    reauth_id = await _import_account(async_client, "acc-warmup-reauth", "warmup-reauth@example.com")
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account).where(Account.id == reauth_id).values(status=AccountStatus.REAUTH_REQUIRED)
+        )
+        await session.commit()
+
+    _, key = await _create_api_key(async_client, name="warmup-active-only")
+    captured_models: list[str] = []
+    _install_successful_warmup_stub(monkeypatch, captured_models)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "force"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total_accounts"] == 1
+    assert [entry["account_id"] for entry in response.json()["submitted"]] == [active_id]
+    assert response.json()["skipped"] == []
+    assert response.json()["failed"] == []
+    assert captured_models == ["gpt-5.4-mini"]
 
 
 @pytest.mark.asyncio

@@ -211,8 +211,10 @@ const AccountUsageLimitPayloadSchema = z
   .object({
     enabled: z.boolean(),
     percent: z.number().gt(0).max(100).nullable().optional(),
+    percent5H: z.number().gt(0).max(100).nullable().optional(),
+    percentWeekly: z.number().gt(0).max(100).nullable().optional(),
   })
-  .refine((value) => !value.enabled || value.percent != null);
+  .refine((value) => !value.enabled || value.percent != null || value.percent5H != null || value.percentWeekly != null);
 
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
@@ -1172,11 +1174,19 @@ export const handlers = [
       if (payload.percent !== undefined) {
         account.usageLimitPercent = payload.percent;
       }
+      if (payload.percent5H !== undefined) {
+        account.usageLimit5HPercent = payload.percent5H;
+      }
+      if (payload.percentWeekly !== undefined) {
+        account.usageLimitWeeklyPercent = payload.percentWeekly;
+      }
       account.usageLimitState = payload.enabled ? "available" : "disabled";
       return HttpResponse.json({
         accountId,
         enabled: account.usageLimitEnabled,
         percent: account.usageLimitPercent ?? null,
+        percent5H: account.usageLimit5HPercent ?? null,
+        percentWeekly: account.usageLimitWeeklyPercent ?? null,
       });
     },
   ),

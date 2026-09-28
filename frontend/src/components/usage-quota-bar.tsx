@@ -22,7 +22,7 @@ export function UsageQuotaBar({ percent, cap, "aria-label": ariaLabel }: {
     <div className="min-w-0 space-y-1" title={percent === null ? undefined : `${providerLabel}; ${summary}`}>
       <div role="img" aria-label={accessibleLabel}
         className={cn("relative h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(usable))}>
-        <div className={cn("absolute inset-y-0 left-0 transition-colors", quotaBarColor(usable))}
+        <div className={cn("absolute inset-y-0 transition-colors", quotaBarColor(usable))}
           style={{ left: String(reserved) + "%", width: `${percent === null ? 0 : usable}%` }} />
         {reserved > 0 ? <div className="absolute inset-y-0 left-0 bg-muted-foreground/30"
           style={{ width: `${reserved}%`, backgroundImage: "repeating-linear-gradient(135deg, transparent, transparent 2px, currentColor 2px, currentColor 3px)", opacity: 0.45 }} /> : null}
