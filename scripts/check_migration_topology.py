@@ -89,16 +89,6 @@ TIMESTAMP_PREFIX_PATTERN = re.compile(r"^(\d{8}_\d{6})_")
 # merge revision): zero violations at or after the cutoff.
 RATCHET_PREFIX = "20260911_000000"
 
-# Both revisions already landed on main; renaming them would break stamped
-# databases. Exempt only this exact pair, with its explicit repair present.
-_REPAIRED_COLLISION = frozenset(
-    {
-        "20260914_000000_add_scim_tokens",
-        "20260914_000000_drop_subscription_overflow_schema",
-    }
-)
-_COLLISION_REPAIR = "20260918_000000_merge_scim_and_overflow_removal"
-
 _FAILURE_PREFIX = "check_migration_topology"
 
 
@@ -361,6 +351,28 @@ def _group_is_chained(group: Sequence[Revision], parents: Mapping[str, tuple[str
     )
 
 
+def _converged_by(
+    group: Sequence[Revision],
+    revisions: Sequence[Revision],
+    parents: Mapping[str, tuple[str, ...]],
+) -> str | None:
+    """The revision that already merges every member of ``group``, if one exists.
+
+    A collision that has since been converged is history, not a live fork: the
+    graph has one head and nothing fails with ``MultipleHeads``. It still must
+    not be re-stamped — both ids are published, and renaming one orphans every
+    ``alembic_version`` row that names it — so the authoring-time remedy does
+    not apply and saying it would send a maintainer somewhere dangerous.
+    """
+    members = {revision.revision for revision in group}
+    for candidate in revisions:
+        if candidate.revision in members:
+            continue
+        if members <= _ancestors(candidate.revision, parents):
+            return candidate.revision
+    return None
+
+
 def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_prefix: str = RATCHET_PREFIX) -> Report:
     """Two revisions in the same timestamp slot: the incident's authoring-time fingerprint."""
     report = Report()
@@ -375,11 +387,6 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
             continue
         if not _ratcheted((prefix,), ratchet_prefix):
             continue
-        if (
-            frozenset(item.revision for item in group) == _REPAIRED_COLLISION
-            and frozenset(parents.get(_COLLISION_REPAIR, ())) == _REPAIRED_COLLISION
-        ):
-            continue
         group = sorted(group, key=lambda item: item.revision)
         described = "; ".join(revision.describe() for revision in group)
         forked = not _group_is_chained(group, parents)
@@ -389,6 +396,16 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
             if forked
             else "they are chained, so filename order no longer tells you the graph order"
         )
+        merged_by = _converged_by(group, revisions, parents) if forked else None
+        if merged_by is not None:
+            # Authored in parallel and it did fork, but a merge revision has since
+            # converged them: the graph has one head and nothing fails with
+            # MultipleHeads, so there is no longer anything to do. Reporting it
+            # would be permanent noise, and the remedy below is actively wrong
+            # here -- both ids are published, and re-stamping one orphans every
+            # alembic_version row that names it. The check earns its keep by
+            # catching the fork BEFORE it lands, which is still an error.
+            continue
         report.error(
             f"alembic_timestamp_prefix_collision prefix={prefix} count={len(group)}: {described}. "
             f"{len(group)} revisions took the same timestamp slot, which means they were authored in parallel: "

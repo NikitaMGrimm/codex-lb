@@ -417,7 +417,7 @@ def test_missing_base_ref_skips_the_branch_fork_check(checker: ModuleType) -> No
 
 
 @pytest.mark.parametrize("repair", ["exact", "missing", "wrong-parent", "extra-collision"])
-def test_released_collision_requires_its_exact_repair(checker: ModuleType, tmp_path: Path, repair: str) -> None:
+def test_released_collision_requires_convergence(checker: ModuleType, tmp_path: Path, repair: str) -> None:
     base = _linear_fixture(checker, tmp_path)
     left = "20260914_000000_add_scim_tokens"
     right = "20260914_000000_drop_subscription_overflow_schema"
@@ -426,7 +426,7 @@ def test_released_collision_requires_its_exact_repair(checker: ModuleType, tmp_p
     if repair != "missing":
         _write_revision(
             tmp_path,
-            "20260918_000000_merge_scim_and_overflow_removal",
+            "20260918_000000_merge_scim_and_overflow_heads",
             (left, base if repair == "wrong-parent" else right),
         )
     if repair == "extra-collision":
