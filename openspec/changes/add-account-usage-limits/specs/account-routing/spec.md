@@ -90,6 +90,24 @@ Historical usage calculations MUST exclude unavailable measurement placeholders 
 - **WHEN** demand is calculated over those observations
 - **THEN** the measured positive usage delta is one percentage point, not 71
 
+### Requirement: Missing short-window telemetry cannot authorize early recovery
+
+When an upstream rate-limit hold has a future deadline, a confirmed long-window reset MUST NOT clear that hold if the latest primary row is an unavailable no-data placeholder and the account has positive or unknown primary capacity. A plan with known zero primary capacity MUST ignore the primary placeholder. The latest row of the reset window MUST be a real available measurement; a newer no-data placeholder MUST NOT confirm availability. A real zero-percent measurement with valid quota metadata MUST remain available evidence.
+
+#### Scenario: Long-window reset with missing short-window measurement
+
+- **GIVEN** a rate-limited paid account has a future deadline tied to its long window
+- **AND** the long window has a confirmed reset while the latest primary row is a no-data placeholder
+- **WHEN** background recovery evaluates the account
+- **THEN** it retains the rate-limit hold until valid short-window evidence or the normal deadline permits recovery
+
+#### Scenario: Newer long-window placeholder supersedes a confirmed reset
+
+- **GIVEN** a long-window reset was confirmed for a rate-limited account
+- **AND** a newer no-data placeholder is now the latest row for that long window
+- **WHEN** background recovery evaluates the account before its persisted deadline
+- **THEN** it retains the rate-limit hold
+
 ### Requirement: Authorization failures retain local error provenance
 
 An `account_usage_limit_authorization_failed` error generated without an upstream response MUST NOT produce an upstream HTTP status in request logs.
@@ -414,7 +432,7 @@ Account and dashboard views SHALL distinguish provider remaining from usable rem
 - **THEN** the view SHALL show 46 percent provider remaining, 20 percent reserved, and 26 percent usable of the provider capacity.
 
 ### Requirement: Reserve-oriented editing
-The editor SHALL ask how much quota to keep for direct use, converting reserve percentages to the existing maximum-used API contract. The shared reserve and optional reserves for the account's reported standard windows SHALL be visible together. The editor MUST NOT offer a 5-hour or weekly override when that window is absent. A monthly-only account SHALL edit its shared policy through a field labeled Monthly reserve; monthly usage MUST NOT use a weekly override. When window telemetry is unknown, only the shared reserve SHALL be offered. Hiding an inapplicable override MUST preserve its saved value when another field is edited. Blank window values SHALL inherit the shared reserve, with that behavior explained next to the fields. Bars SHALL place reserved quota on the left, usable quota next, and consumed quota on the right. Stripes SHALL not exceed provider remaining.
+The editor SHALL ask how much quota to keep for direct use, converting reserve percentages to the existing maximum-used API contract. Zero reserve SHALL map to 100 percent maximum-used; the input's declared maximum MUST exclude 100 percent reserve because the API requires a positive maximum-used value. The shared reserve and optional reserves for the account's reported standard windows SHALL be visible together. The editor MUST NOT offer a 5-hour or weekly override when that window is absent. A monthly-only account SHALL edit its shared policy through a field labeled Monthly reserve; monthly usage MUST NOT use a weekly override. When window telemetry is unknown, only the shared reserve SHALL be offered. Hiding an inapplicable override MUST preserve its saved value when another field is edited. Blank window values SHALL inherit the shared reserve, with that behavior explained next to the fields. Bars SHALL place reserved quota on the left, usable quota next, and consumed quota on the right. Stripes SHALL not exceed provider remaining.
 
 #### Scenario: Twenty percent reserve
 - **WHEN** the operator saves a 20 percent reserve and usage is 54 percent

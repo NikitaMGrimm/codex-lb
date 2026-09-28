@@ -18,6 +18,8 @@ type AccountUsageLimitControlProps = {
 
 const fields = ["percent", "percent5H", "percentWeekly"] as const;
 type LimitField = (typeof fields)[number];
+// The API requires a positive maximum-used value, so 100% reserve is excluded.
+const MAX_RESERVE_PERCENT = 99.99999999999999;
 const labels: Record<LimitField, string> = {
   percent: "accounts.usageLimit.maximumUsedPercent",
   percent5H: "accounts.usageLimit.override5h",
@@ -101,7 +103,7 @@ export function AccountUsageLimitControl({ account, busy, readOnly, onChange }: 
                 type="number"
                 inputMode="decimal"
                 min="0"
-                max="100"
+                max={MAX_RESERVE_PERCENT}
                 step="any"
                 placeholder={field === "percent" ? t("accounts.usageLimit.noDefault") : t("accounts.usageLimit.inherit")}
                 value={draft.values[field]}

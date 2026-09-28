@@ -87,6 +87,25 @@ describe("AccountUsageLimitControl", () => {
     });
   });
 
+  it("accepts a zero reserve as full window use", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const account = createAccountSummary({ usageLimitPercent: null, usageLimitEnabled: false });
+    render(<AccountUsageLimitControl account={account} busy={false} readOnly={false} onChange={onChange} />);
+
+    const input = screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" });
+    await user.type(input, "0");
+    expect(input).toHaveAttribute("aria-invalid", "false");
+    await user.click(screen.getByRole("button", { name: "Save and enable" }));
+
+    expect(onChange).toHaveBeenCalledWith(account.accountId, {
+      enabled: true,
+      percent: 100,
+      percent5H: null,
+      percentWeekly: null,
+    });
+  });
+
   it("omits the cached percentage when disabling a configured limit", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
@@ -237,6 +256,7 @@ describe("AccountUsageLimitControl", () => {
     const save = screen.getByRole("button", { name: "Save and enable" });
     await user.type(input, "100");
 
+    expect(input).toHaveAttribute("max", "99.99999999999999");
     expect(input).toHaveAttribute("aria-invalid", "true");
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Enter a reserve from 0% up to, but not including, 100%.",
