@@ -1692,15 +1692,21 @@ async def test_public_selection_final_generation_check_rejects_newly_reached_usa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
 @pytest.mark.parametrize(
-    "new_status",
-    [AccountStatus.PAUSED, AccountStatus.DEACTIVATED, AccountStatus.REAUTH_REQUIRED, None],
+    ("new_status", "expected_error_code"),
+    [
+        (AccountStatus.PAUSED, "preferred_account_unavailable"),
+        (AccountStatus.DEACTIVATED, "preferred_account_unavailable"),
+        (AccountStatus.REAUTH_REQUIRED, "no_accounts"),
+        (None, "preferred_account_unavailable"),
+    ],
     ids=["paused", "deactivated", "reauth", "deleted"],
 )
-async def test_final_attempt_unavailable_owner_never_publishes_affinity_or_leaks_pressure(
+async def test_final_attempt_changed_owner_never_publishes_affinity_or_leaks_pressure(
     selection_cache: AccountSelectionCache,
     monkeypatch: pytest.MonkeyPatch,
     sticky: bool,
     new_status: AccountStatus | None,
+    expected_error_code: str,
 ) -> None:
     account = _account("final-owner-unavailable")
     accounts = [account]
@@ -1726,7 +1732,9 @@ async def test_final_attempt_unavailable_owner_never_publishes_affinity_or_leaks
     assert usage_repo.snapshot_calls == 1
     assert result.account is None
     assert result.lease is None
-    assert result.error_code == "preferred_account_unavailable"
+    # An unexpired/unknown-expiry reauth warning remains routable, but the
+    # superseded selection inputs still cannot be published on retry exhaustion.
+    assert result.error_code == expected_error_code
     assert sticky_repo.account_id is None
     upsert.assert_not_awaited()
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
