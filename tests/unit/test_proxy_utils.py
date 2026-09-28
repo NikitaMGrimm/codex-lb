@@ -66,7 +66,7 @@ from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import ParsedSseBlock, parse_sse_data_json
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind, UsageHistory
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, ModelSource, StickySessionKind, UsageHistory
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -4438,7 +4438,7 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch, po
         limited.usage_limit_percent = 10.0
         accounts.append(limited)
     now = utcnow()
-    latest_primary = {
+    latest_primary: dict[str, UsageHistory | AdditionalUsageHistory] = {
         account.id: UsageHistory(
             id=1,
             account_id=account.id,
@@ -4449,7 +4449,7 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch, po
             window_minutes=300,
         )
     }
-    latest_secondary = {
+    latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory] = {
         account.id: UsageHistory(
             id=2,
             account_id=account.id,
