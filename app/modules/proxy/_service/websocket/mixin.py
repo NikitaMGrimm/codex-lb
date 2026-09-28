@@ -2698,6 +2698,8 @@ class _WebSocketMixin:
                         and account is not None
                         and request_state.account_response_create_lease is None
                     ):
+                        # Reject a blocked owner before lease admission; the
+                        # later check covers policy changes during that await.
                         await _authorize_websocket_dispatch_owner(proxy, account.id)
                         # Account-cap spillover belongs to connect selection.
                         # Once this shared socket exists, a late create-cap race

@@ -19,4 +19,6 @@ it.each([46, null])("keeps both capped mini-bar windows identifiable at %s remai
     <MiniQuotaBar percent={percent} cap={80} testId="weekly" aria-label="Weekly quota" /></>);
   expect(screen.getByRole("img", { name: /^5-hour quota;/ })).toBeInTheDocument();
   expect(screen.getByRole("img", { name: /^Weekly quota;/ })).toBeInTheDocument();
+  expect(screen.getByTestId("five")).toHaveAttribute("role", "img");
+  expect(screen.getByTestId("weekly")).toHaveAttribute("role", "img");
 });

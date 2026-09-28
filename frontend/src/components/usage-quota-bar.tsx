@@ -5,9 +5,10 @@ import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 
 import { quotaBreakdown } from "@/utils/quota";
 
-export function UsageQuotaBar({ percent, cap, "aria-label": ariaLabel }: {
+export function UsageQuotaBar({ percent, cap, testId, "aria-label": ariaLabel }: {
   percent: number | null;
   cap?: number | null;
+  testId?: string;
   "aria-label"?: string;
 }) {
   const { t } = useTranslation();
@@ -20,7 +21,7 @@ export function UsageQuotaBar({ percent, cap, "aria-label": ariaLabel }: {
   const accessibleLabel = ariaLabel ? ariaLabel + "; " + description : description;
   return (
     <div className="min-w-0 space-y-1" title={percent === null ? undefined : `${providerLabel}; ${summary}`}>
-      <div role="img" aria-label={accessibleLabel}
+      <div role="img" aria-label={accessibleLabel} data-testid={testId}
         className={cn("relative h-1.5 w-full overflow-hidden rounded-full", quotaBarTrack(usable))}>
         <div className={cn("absolute inset-y-0 transition-colors", quotaBarColor(usable))}
           style={{ left: String(reserved) + "%", width: `${percent === null ? 0 : usable}%` }} />

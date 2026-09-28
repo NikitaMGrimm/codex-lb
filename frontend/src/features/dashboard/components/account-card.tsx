@@ -26,6 +26,7 @@ import {
   formatSingleUnitRemaining,
   formatSlug,
 } from "@/utils/formatters";
+import { quotaBreakdown } from "@/utils/quota";
 
 export type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle" | "reset-credit";
 
@@ -52,6 +53,7 @@ function QuotaBar({
   resetLabel: string;
 }) {
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
+  const usable = quotaBreakdown(clamped, cap).usable;
   const hasPercent = percent !== null;
   return (
     <div className="space-y-1">
@@ -62,9 +64,9 @@ function QuotaBar({
             "tabular-nums font-medium",
             !hasPercent
               ? "text-muted-foreground"
-              : clamped >= 70
+              : usable >= 70
                 ? "text-emerald-600 dark:text-emerald-400"
-                : clamped >= 30
+                : usable >= 30
                   ? "text-amber-600 dark:text-amber-400"
                   : "text-red-600 dark:text-red-400",
           )}

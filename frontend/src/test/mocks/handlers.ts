@@ -488,9 +488,9 @@ type MockState = {
   }>;
 };
 
-function createInitialState(): MockState {
+function createInitialState(accounts: AccountSummary[] = createDefaultAccounts()): MockState {
   return {
-    accounts: createDefaultAccounts(),
+    accounts,
     requestLogs: createDefaultRequestLogs(),
     conversations: createDefaultConversations(),
     conversationDetails: [
@@ -535,8 +535,8 @@ function createInitialState(): MockState {
 
 let state: MockState = createInitialState();
 
-export function resetMockState(): void {
-  state = createInitialState();
+export function resetMockState(accounts?: AccountSummary[]): void {
+  state = createInitialState(accounts);
 }
 
 function parseDateValue(value: string | null): number | null {
@@ -705,6 +705,46 @@ function requestLogOptionsFromEntries(
 
 function findAccount(accountId: string): AccountSummary | undefined {
   return state.accounts.find((account) => account.accountId === accountId);
+}
+
+function effectiveMockUsageLimit(account: AccountSummary, windowMinutes: number | null | undefined): number | null {
+  if (!account.usageLimitEnabled) return null;
+  if (windowMinutes === 300) return account.usageLimit5HPercent ?? account.usageLimitPercent ?? null;
+  if (windowMinutes === 10_080) return account.usageLimitWeeklyPercent ?? account.usageLimitPercent ?? null;
+  return account.usageLimitPercent ?? null;
+}
+
+function refreshMockUsageLimitSnapshot(account: AccountSummary): void {
+  account.effectiveLimitPrimary = effectiveMockUsageLimit(account, account.windowMinutesPrimary);
+  account.effectiveLimitSecondary = effectiveMockUsageLimit(account, account.windowMinutesSecondary);
+  account.effectiveLimitMonthly = effectiveMockUsageLimit(account, account.windowMinutesMonthly);
+  if (!account.usageLimitEnabled) {
+    account.usageLimitState = "disabled";
+    return;
+  }
+
+  const hasMonthly = account.windowMinutesMonthly != null || account.usage?.monthlyRemainingPercent != null;
+  const windows = hasMonthly
+    ? [{ minutes: account.windowMinutesMonthly, remaining: account.usage?.monthlyRemainingPercent,
+      limit: account.effectiveLimitMonthly }]
+    : [
+      { minutes: account.windowMinutesPrimary, remaining: account.usage?.primaryRemainingPercent,
+        limit: account.effectiveLimitPrimary },
+      { minutes: account.windowMinutesSecondary, remaining: account.usage?.secondaryRemainingPercent,
+        limit: account.effectiveLimitSecondary },
+    ];
+  const observed = windows.filter(({ minutes, remaining }) => minutes != null || remaining != null);
+  const limited = observed.filter(({ limit }) => limit != null);
+  const hasMeasurement = observed.some(({ remaining }) => remaining != null && Number.isFinite(remaining));
+  const missingLimitedMeasurement = limited.some(({ remaining }) =>
+    remaining == null || !Number.isFinite(remaining) || remaining < 0 || remaining > 100);
+  if (observed.length === 0 || (limited.length === 0 && !hasMeasurement) || missingLimitedMeasurement) {
+    account.usageLimitState = "data_unavailable";
+  } else if (limited.some(({ remaining, limit }) => remaining != null && limit != null && 100 - remaining >= limit)) {
+    account.usageLimitState = "reached";
+  } else {
+    account.usageLimitState = "available";
+  }
 }
 
 function findApiKey(keyId: string): ApiKey | undefined {
@@ -1180,7 +1220,7 @@ export const handlers = [
       if (payload.percentWeekly !== undefined) {
         account.usageLimitWeeklyPercent = payload.percentWeekly;
       }
-      account.usageLimitState = payload.enabled ? "available" : "disabled";
+      refreshMockUsageLimitSnapshot(account);
       return HttpResponse.json({
         accountId,
         enabled: account.usageLimitEnabled,

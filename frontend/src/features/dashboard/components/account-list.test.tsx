@@ -51,6 +51,15 @@ describe("AccountList", () => {
     expect(screen.getByTestId("dashboard-account-list").firstElementChild).toHaveClass("min-w-[76rem]");
   });
 
+  it("keeps quota meter identifiers when a reserve is configured", () => {
+    render(
+      <AccountList accounts={[createAccountSummary({ effectiveLimitPrimary: 50, effectiveLimitSecondary: 80 })]} />,
+    );
+
+    expect(screen.getAllByTestId("account-list-quota-meter")).toHaveLength(2);
+    expect(screen.getAllByTestId("account-list-quota-meter")[0]).toHaveAttribute("role", "img");
+  });
+
   it("shows a reached usage limit for an otherwise active account", () => {
     render(
       <AccountList

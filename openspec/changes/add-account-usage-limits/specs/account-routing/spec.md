@@ -394,7 +394,7 @@ An account SHALL persist an optional default percentage and optional 5-hour and 
 - **THEN** monthly usage SHALL remain unrestricted by that override.
 
 ### Requirement: Reserved quota presentation
-Account and dashboard views SHALL distinguish provider remaining from usable remaining and reserved capacity using the same effective window policy as admission. Reserved quota SHALL use a muted hatched segment and an accessible label.
+Account and dashboard views SHALL distinguish provider remaining from usable remaining and reserved capacity using the same effective window policy as admission. Reserved quota SHALL use a muted hatched segment and an accessible label. A quota percentage displayed beside a reserved-capacity bar SHALL retain the provider-remaining number but use the usable-remaining amount for its severity color.
 
 #### Scenario: Remaining quota with reserve
 - **WHEN** usage is 54 percent and the effective cap is 80 percent

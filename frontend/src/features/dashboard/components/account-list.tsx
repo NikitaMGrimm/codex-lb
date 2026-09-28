@@ -273,7 +273,7 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
 }
 
 function QuotaMeter({ percent, cap, label }: { percent: number | null; cap?: number | null; label: string }) {
-  if (cap != null) return <UsageQuotaBar percent={percent} cap={cap} aria-label={label} />;
+  if (cap != null) return <UsageQuotaBar percent={percent} cap={cap} testId="account-list-quota-meter" aria-label={label} />;
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   return (
     <div

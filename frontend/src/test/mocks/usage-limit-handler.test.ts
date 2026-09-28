@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { listAccounts, updateAccountUsageLimit } from "@/features/accounts/api";
+import { createAccountSummary } from "@/test/mocks/factories";
+import { resetMockState } from "@/test/mocks/handlers";
 
 describe("default account usage-limit handler", () => {
   it("saves standalone window overrides and retains them when disabled", async () => {
@@ -43,5 +45,71 @@ describe("default account usage-limit handler", () => {
       percent5H: null,
       percentWeekly: null,
     });
+  });
+
+  it("updates effective window limits and evaluated state after a save", async () => {
+    await updateAccountUsageLimit("acc_primary", {
+      enabled: true, percent: 50, percentWeekly: 30,
+    });
+    let account = (await listAccounts()).accounts.find((item) => item.accountId === "acc_primary");
+    expect(account).toMatchObject({
+      effectiveLimitPrimary: 50,
+      effectiveLimitSecondary: 30,
+      usageLimitState: "reached",
+    });
+
+    await updateAccountUsageLimit("acc_primary", { enabled: true, percentWeekly: 40 });
+    account = (await listAccounts()).accounts.find((item) => item.accountId === "acc_primary");
+    expect(account).toMatchObject({
+      effectiveLimitPrimary: 50,
+      effectiveLimitSecondary: 40,
+      usageLimitState: "available",
+    });
+
+    await updateAccountUsageLimit("acc_primary", { enabled: false });
+    account = (await listAccounts()).accounts.find((item) => item.accountId === "acc_primary");
+    expect(account).toMatchObject({
+      effectiveLimitPrimary: null,
+      effectiveLimitSecondary: null,
+      usageLimitState: "disabled",
+    });
+  });
+
+  it("fails closed when a limited window has no usage measurement", async () => {
+    resetMockState([createAccountSummary({
+      usage: { primaryRemainingPercent: null, secondaryRemainingPercent: 67 },
+    })]);
+
+    await updateAccountUsageLimit("acc_primary", { enabled: true, percent: 80 });
+    const account = (await listAccounts()).accounts.find((item) => item.accountId === "acc_primary");
+    expect(account).toMatchObject({ usageLimitState: "data_unavailable" });
+  });
+
+  it("ignores an unrestricted monthly window's saved weekly override", async () => {
+    resetMockState([createAccountSummary({
+      planType: "free",
+      usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, monthlyRemainingPercent: 20 },
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+      windowMinutesMonthly: 43_200,
+    })]);
+
+    await updateAccountUsageLimit("acc_primary", { enabled: true, percentWeekly: 40 });
+    const account = (await listAccounts()).accounts.find((item) => item.accountId === "acc_primary");
+    expect(account).toMatchObject({
+      effectiveLimitMonthly: null,
+      usageLimitState: "available",
+    });
+
+    resetMockState([createAccountSummary({
+      planType: "free",
+      usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, monthlyRemainingPercent: null },
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+      windowMinutesMonthly: 43_200,
+    })]);
+    await updateAccountUsageLimit("acc_primary", { enabled: true, percentWeekly: 40 });
+    const unavailable = (await listAccounts()).accounts.find((item) => item.accountId === "acc_primary");
+    expect(unavailable).toMatchObject({ usageLimitState: "data_unavailable" });
   });
 });
