@@ -33,6 +33,7 @@ from app.core.clients.proxy_websocket import (
     WebsocketsUpstreamWebSocket,
 )
 from app.core.config.settings_cache import get_settings_cache
+from app.core.crypto import TokenEncryptor
 from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, RequestLog
@@ -4720,11 +4721,14 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
 
 
 @pytest.mark.parametrize(
-    ("blocked_state", "expected_error_code"),
+    ("blocked_state", "expected_error_code", "reauth_expiry_offset"),
     [
-        (AccountUsageLimitState.REACHED, "account_usage_limit_reached"),
-        (AccountUsageLimitState.DATA_UNAVAILABLE, "account_usage_limit_reached"),
-        (None, "previous_response_owner_unavailable"),
+        (AccountUsageLimitState.REACHED, "account_usage_limit_reached", None),
+        (AccountUsageLimitState.DATA_UNAVAILABLE, "account_usage_limit_reached", None),
+        (None, "previous_response_owner_unavailable", None),
+        (AccountUsageLimitState.AVAILABLE, None, 60),
+        (AccountUsageLimitState.AVAILABLE, "previous_response_owner_unavailable", -60),
+        (AccountUsageLimitState.REACHED, "account_usage_limit_reached", 60),
     ],
 )
 def test_v1_responses_websocket_revalidates_account_before_each_request(
@@ -4732,6 +4736,7 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
     monkeypatch,
     blocked_state,
     expected_error_code,
+    reauth_expiry_offset,
 ):
     upstream = _SequencedUpstreamWebSocket(
         [
@@ -4784,8 +4789,15 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
             ],
         ],
     )
-    account = SimpleNamespace(id="acct_ws_usage_limit")
+    token_payload = base64.urlsafe_b64encode(
+        json.dumps({"exp": int(time.time()) + (reauth_expiry_offset or 60)}).encode()
+    ).rstrip(b"=")
+    account = SimpleNamespace(
+        id="acct_ws_usage_limit",
+        access_token_encrypted=TokenEncryptor().encrypt(f"e30.{token_payload.decode()}."),
+    )
     usage_limit_state = AccountUsageLimitState.DISABLED
+    owner_status = AccountStatus.ACTIVE
 
     class _FakeSettingsCache:
         async def get(self):
@@ -4811,6 +4823,7 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
             if usage_limit_state.blocks_account_use
             else OwnerAuthorizationKind.ALLOWED,
             usage_limit_state,
+            owner_status=owner_status,
         )
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
@@ -4835,13 +4848,20 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
             first_events = [json.loads(websocket.receive_text()) for _ in range(2)]
 
             usage_limit_state = blocked_state
+            if reauth_expiry_offset is not None:
+                owner_status = AccountStatus.REAUTH_REQUIRED
             websocket.send_text(json.dumps(request))
-            blocked = json.loads(websocket.receive_text())
+            second_event_count = 2 if expected_error_code is None else 1
+            second_events = [json.loads(websocket.receive_text()) for _ in range(second_event_count)]
 
     assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
-    assert blocked["type"] == "response.failed"
-    assert blocked["response"]["error"]["code"] == expected_error_code
-    assert len(upstream.sent_text) == 1
+    if expected_error_code is None:
+        assert [event["type"] for event in second_events] == ["response.created", "response.completed"]
+        assert len(upstream.sent_text) == 2
+    else:
+        assert second_events[0]["type"] == "response.failed"
+        assert second_events[0]["response"]["error"]["code"] == expected_error_code
+        assert len(upstream.sent_text) == 1
 
 
 @pytest.mark.parametrize(

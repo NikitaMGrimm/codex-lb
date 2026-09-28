@@ -70,7 +70,7 @@ from app.core.utils.request_id import (
     set_request_id,
 )
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.db.models import DashboardSettings, StickySessionKind
+from app.db.models import AccountStatus, DashboardSettings, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
@@ -221,6 +221,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
+from app.modules.proxy.account_eligibility import reauth_access_token_is_expired
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _extract_model_class,
@@ -386,7 +387,10 @@ def _ensure_http_bridge_session_owner_authorized(
 ) -> None:
     if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
         raise _http_bridge_usage_limit_authorization_failed_error()
-    if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
+    if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE or (
+        owner_authorization.owner_status is AccountStatus.REAUTH_REQUIRED
+        and reauth_access_token_is_expired(AccountStatus.REAUTH_REQUIRED, session.access_token_expires_at)
+    ):
         session.upstream_control.reconnect_requested = True
         session.upstream_control.retire_after_drain = True
         raise _http_bridge_previous_response_owner_unavailable_error()

@@ -4,7 +4,7 @@
 
 ### Requirement: Final owner authorization is explicit and fail-closed
 
-Fresh owner authorization MUST distinguish permission, a local usage-policy block, an unavailable owner, and an authorization infrastructure failure. A missing, paused, deactivated, or reauthentication-required owner MUST NOT be admitted on retry exhaustion. Failed final selection authorization MUST release provisional leases and recovery probes and MUST NOT publish a new or changed sticky owner. An unavailable owner MUST NOT be reported as having reached its usage policy. Cancellation MUST propagate after provisional resource cleanup.
+Fresh owner authorization MUST distinguish permission, a local usage-policy block, an unavailable owner, and an authorization infrastructure failure. A missing, paused, deactivated, or `reauth_required` owner with a known-expired stored access token MUST NOT be admitted on retry exhaustion. A `reauth_required` owner whose stored access token is not known expired MUST have its usage policy evaluated like an active owner. Failed final selection authorization MUST release provisional leases and recovery probes and MUST NOT publish a new or changed sticky owner. An unavailable owner MUST NOT be reported as having reached its usage policy. Cancellation MUST propagate after provisional resource cleanup.
 
 An HTTP bridge owner-authorization read that holds the session lifecycle lock MUST be bounded. If it times out, the bridge MUST fail the new dispatch with `account_usage_limit_authorization_failed` and MUST NOT send upstream traffic.
 
@@ -31,6 +31,19 @@ An HTTP bridge owner-authorization read that holds the session lifecycle lock MU
 - **THEN** selection returns no account or lease
 - **AND** no new sticky owner is published and no provisional runtime pressure remains
 - **AND** the error identifies owner unavailability rather than a usage-policy block
+
+#### Scenario: Reauthentication warning retains owner policy routing
+
+- **GIVEN** a continuity-pinned owner becomes `reauth_required` with a stored access token that is not known expired
+- **WHEN** a new HTTP bridge turn or WebSocket `response.create` is authorized
+- **THEN** its current usage policy is evaluated and an available policy permits the same owner
+- **AND** a reached policy blocks the new turn without sending it upstream
+
+#### Scenario: Known-expired reauthentication owner cannot continue
+
+- **GIVEN** a continuity-pinned owner is `reauth_required` and its stored access token has reached its known expiry
+- **WHEN** a new HTTP bridge turn or WebSocket `response.create` is authorized
+- **THEN** the new turn fails as owner-unavailable before upstream I/O
 
 
 #### Scenario: Repeated cancellation interrupts final authorization cleanup
@@ -184,7 +197,7 @@ If a policy read fails or times out, the new frame MUST fail closed with `accoun
 #### Scenario: Reused WebSocket owner becomes administratively unavailable
 
 - **GIVEN** an existing proxy WebSocket is pinned to an account
-- **AND** that account is deleted, paused, deactivated, or requires reauthentication
+- **AND** that account is deleted, paused, deactivated, or `reauth_required` with a known-expired stored access token
 - **WHEN** the client submits a new `response.create` frame
 - **THEN** the new turn fails with `previous_response_owner_unavailable` before upstream dispatch
 - **AND** already-admitted work on the socket remains uninterrupted

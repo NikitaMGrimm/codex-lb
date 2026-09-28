@@ -18,7 +18,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import openai_error
 from app.core.usage.account_limits import AccountUsageLimitState
-from app.db.models import AccountStatus
+from app.db.models import AccountStatus, DashboardSettings
 from app.modules.api_keys.service import ApiKeyRequestUsageBudget
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
@@ -801,6 +801,11 @@ async def test_prewarm_rechecks_owner_policy_at_dispatch_boundary(
         "_service_get_settings",
         lambda: SimpleNamespace(http_responses_session_bridge_codex_prewarm_enabled=True),
     )
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=DashboardSettings())),
+    )
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-prewarm-policy-race",
         model="gpt-5.2",
@@ -1223,7 +1228,7 @@ async def test_prewarm_policy_denial_retires_session_after_last_waiter(
         session.upstream_control.reconnect_requested = True
         session.upstream_control.retire_after_drain = True
         raise ProxyResponseError(
-            503,
+            429,
             openai_error("account_usage_limit_reached", "Account usage limit reached."),
         )
 

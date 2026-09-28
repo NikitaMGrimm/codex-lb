@@ -25697,6 +25697,65 @@ async def test_submit_http_bridge_request_rechecks_owner_policy_after_late_admis
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("token_expired", [False, True])
+async def test_http_bridge_reauth_owner_requires_usable_token_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    token_expired: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="reauth-owner-dispatch")
+    session.account.status = AccountStatus.REAUTH_REQUIRED
+    session.access_token_expires_at = time.time() + (-60 if token_expired else 60)
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    session.account_lease = proxy_service.AccountLease(
+        lease_id="lease-reauth-owner-dispatch",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    service._http_bridge_sessions[session.key] = session
+    usage_gate = AsyncMock(
+        return_value=OwnerAuthorization(
+            OwnerAuthorizationKind.ALLOWED,
+            AccountUsageLimitState.AVAILABLE,
+            owner_status=AccountStatus.REAUTH_REQUIRED,
+        )
+    )
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-reauth-owner-dispatch",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"continue"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    if token_expired:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await service._submit_http_bridge_request(
+                session, request_state=request_state, text_data=request_state.request_text or "{}", queue_limit=8
+            )
+        assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+        send_text.assert_not_awaited()
+        assert session.pending_requests == deque()
+    else:
+        await service._submit_http_bridge_request(
+            session, request_state=request_state, text_data=request_state.request_text or "{}", queue_limit=8
+        )
+        send_text.assert_awaited_once_with(request_state.request_text)
+        assert await service._detach_http_bridge_request(session, request_state=request_state) is True
+    assert usage_gate.await_count >= 1
+
+
+@pytest.mark.asyncio
 async def test_submit_http_bridge_request_times_out_stalled_final_owner_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

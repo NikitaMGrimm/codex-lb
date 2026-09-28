@@ -1,10 +1,10 @@
 # Reconciliation with PR #2147
 
-Compared against Soju06/codex-lb#2147 at f777d8ec1cc65caf98687b02feff401e3f787a49. This is a consolidation proposal, not an implemented extension or a claim that either PR supersedes the other.
+Compared against Soju06/codex-lb#2147 at f777d8ec1cc65caf98687b02feff401e3f787a49. The table records the proposals before their behavior was consolidated into this PR. The current implementation is described below.
 
-## Current contracts
+## Pre-consolidation baselines
 
-| Concern | This change (#1528) | #2147 |
+| Concern | Earlier #1528 scalar draft | #2147 proposal |
 | --- | --- | --- |
 | Threshold | One maximum-used percentage for applicable standard windows | Independent optional 5-hour and weekly maximum-used percentages |
 | Disable/remove | Disabling retains the saved value; removing clears it | Each nullable window cap is independently disabled |
@@ -13,9 +13,9 @@ Compared against Soju06/codex-lb#2147 at f777d8ec1cc65caf98687b02feff401e3f787a4
 | Presentation | Provider usage remains visible alongside policy state | Reserved/usable segments, credit donuts and weekly pace reflect the configured reserve |
 | Local error | account_usage_limit_reached | account_usage_cap_reached |
 
-Both percentages denote the maximum fraction of provider quota that may be consumed, not a remaining-quota threshold. With 54% consumed and an 80% cap, 46 percentage points remain at the provider, 20 are reserved, and 26 are usable. #2147 adds that reserve presentation; #1528 does not.
+Both percentages denote the maximum fraction of provider quota that may be consumed, not a remaining-quota threshold. With 54% consumed and an 80% cap, 46 percentage points remain at the provider, 20 are reserved, and 26 are usable. The consolidated implementation includes that reserve presentation.
 
-Unequal window caps cannot be represented by this change's scalar. For example, primary/weekly usage of 65%/75% is allowed by respective caps of 70%/90%; 72%/75% is blocked by the primary cap. Replacing the pair with 70% would also block the first case on its weekly window. Treating either implementation as a drop-in replacement loses behavior.
+The earlier scalar draft could not represent unequal window caps. For example, primary/weekly usage of 65%/75% is allowed by respective caps of 70%/90%; 72%/75% is blocked by the primary cap. Replacing the pair with 70% would also block the first case on its weekly window. The current implementation persists a shared `usage_limit_percent` plus optional `usage_limit_5h_percent` and `usage_limit_weekly_percent` overrides, exposes them as `percent5H` and `percentWeekly`, and displays their effective reserves.
 
 ## Consolidation design
 

@@ -341,7 +341,7 @@ async def test_warmup_immediately_observes_usage_refresh_transitions_for_account
 
     selection_cache = AccountSelectionCache(ttl_seconds=60)
     proxy_service = get_proxy_service_for_app(async_client._transport.app)
-    proxy_service._load_balancer._selection_inputs_cache = selection_cache
+    monkeypatch.setattr(proxy_service._load_balancer, "_selection_inputs_cache", selection_cache)
     monkeypatch.setattr(usage_updater_module, "get_account_selection_cache", lambda: selection_cache)
 
     captured_models: list[str] = []

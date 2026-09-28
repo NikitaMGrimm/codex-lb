@@ -24,7 +24,7 @@ from app.modules.usage.repository import AccountUsageLimitSnapshot, UsageReposit
 def test_disabled_policy_does_not_override_owner_availability(status, require_active):
     snapshot = AccountUsageLimitSnapshot(status, False, None, "plus", None, None, None)
     decision = authorize_usage_snapshot(snapshot, refresh_interval_seconds=60, require_active=require_active)
-    unavailable = status in {AccountStatus.PAUSED, AccountStatus.DEACTIVATED, AccountStatus.REAUTH_REQUIRED}
+    unavailable = status in {AccountStatus.PAUSED, AccountStatus.DEACTIVATED}
     unavailable = unavailable or (require_active and status != AccountStatus.ACTIVE)
     assert decision.kind is (
         OwnerAuthorizationKind.OWNER_UNAVAILABLE if unavailable else OwnerAuthorizationKind.ALLOWED

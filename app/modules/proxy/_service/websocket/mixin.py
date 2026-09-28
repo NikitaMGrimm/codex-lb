@@ -462,6 +462,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _wrapped_websocket_error_event,
 )
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
+from app.modules.proxy.account_eligibility import account_access_token_expires_at, reauth_access_token_is_expired
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _is_synthesized_turn_state,
@@ -1360,14 +1361,14 @@ async def _process_upstream_websocket_transport_end(
     return True
 
 
-async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, account_id: str) -> None:
+async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, account: Account) -> None:
     try:
         owner_authorization = await scheduler_for(proxy).wait_for(
-            proxy._load_balancer.authorize_account_fresh(account_id),
+            proxy._load_balancer.authorize_account_fresh(account.id),
             timeout=_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS,
         )
     except TimeoutError:
-        logger.warning("WebSocket owner authorization timed out account_id=%s", account_id)
+        logger.warning("WebSocket owner authorization timed out account_id=%s", account.id)
         owner_authorization = OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
     if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
         raise ProxyResponseError(
@@ -1378,7 +1379,13 @@ async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, 
                 error_type="server_error",
             ),
         )
-    if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
+    if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE or (
+        owner_authorization.owner_status is AccountStatus.REAUTH_REQUIRED
+        and reauth_access_token_is_expired(
+            AccountStatus.REAUTH_REQUIRED,
+            account_access_token_expires_at(account, proxy._encryptor),
+        )
+    ):
         raise _http_bridge_previous_response_owner_unavailable_error()
     if owner_authorization.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
         status_code, error_payload = selection_failure_response(
@@ -2700,7 +2707,7 @@ class _WebSocketMixin:
                     ):
                         # Reject a blocked owner before lease admission; the
                         # later check covers policy changes during that await.
-                        await _authorize_websocket_dispatch_owner(proxy, account.id)
+                        await _authorize_websocket_dispatch_owner(proxy, account)
                         # Account-cap spillover belongs to connect selection.
                         # Once this shared socket exists, a late create-cap race
                         # rejects only this frame; switching/retiring the socket
@@ -2732,7 +2739,7 @@ class _WebSocketMixin:
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
                     if is_response_create and account is not None:
-                        await _authorize_websocket_dispatch_owner(proxy, account.id)
+                        await _authorize_websocket_dispatch_owner(proxy, account)
                     if (
                         is_response_create
                         and text_data is not None

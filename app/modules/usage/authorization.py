@@ -52,7 +52,7 @@ def authorize_usage_snapshot(
     status = snapshot.status if snapshot is not None else None
     if (
         snapshot is None
-        or status in {AccountStatus.PAUSED, AccountStatus.DEACTIVATED, AccountStatus.REAUTH_REQUIRED}
+        or status in {AccountStatus.PAUSED, AccountStatus.DEACTIVATED}
         or (require_active and status is not AccountStatus.ACTIVE)
     ):
         return OwnerAuthorization(OwnerAuthorizationKind.OWNER_UNAVAILABLE, owner_status=status, snapshot=snapshot)

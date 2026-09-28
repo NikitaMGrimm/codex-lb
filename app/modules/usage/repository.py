@@ -50,7 +50,6 @@ NormalizedUsageWindow = Literal["primary", "secondary"]
 _REAL_USAGE_MEASUREMENT_SQLITE_CLAUSE = "(used_percent != 0.0 or reset_at is not null or window_minutes > 0)"
 _USAGE_LIMIT_UNAVAILABLE_STATUSES = (
     AccountStatus.PAUSED,
-    AccountStatus.REAUTH_REQUIRED,
     AccountStatus.DEACTIVATED,
 )
 
