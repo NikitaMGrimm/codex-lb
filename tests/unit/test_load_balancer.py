@@ -176,6 +176,30 @@ def test_select_account_returns_stable_error_when_all_accounts_are_usage_limited
     assert result.error_message is not None
 
 
+def test_budget_safe_all_blocked_selection_preserves_usage_exhaustion_controls() -> None:
+    blocked = AccountState(
+        "locally-blocked",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        usage_limit_state=AccountUsageLimitState.REACHED,
+    )
+    wider_scope = [blocked, AccountState("usable-peer", AccountStatus.ACTIVE, used_percent=20.0)]
+
+    controls: tuple[tuple[bool, list[AccountState] | None], ...] = ((False, None), (True, wider_scope))
+    for allow_exhaustion_error, exhaustion_states in controls:
+        result = _select_account_preferring_budget_safe(
+            [blocked],
+            prefer_earlier_reset=False,
+            routing_strategy="usage_weighted",
+            budget_threshold_pct=95.0,
+            traffic_class="opportunistic",
+            allow_usage_exhaustion_error=allow_exhaustion_error,
+            usage_exhaustion_states=exhaustion_states,
+        )
+        assert result.account is None
+        assert result.error_code is None
+
+
 def test_select_account_prefers_local_policy_error_over_upstream_exhausted_peer() -> None:
     now = 1_700_000_000.0
     upstream_exhausted = AccountState(

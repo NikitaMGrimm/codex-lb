@@ -3641,3 +3641,42 @@ async def test_usage_limit_overrides_upgrade_without_previous_enabled_constraint
             assert {"usage_limit_5h_percent", "usage_limit_weekly_percent"} <= {column["name"] for column in columns}
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_overrides_downgrade_with_missing_override_objects(tmp_path):
+    import sqlalchemy as sa
+    from alembic import command
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    from app.db.migrate import _build_alembic_config
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'usage-overrides-partial-downgrade.sqlite'}"
+    parent = "20260728_010000_add_account_usage_limits"
+    revision = "20260910_010000_add_usage_limit_overrides"
+    await to_thread.run_sync(lambda: run_upgrade(url, revision, bootstrap_legacy=True))
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+
+            def remove_some_override_objects(sync_conn):
+                operations = Operations(MigrationContext.configure(sync_conn))
+                with operations.batch_alter_table("accounts") as batch:
+                    batch.drop_constraint("ck_accounts_usage_limit_enabled_requires_percent", type_="check")
+                    batch.drop_constraint("ck_accounts_usage_limit_5h_percent_range", type_="check")
+                    batch.drop_column("usage_limit_5h_percent")
+
+            await conn.run_sync(remove_some_override_objects)
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(url), parent))
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(lambda sync_conn: sa.inspect(sync_conn).get_columns("accounts"))
+            assert "usage_limit_5h_percent" not in {column["name"] for column in columns}
+            assert "usage_limit_weekly_percent" not in {column["name"] for column in columns}
+            constraints = await conn.run_sync(lambda sync_conn: sa.inspect(sync_conn).get_check_constraints("accounts"))
+            assert "ck_accounts_usage_limit_enabled_requires_percent" in {
+                constraint["name"] for constraint in constraints
+            }
+    finally:
+        await engine.dispose()

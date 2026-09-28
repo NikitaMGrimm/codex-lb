@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List
 
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator
 
 from app.core.usage.account_limits import AccountUsageLimitState
 from app.modules.shared.schemas import DashboardModel
@@ -211,12 +211,6 @@ class AccountUsageLimitUpdateRequest(DashboardModel):
     percent: float | None = Field(default=None, gt=0, le=100)
     percent_5h: float | None = Field(default=None, gt=0, le=100)
     percent_weekly: float | None = Field(default=None, gt=0, le=100)
-
-    @model_validator(mode="after")
-    def validate_enabled_limit_has_percent(self) -> AccountUsageLimitUpdateRequest:
-        if self.enabled and all(value is None for value in (self.percent, self.percent_5h, self.percent_weekly)):
-            raise ValueError("at least one percentage is required when the usage limit is enabled")
-        return self
 
 
 class AccountUsageLimitUpdateResponse(DashboardModel):

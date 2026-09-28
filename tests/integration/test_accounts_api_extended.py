@@ -145,6 +145,27 @@ async def test_account_usage_limit_stale_disable_retains_latest_value_and_explic
     assert summary["usageLimitPercent"] == 20.0
     assert summary["usageLimitState"] == "disabled"
 
+    reenabled = await async_client.put(
+        f"/api/accounts/{account.id}/usage-limit",
+        json={"enabled": True},
+    )
+    assert reenabled.status_code == 200
+    assert reenabled.json()["enabled"] is True
+    assert reenabled.json()["percent"] == 20.0
+
+    cleared_last_threshold = await async_client.put(
+        f"/api/accounts/{account.id}/usage-limit",
+        json={"enabled": True, "percent": None},
+    )
+    assert cleared_last_threshold.status_code == 422
+
+    disabled_again = await async_client.put(
+        f"/api/accounts/{account.id}/usage-limit",
+        json={"enabled": False},
+    )
+    assert disabled_again.status_code == 200
+    assert disabled_again.json()["percent"] == 20.0
+
     removed = await async_client.put(
         f"/api/accounts/{account.id}/usage-limit",
         json={"enabled": False, "percent": None},
@@ -1890,6 +1911,13 @@ async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(
     standalone = await async_client.put(path, json={"enabled": True, override_field: 90})
     assert standalone.status_code == 200
     assert standalone.json()["percent"] is None
+    assert (await async_client.put(path, json={"enabled": False})).status_code == 200
+    reenabled = await async_client.put(path, json={"enabled": True})
+    assert reenabled.status_code == 200
+    assert reenabled.json()["percent"] is None
+    assert reenabled.json()[override_field] == 90
+    rejected = await async_client.put(path, json={"enabled": True, override_field: None})
+    assert rejected.status_code == 422
     async with SessionLocal() as session:
         assert (
             await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)

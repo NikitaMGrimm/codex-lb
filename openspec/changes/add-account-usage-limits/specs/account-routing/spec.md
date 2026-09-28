@@ -132,7 +132,7 @@ Dashboard policy reconciliation MUST prevent an account or dashboard read starte
 
 ### Requirement: Accounts have a reversible maximum-usage policy
 
-Each account SHALL support an optional default maximum standard-quota used percentage and optional 5-hour and weekly overrides, each greater than 0 and at most 100, plus one enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling SHALL retain saved thresholds for later re-enablement; removal SHALL clear all thresholds and disable the policy. For each threshold, an omitted field MUST retain its latest stored value, explicit null MUST clear it, and a numeric value MUST replace it. Enabling MUST explicitly supply at least one non-null threshold. The API MUST reject percentages outside the supported range.
+Each account SHALL support an optional default maximum standard-quota used percentage and optional 5-hour and weekly overrides, each greater than 0 and at most 100, plus one enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling SHALL retain saved thresholds for later re-enablement; removal SHALL clear all thresholds and disable the policy. For each threshold, an omitted field MUST retain its latest stored value, explicit null MUST clear it, and a numeric value MUST replace it. Enabling MUST leave at least one non-null threshold after applying the update; an omitted threshold MAY satisfy this requirement through its stored value. Invalid enabled updates MUST be rejected without changing the stored policy. The API MUST reject percentages outside the supported range.
 
 #### Scenario: Operator temporarily disables a configured limit
 
@@ -140,6 +140,12 @@ Each account SHALL support an optional default maximum standard-quota used perce
 - **WHEN** the operator disables the policy without removing it
 - **THEN** the account retains 10 percent as its configured value
 - **AND** routing does not apply that policy until it is re-enabled
+
+#### Scenario: Operator re-enables a saved threshold
+
+- **GIVEN** an account has a disabled policy with a saved threshold
+- **WHEN** the operator enables the policy without resending that threshold
+- **THEN** the saved threshold remains configured and the policy becomes enabled
 
 #### Scenario: Stale dashboard disables without reverting a newer percentage
 
@@ -306,6 +312,12 @@ Only windows with an effective configured threshold MUST require a current measu
 - **WHEN** a public route performs opportunistic admission precheck
 - **THEN** the response retains code `account_usage_limit_reached`
 - **AND** the precheck does not rewrite it to `rate_limit_exceeded`
+
+#### Scenario: All-blocked selection retains exhaustion controls
+
+- **GIVEN** every candidate in a budget-safe selection is blocked by a local usage policy
+- **WHEN** the caller disables pool usage-exhaustion errors or supplies a wider exhaustion-evidence pool
+- **THEN** the all-blocked selection path honors both caller inputs
 
 ### Requirement: Dashboard account controls expose usage-limit state and precision
 

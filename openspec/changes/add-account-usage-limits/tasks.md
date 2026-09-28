@@ -28,3 +28,10 @@
 - [x] 20. Verify policy, API, migration and UI behavior and launch an isolated synthetic preview.
 
 - [x] Show only applicable reserve windows, label monthly shared reserves, and verify local synthetic browser saves.
+
+## Review follow-up
+
+- [x] 21. Preserve caller exhaustion controls in all-blocked selection and cover the fallback path.
+- [x] 22. Re-enable saved account thresholds atomically and cover omitted and explicitly cleared fields at the API.
+- [x] 23. Guard partial-schema override migration downgrades and verify the downgrade path.
+- [x] 24. Run focused regressions, lint, type checks, migration topology, and strict OpenSpec validation.

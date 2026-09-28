@@ -34,16 +34,25 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if not sa.inspect(op.get_bind()).has_table("accounts"):
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("accounts"):
         return
-    op.execute("UPDATE accounts SET usage_limit_enabled = false WHERE usage_limit_percent IS NULL")
+    columns = {column["name"] for column in inspector.get_columns("accounts")}
+    constraints = {constraint["name"] for constraint in inspector.get_check_constraints("accounts")}
+    has_base_policy = {"usage_limit_enabled", "usage_limit_percent"} <= columns
+    if has_base_policy:
+        op.execute("UPDATE accounts SET usage_limit_enabled = false WHERE usage_limit_percent IS NULL")
     with op.batch_alter_table("accounts") as batch:
-        batch.drop_constraint("ck_accounts_usage_limit_enabled_requires_percent", type_="check")
+        if "ck_accounts_usage_limit_enabled_requires_percent" in constraints:
+            batch.drop_constraint("ck_accounts_usage_limit_enabled_requires_percent", type_="check")
         for window in ("5h", "weekly"):
             column = f"usage_limit_{window}_percent"
-            batch.drop_constraint(f"ck_accounts_{column}_range", type_="check")
-            batch.drop_column(column)
-        batch.create_check_constraint(
-            "ck_accounts_usage_limit_enabled_requires_percent",
-            "NOT usage_limit_enabled OR usage_limit_percent IS NOT NULL",
-        )
+            if f"ck_accounts_{column}_range" in constraints:
+                batch.drop_constraint(f"ck_accounts_{column}_range", type_="check")
+            if column in columns:
+                batch.drop_column(column)
+        if has_base_policy:
+            batch.create_check_constraint(
+                "ck_accounts_usage_limit_enabled_requires_percent",
+                "NOT usage_limit_enabled OR usage_limit_percent IS NOT NULL",
+            )

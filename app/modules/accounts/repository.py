@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, delete, func, or_, select, text, update
+from sqlalchemy import Float, case, delete, func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
@@ -129,6 +129,10 @@ class AccountUsageLimitConfiguration:
     percent: float | None
     percent_5h: float | None = None
     percent_weekly: float | None = None
+
+
+class InvalidAccountUsageLimitError(ValueError):
+    """An enabled policy would have no configured threshold after an update."""
 
 
 # The account-listing request-usage summary dedupes and re-aggregates the
@@ -1026,6 +1030,18 @@ class AccountsRepository:
                 .where(Account.delete_requested_at.is_(None))
                 .values(usage_limit_enabled=enabled)
             )
+            if enabled:
+                # Evaluate omitted fields against the current row in the same
+                # UPDATE so a concurrent writer cannot invalidate a prior read.
+                statement = statement.where(
+                    or_(
+                        (literal(percent, Float()) if update_percent else Account.usage_limit_percent).is_not(None),
+                        (literal(percent_5h, Float()) if update_5h else Account.usage_limit_5h_percent).is_not(None),
+                        (
+                            literal(percent_weekly, Float()) if update_weekly else Account.usage_limit_weekly_percent
+                        ).is_not(None),
+                    )
+                )
             if update_percent:
                 statement = statement.values(usage_limit_percent=percent)
             if update_5h:
@@ -1041,8 +1057,17 @@ class AccountsRepository:
                 )
             )
             row = result.one_or_none()
+            existing_account_id = None
+            if row is None and enabled:
+                existing_account_id = await self._session.scalar(
+                    select(Account.id).where(Account.id == account_id).where(Account.delete_requested_at.is_(None))
+                )
             await self._session.commit()
             if row is None:
+                if existing_account_id is not None:
+                    raise InvalidAccountUsageLimitError(
+                        "at least one percentage is required when the usage limit is enabled"
+                    )
                 return None
             return AccountUsageLimitConfiguration(
                 enabled=bool(row.usage_limit_enabled),
