@@ -3258,6 +3258,55 @@ async def test_maybe_prewarm_http_bridge_session_success_path_reads_no_settings_
 
 
 @pytest.mark.asyncio
+async def test_maybe_prewarm_http_bridge_session_times_out_stalled_owner_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state, session = _make_prewarm_candidate(_PREWARM_CANDIDATE_TEXT)
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    service._http_bridge_sessions[session.key] = session
+    row = DashboardSettings()
+    row.http_responses_session_bridge_codex_prewarm_enabled = True
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: with_dashboard_overrides(_make_app_settings()))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=row)),
+    )
+    monkeypatch.setattr(http_bridge_request_submit_module, "_HTTP_BRIDGE_OWNER_AUTHORIZATION_TIMEOUT_SECONDS", 0.01)
+    stalled_read_cancelled = asyncio.Event()
+
+    async def stalled_authorization(_account_id: str) -> OwnerAuthorization:
+        try:
+            await asyncio.Future()
+        finally:
+            stalled_read_cancelled.set()
+        raise AssertionError("stalled authorization returned")
+
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", stalled_authorization)
+
+    with dashboard_overrides_bound(row):
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await asyncio.wait_for(
+                service._maybe_prewarm_http_bridge_session(
+                    session,
+                    request_state=request_state,
+                    text_data=request_state.request_text or "{}",
+                ),
+                timeout=1.0,
+            )
+
+    assert exc_info.value.payload["error"]["code"] == "account_usage_limit_authorization_failed"
+    assert stalled_read_cancelled.is_set()
+    assert request_state.prewarm_status == "error"
+    assert session.prewarmed is False
+    assert session.lifecycle_lock.locked() is False
+    assert session.response_create_gate.locked() is False
+    send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_maybe_prewarm_http_bridge_session_reads_no_settings_for_an_ineligible_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -25645,6 +25694,72 @@ async def test_submit_http_bridge_request_rechecks_owner_policy_after_late_admis
     assert session.pending_requests == deque()
     assert session.admission_waiter_count == 0
     assert session.upstream_control.retire_after_drain is True
+
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_request_times_out_stalled_final_owner_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    session = _make_bridge_session(key_value="stalled-final-authorization")
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    session.account_lease = proxy_service.AccountLease(
+        lease_id="lease-stalled-final-authorization",
+        account_id=session.account.id,
+        kind="stream",
+        acquired_at=1.0,
+    )
+    service._http_bridge_sessions[session.key] = session
+    authorization_reads = 0
+    stalled_read_cancelled = asyncio.Event()
+
+    async def usage_gate(_account_id: str) -> OwnerAuthorization:
+        nonlocal authorization_reads
+        authorization_reads += 1
+        if authorization_reads == 1:
+            return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.AVAILABLE)
+        try:
+            await asyncio.Future()
+        finally:
+            stalled_read_cancelled.set()
+        raise AssertionError("stalled authorization returned")
+
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(http_bridge_request_submit_module, "_HTTP_BRIDGE_OWNER_AUTHORIZATION_TIMEOUT_SECONDS", 0.01)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stalled-final-authorization",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"new"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await asyncio.wait_for(
+            service._submit_http_bridge_request(
+                session,
+                request_state=request_state,
+                text_data=request_state.request_text or "{}",
+                queue_limit=8,
+            ),
+            timeout=1.0,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "account_usage_limit_authorization_failed"
+    assert authorization_reads == 2
+    assert stalled_read_cancelled.is_set()
+    assert session.lifecycle_lock.locked() is False
+    assert session.pending_requests == deque()
+    assert session.queued_request_count == 0
+    send_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio

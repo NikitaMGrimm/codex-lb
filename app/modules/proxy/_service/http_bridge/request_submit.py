@@ -261,6 +261,7 @@ logger = logging.getLogger("app.modules.proxy.service")
 
 _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_MAX_COUNT = 1
 _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS = 2.0
+_HTTP_BRIDGE_OWNER_AUTHORIZATION_TIMEOUT_SECONDS = 5.0
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
@@ -2900,7 +2901,17 @@ class _HTTPBridgeRequestSubmitMixin:
         self: Any,
         session: "_HTTPBridgeSession",
     ) -> OwnerAuthorization:
-        return await self._load_balancer.authorize_account_fresh(session.account.id)
+        account_id = session.account.id
+        try:
+            # Final dispatch reads stay under lifecycle_lock so a reconnect
+            # cannot switch the owner between authorization and upstream send.
+            return await scheduler_for(self).wait_for(
+                self._load_balancer.authorize_account_fresh(account_id),
+                timeout=_HTTP_BRIDGE_OWNER_AUTHORIZATION_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning("HTTP bridge owner authorization timed out account_id=%s", account_id)
+            return OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
 
     async def _ensure_http_bridge_session_stream_lease_locked(
         self: Any,

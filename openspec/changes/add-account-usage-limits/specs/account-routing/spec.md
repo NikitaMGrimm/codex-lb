@@ -6,6 +6,15 @@
 
 Fresh owner authorization MUST distinguish permission, a local usage-policy block, an unavailable owner, and an authorization infrastructure failure. A missing, paused, deactivated, or reauthentication-required owner MUST NOT be admitted on retry exhaustion. Failed final selection authorization MUST release provisional leases and recovery probes and MUST NOT publish a new or changed sticky owner. An unavailable owner MUST NOT be reported as having reached its usage policy. Cancellation MUST propagate after provisional resource cleanup.
 
+An HTTP bridge owner-authorization read that holds the session lifecycle lock MUST be bounded. If it times out, the bridge MUST fail the new dispatch with `account_usage_limit_authorization_failed` and MUST NOT send upstream traffic.
+
+#### Scenario: Final HTTP bridge authorization stalls
+
+- **GIVEN** a reused HTTP bridge has admitted a new turn
+- **WHEN** its final owner-authorization read does not finish within the timeout
+- **THEN** the turn fails with `account_usage_limit_authorization_failed` without sending upstream
+- **AND** the session lifecycle lock becomes available for other work
+
 #### Scenario: Selection inputs keep changing through retry exhaustion
 
 - **GIVEN** selection inputs change after every bounded selection attempt
