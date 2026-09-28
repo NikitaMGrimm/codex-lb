@@ -16,15 +16,15 @@
 
 ### D1: Persist configuration and activation separately
 
-Accounts gain nullable `usage_limit_percent` and non-null `usage_limit_enabled` fields. A disabled row retains its percentage for one-click re-enablement; removing the limit clears the percentage and disables it. Enabled-without-percentage is invalid. Percentages are greater than 0 and at most 100.
+Accounts gain nullable default `usage_limit_percent`, nullable `usage_limit_5h_percent` and `usage_limit_weekly_percent` overrides, and a non-null `usage_limit_enabled` field. A disabled row retains its percentages for re-enablement; removing the limit clears all three and disables it. An enabled policy requires at least one percentage. Each percentage is greater than 0 and at most 100.
 
-### D2: One cap applies to every current standard quota window
+### D2: Effective caps apply to their current standard quota windows
 
-The evaluator normalizes weekly-only and monthly-only account shapes using the same window rules as routing and account presentation. An enabled account is blocked when any current standard primary, weekly, or monthly window reports `used_percent >= usage_limit_percent`.
+The evaluator normalizes weekly-only and monthly-only account shapes using the same window rules as routing and account presentation. The 5-hour and weekly overrides replace the default only for matching normalized durations; monthly and other durations use only the default. A missing override inherits the default, while an absent default leaves unmatched windows unrestricted. An enabled account is blocked when any current standard window reports `used_percent` at or above its effective cap.
 
 When historical monthly telemetry and a normalized weekly-only shape coexist, they are alternative observations of the account's long-window quota rather than independent windows. The evaluator chooses between them with the shared sibling-fetch rules: timestamps more than the sibling margin apart establish fetch order; rows within the margin use quota metadata and reset deadlines; an exact tie keeps the stable weekly-primary default. A genuinely newer weekly observation can therefore replace an elapsed or stale monthly row after an upstream shape/reset transition, while a newer or same-fetch authoritative monthly observation remains canonical.
 
-Rows whose reset deadline elapsed are not exhaustion evidence. The remaining relevant rows must be fresh according to the existing usage-refresh freshness window; if there is no fresh relevant standard row, the limit state is `data_unavailable` and selection fails closed. This favors preserving quota over availability while a hard operator policy is active.
+Rows whose reset deadline elapsed are not exhaustion evidence. Observations for applicable capped windows must be fresh according to the existing usage-refresh freshness window; a missing, stale, or unknown observation for one of those windows makes the limit state `data_unavailable` and selection fails closed. Unrestricted windows do not require telemetry. This favors preserving quota over availability while a hard operator policy is active.
 
 The reusable evaluator returns one of `disabled`, `available`, `reached`, or `data_unavailable`. Account summaries and proxy state use the same evaluator so the dashboard cannot claim a different cap state from the selector.
 
@@ -34,7 +34,7 @@ Selection inputs retain cloned standard primary, secondary, and monthly rows sep
 
 ### D4: The canonical selector owns the hard gate
 
-`AccountState` carries the evaluated limit state and percentage. `select_account` applies the policy after status, upstream-quota, and cooldown checks, but before error-backoff classification, health, stickiness, policy, or strategy handling. This makes the local policy authoritative only for accounts that would otherwise be routing candidates: an account that is also upstream-exhausted retains the established `usage_limit_reached` 429 and reset metadata, while a locally blocked account never enters the error-backoff fallback set. If all otherwise eligible candidates are blocked by limits, selection returns stable error code `account_usage_limit_reached`; opportunistic prechecks preserve that typed error instead of rewriting it. The account's persisted `active`/rate-limit status is not changed.
+`AccountState` carries the evaluated limit state. `select_account` applies the policy after status, upstream-quota, and cooldown checks, but before error-backoff classification, health, stickiness, policy, or strategy handling. This makes the local policy authoritative only for accounts that would otherwise be routing candidates: an account that is also upstream-exhausted retains the established `usage_limit_reached` 429 and reset metadata, while a locally blocked account never enters the error-backoff fallback set. If all otherwise eligible candidates are blocked by limits, selection returns stable error code `account_usage_limit_reached`; opportunistic prechecks preserve that typed error instead of rewriting it. The account's persisted `active`/rate-limit status is not changed.
 
 Fair-share admission derives capacity and lease/key counters from the same usage-policy-eligible candidate set used for routing. Locally blocked accounts contribute neither capacity nor in-flight counters; an entirely locally blocked pool bypasses fair-share admission and reaches the canonical policy error. A hard-sticky owner blocked by the policy also bypasses peer-pool fair-share denial: congestion relief cannot make that owner eligible, so the owner selector returns `account_usage_limit_reached` immediately while preserving the mapping.
 
@@ -44,7 +44,7 @@ Every synthetic warmup surface uses the same hard policy. The public `/v1/warmup
 
 ### D5: Dashboard writes invalidate selection state across replicas
 
-`PUT /api/accounts/{account_id}/usage-limit` accepts the enabled flag and nullable percentage, returns the persisted pair, invalidates the local selection-input cache, and emits the existing account-selection invalidation signal for peers. Account summaries expose the fields and evaluated state. The Accounts page provides percentage editing, enable/disable, and remove actions with wording that makes `10%` mean “10% maximum used / 90% reserved.” The dashboard initializes the editable value from the persisted number without decimal-place quantization, so every API-valid percentage remains valid and unchanged until the operator edits it.
+`PUT /api/accounts/{account_id}/usage-limit` accepts the enabled flag, optional default percentage, and optional 5-hour and weekly override percentages. An omitted percentage retains its stored value; explicit null clears it. The API returns all persisted policy fields, invalidates the local selection-input cache, and emits the existing account-selection invalidation signal for peers. Account summaries expose the fields and evaluated state. The Accounts page edits shared and applicable window reserves, with `10% reserved` corresponding to a `90% maximum used` API threshold. The dashboard initializes editable values from persisted numbers without decimal-place quantization, so every API-valid percentage remains valid and unchanged until the operator edits it.
 
 ### D6: The guarantee is observation-bound
 
@@ -160,7 +160,7 @@ verify the reservation, budget and warmup claim from a separate session.
 
 ### D13: Consistency is defined at observation boundaries
 
-The policy API commits the persisted pair, invalidates its local selection cache,
+The policy API commits the persisted policy fields, invalidates its local selection cache,
 and awaits the existing best-effort peer invalidation bump before returning.
 These are the visibility rules, not a promise of an exact spend ceiling:
 
@@ -178,15 +178,16 @@ Queue admission, optional prewarm and actual visible dispatch remain distinct
 checks: another task or a wait can intervene between them. A reused bridge with
 a held stream lease has two owner reads for a normal visible turn (queue and
 dispatch); idle lease reacquisition adds one, and an actual prewarm dispatch adds
-its own gate. WebSocket response-create has one. No unbounded retry or owner
-reroute is introduced.
+its own gate. WebSocket response-create can read once before lease admission and
+again at the dispatch boundary, because lease admission and authorization are
+not atomic. No unbounded retry or owner reroute is introduced.
 
 The final authorization boundary remains a single account-scoped database read;
 cached ordinary selection adds no database reads for this policy check.
 
 ## Migration
 
-A forward Alembic revision based on upstream `20260912_010000_drop_legacy_dashboard_credentials` adds both account columns and database checks for the percentage range and enabled/value relationship. Existing accounts remain disabled with no percentage. Downgrade removes the checks and columns through batch operations so SQLite and PostgreSQL both round-trip.
+The scalar Alembic revision follows upstream `20260918_000000_merge_scim_and_overflow_heads` and adds `usage_limit_enabled` and nullable `usage_limit_percent` with range and enabled/value checks. Existing accounts remain disabled with no percentage. The subsequent `20260910_010000_add_usage_limit_overrides` revision adds nullable 5-hour and weekly percentages, checks each range, and permits an enabled policy when any of the three percentages is present. Downgrading the override revision first disables policies that have no scalar percentage; downgrading the scalar revision then removes its checks and columns. Batch operations support SQLite and PostgreSQL round trips.
 
 ## Test plan
 

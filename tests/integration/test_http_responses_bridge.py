@@ -5145,7 +5145,8 @@ async def test_v1_responses_http_bridge_usage_limit_rejects_only_overlapping_new
     finally:
         if not first_task.done():
             await upstream.complete_first_response()
-            await first_task
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(first_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio

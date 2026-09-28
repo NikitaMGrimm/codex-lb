@@ -112,7 +112,7 @@ def _projected_usage_window(
         window_minutes=int(window_minutes) if window_minutes is not None else None,
         recorded_at=recorded_at,
     )
-    if row.used_percent == 0.0 and usage_core.is_no_data_placeholder(row):
+    if usage_core.is_no_data_placeholder(row):
         return replace(row, used_percent=None)
     return row
 

@@ -186,7 +186,7 @@
   "accounts.usageLimit.sharedHint": "이 예비 할당량은 기본 할당량 구간에 적용됩니다. 사용량 데이터에서 구간을 확인하면 구간별 설정이 표시됩니다.",
   "accounts.usageLimit.aria": "계정 사용량 제한",
   "accounts.usageLimit.clearSavedLimit": "저장된 예약 삭제",
-  "accounts.usageLimit.description": "Codex LB가 사용할 수 있는 표준 quota의 최대 비율을 설정합니다. 나머지는 예약됩니다.",
+  "accounts.usageLimit.description": "Codex LB가 사용할 수 있는 표준 할당량의 최대 비율을 설정합니다. 나머지는 예약됩니다.",
   "accounts.usageLimit.enableAria": "예약 할당량 보호",
   "accounts.usageLimit.maximumUsedPercent": "나를 위한 예약 (%)",
   "accounts.usageLimit.rangeError": "0% 이상 100% 미만의 예약량을 입력하세요.",

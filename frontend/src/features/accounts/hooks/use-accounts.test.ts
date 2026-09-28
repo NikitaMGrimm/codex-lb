@@ -242,6 +242,8 @@ describe("useAccounts", () => {
       accountId: firstAccountId,
       enabled: true,
       percent: 10,
+      percent5H: null,
+      percentWeekly: null,
     });
 
     const imported = await result.current.importMutation.mutateAsync(

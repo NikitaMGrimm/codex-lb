@@ -100,18 +100,21 @@ async def test_account_usage_limit_snapshot_is_one_account_scoped_statement(
                     account_id=account.id,
                     used_percent=10.0,
                     window="primary",
+                    window_minutes=300,
                     recorded_at=older,
                 ),
                 UsageHistory(
                     account_id=account.id,
                     used_percent=20.0,
                     window="primary",
+                    window_minutes=300,
                     recorded_at=newer,
                 ),
                 UsageHistory(
                     account_id=account.id,
                     used_percent=30.0,
                     window="secondary",
+                    window_minutes=10080,
                     recorded_at=newer,
                 ),
             ]
@@ -166,6 +169,40 @@ async def test_account_usage_limit_snapshot_keeps_windows_for_disabled_policy(
         assert snapshot.enabled is False
         assert snapshot.primary is not None
         assert snapshot.primary.window_minutes == 10080
+
+
+@pytest.mark.asyncio
+async def test_account_usage_limit_snapshot_projects_newer_metadata_less_usage_as_unknown(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        account = _account("acc_usage_limit_placeholder")
+        session.add(account)
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account.id,
+                    used_percent=20.0,
+                    window="primary",
+                    window_minutes=300,
+                    recorded_at=datetime(2026, 7, 22, 11, 0, tzinfo=timezone.utc),
+                ),
+                UsageHistory(
+                    account_id=account.id,
+                    used_percent=37.0,
+                    window="primary",
+                    recorded_at=datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        await session.commit()
+
+        snapshot = await UsageRepository(session).account_usage_limit_snapshot(account.id)
+
+        assert snapshot is not None
+        assert snapshot.primary is not None
+        assert snapshot.primary.used_percent is None
+        assert snapshot.primary.recorded_at is not None
 
 
 @pytest.mark.asyncio
