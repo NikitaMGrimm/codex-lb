@@ -3592,7 +3592,7 @@ async def test_usage_limit_overrides_preserve_scalar_and_round_trip(tmp_path, db
             """),
                 {"token": b"synthetic", "enabled": True},
             )
-        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=True))
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
         async with engine.begin() as conn:
             row = (
                 await conn.execute(
@@ -3604,7 +3604,7 @@ async def test_usage_limit_overrides_preserve_scalar_and_round_trip(tmp_path, db
         await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(url), parent))
         async with engine.connect() as conn:
             assert (await conn.execute(text("SELECT usage_limit_enabled FROM accounts"))).scalar_one() == 0
-        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=True))
+        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
         assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
     finally:
         await engine.dispose()

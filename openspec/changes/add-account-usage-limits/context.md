@@ -34,6 +34,8 @@ Repository lint, architecture ratchets, type checks, frontend lint/type checks/b
 
 CodeRabbit found an override sample check treating unknown plan capacity as zero. Unknown capacity now requires a matching current sample, while known zero capacity remains exempt. Expanded existing tests reproduced the selection bypass; all 505 focused evaluator, selection, and owner-authorization tests then passed, including bridge admission. Lint, types, and strict change and main-spec validation also passed.
 
+The next full review identified the same required-window gap in the default frontend mock and unnecessary legacy-bootstrap flags in the override round trip. The mock now requires applicable override windows before filtering observations, retaining zero-capacity and monthly-only exceptions; 41 focused frontend tests and frontend lint/types passed. Existing-schema upgrades use `bootstrap_legacy=False`; four SQLite checks and both PostgreSQL policy round trips passed. Both PostgreSQL round trips are now included in the required CI test target.
+
 Both size columns below compare the entire PR against `ec994599`; tests include frontend mock support. Added/deleted are raw Git diff counts, while net is added minus deleted.
 
 | Entire PR | Published `242a0f937` | Reviewed `f51a53758` |
