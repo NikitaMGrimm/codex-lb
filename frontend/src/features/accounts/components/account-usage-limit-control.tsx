@@ -31,7 +31,7 @@ export function AccountUsageLimitControl({
   const configuredPercent = account.usageLimitPercent ?? null;
   const usageLimitEnabled = account.usageLimitEnabled ?? false;
   const [draft, setDraft] = useState(
-    configuredPercent === null ? "" : formatPercent(configuredPercent),
+    configuredPercent === null ? "" : String(configuredPercent),
   );
   const parsedDraft = Number(draft);
   const validDraft =
@@ -80,7 +80,7 @@ export function AccountUsageLimitControl({
         {configuredPercent === null
           ? t("accounts.usageLimit.description")
           : t("accounts.usageLimit.summary", {
-              maximum: formatPercent(configuredPercent),
+              maximum: String(configuredPercent),
               reserved: formatReservedPercent(configuredPercent),
             })}
       </p>
@@ -140,7 +140,7 @@ export function AccountUsageLimitControl({
       {validDraft && draftChanged ? (
         <p className="text-xs text-muted-foreground">
           {t("accounts.usageLimit.summary", {
-            maximum: formatPercent(parsedDraft),
+            maximum: String(parsedDraft),
             reserved: formatReservedPercent(parsedDraft),
           })}
         </p>
@@ -168,28 +168,17 @@ export function AccountUsageLimitControl({
 
 function UsageLimitStateBadge({ state }: { state: AccountUsageLimitState }) {
   const { t } = useTranslation();
-  if (state === "reached") {
-    return (
-      <Badge variant="destructive">
-        {t("accounts.usageLimit.states.reached")}
-      </Badge>
-    );
-  }
-  if (state === "data_unavailable") {
-    return (
-      <Badge variant="destructive">
-        {t("accounts.usageLimit.states.dataUnavailable")}
-      </Badge>
-    );
-  }
-  if (state === "available") {
-    return <Badge variant="secondary">{t("common.states.active")}</Badge>;
-  }
-  return <Badge variant="outline">{t("common.states.off")}</Badge>;
-}
-
-function formatPercent(value: number): string {
-  return String(value);
+  const labels = {
+    reached: "accounts.usageLimit.states.reached",
+    data_unavailable: "accounts.usageLimit.states.dataUnavailable",
+    available: "common.states.active",
+    disabled: "common.states.off",
+  };
+  return (
+    <Badge variant={state === "disabled" ? "outline" : state === "available" ? "secondary" : "destructive"}>
+      {t(labels[state])}
+    </Badge>
+  );
 }
 
 function formatReservedPercent(maximumUsedPercent: number): string {
