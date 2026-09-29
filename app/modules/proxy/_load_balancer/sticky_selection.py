@@ -21,7 +21,6 @@ from app.core.balancer import (
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
-    account_usage_limit_blocks_selection,
     routing_eligible_states,
     select_account,
 )
@@ -505,7 +504,7 @@ async def run_sticky_selection_path(
             # selector surface that terminal policy result instead of parking
             # the request in a fair-share capacity wait.
             hard_owner_usage_limit_blocked = hard_sticky and any(
-                state.account_id == sticky_existing_account_id and account_usage_limit_blocks_selection(state)
+                state.account_id == sticky_existing_account_id and state.usage_limit_state.blocks_account_use
                 for state in states
             )
             fair_share_denial = (
@@ -1636,8 +1635,8 @@ def _filter_states_for_usage_limit_and_account_caps(
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
 ) -> tuple[list[AccountState], bool]:
     state_list = list(states)
-    usage_limit_blocked = [state for state in state_list if account_usage_limit_blocks_selection(state)]
-    usage_limit_eligible = [state for state in state_list if not account_usage_limit_blocks_selection(state)]
+    usage_limit_blocked = [state for state in state_list if state.usage_limit_state.blocks_account_use]
+    usage_limit_eligible = [state for state in state_list if not state.usage_limit_state.blocks_account_use]
     if not usage_limit_eligible:
         # Preserve blocked states so the canonical selector returns the stable
         # local-policy error instead of misclassifying the pool as cap-bound.
@@ -1805,8 +1804,8 @@ def _select_account_preferring_budget_safe(
     usage_exhaustion_states: Iterable[AccountState] | None = None,
 ) -> SelectionResult:
     all_states = list(states)
-    usage_limit_blocked = [state for state in all_states if account_usage_limit_blocks_selection(state)]
-    state_list = [state for state in all_states if not account_usage_limit_blocks_selection(state)]
+    usage_limit_blocked = [state for state in all_states if state.usage_limit_state.blocks_account_use]
+    state_list = [state for state in all_states if not state.usage_limit_state.blocks_account_use]
     if not state_list:
         return select_account(
             all_states,

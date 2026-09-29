@@ -496,7 +496,7 @@ def _prepare_routing_candidates(
             state.error_count = 0
         if state.cooldown_until and current < state.cooldown_until:
             continue
-        if account_usage_limit_blocks_selection(state):
+        if state.usage_limit_state.blocks_account_use:
             has_usage_limit_blocked = True
             continue
         if state.error_count >= ERROR_BACKOFF_THRESHOLD:
@@ -877,10 +877,6 @@ def _oldest_due_probing_account(
             state.account_id,
         ),
     )
-
-
-def account_usage_limit_blocks_selection(state: AccountState) -> bool:
-    return state.usage_limit_state.blocks_account_use
 
 
 def _remaining_secondary_credits(state: AccountState) -> float:
