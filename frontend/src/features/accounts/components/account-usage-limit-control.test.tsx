@@ -31,7 +31,6 @@ describe("AccountUsageLimitControl", () => {
     await user.click(screen.getByRole("switch", { name: "Usage limit" }));
     expect(onChange).toHaveBeenCalledWith(account.accountId, {
       enabled: true,
-      percent: 10,
     });
 
     const input = screen.getByRole("spinbutton", { name: "Maximum used percent" });

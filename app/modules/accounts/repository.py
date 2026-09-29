@@ -166,6 +166,10 @@ def _store_request_usage_summaries(
     _request_usage_summary_cache[key] = (summaries, time.monotonic() + ttl_seconds)
 
 
+class AccountUsageLimitNotConfiguredError(Exception):
+    """A saved percentage is required to enable a policy without replacing it."""
+
+
 class AccountIdentityConflictError(Exception):
     def __init__(self, email: str) -> None:
         self.email = email
@@ -989,6 +993,8 @@ class AccountsRepository:
             )
             if update_percent:
                 statement = statement.values(usage_limit_percent=percent)
+            elif enabled:
+                statement = statement.where(Account.usage_limit_percent.is_not(None))
             result = await self._session.execute(
                 statement.returning(
                     Account.usage_limit_enabled,
@@ -996,7 +1002,18 @@ class AccountsRepository:
                 )
             )
             row = result.one_or_none()
+            missing_configuration = (
+                row is None
+                and enabled
+                and not update_percent
+                and await self._session.scalar(
+                    select(Account.id).where(Account.id == account_id, Account.delete_requested_at.is_(None))
+                )
+                is not None
+            )
             await self._session.commit()
+            if missing_configuration:
+                raise AccountUsageLimitNotConfiguredError("Configure a percentage before enabling the usage limit")
             if row is None:
                 return None
             return AccountUsageLimitConfiguration(

@@ -23,7 +23,7 @@ from app.core.multipart import ACCOUNT_IMPORT_MULTIPART_POLICY, bounded_multipar
 from app.core.multipart_fields import required_upload
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
-from app.modules.accounts.repository import AccountIdentityConflictError
+from app.modules.accounts.repository import AccountIdentityConflictError, AccountUsageLimitNotConfiguredError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
     AccountAliasResponse,
@@ -448,12 +448,15 @@ async def update_account_usage_limit(
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountUsageLimitUpdateResponse:
     percent_was_provided = "percent" in payload.model_fields_set
-    configuration = await context.service.set_usage_limit(
-        account_id,
-        enabled=payload.enabled,
-        percent=payload.percent,
-        update_percent=percent_was_provided,
-    )
+    try:
+        configuration = await context.service.set_usage_limit(
+            account_id,
+            enabled=payload.enabled,
+            percent=payload.percent,
+            update_percent=percent_was_provided,
+        )
+    except AccountUsageLimitNotConfiguredError as exc:
+        raise DashboardConflictError(str(exc), code="account_usage_limit_not_configured") from exc
     if configuration is None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     AuditService.log_async(

@@ -4,7 +4,7 @@
 
 ### Requirement: Accounts have a reversible maximum-usage policy
 
-Each account SHALL support an optional maximum standard-quota used percentage greater than 0 and at most 100, plus an enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling a configured policy SHALL retain its percentage for later re-enablement, while removing the policy SHALL clear the percentage and disable it. For a disabled update, the API MUST retain the latest stored percentage when the percentage field is omitted, clear it when the field is explicitly `null`, and replace it when a numeric value is supplied. The API MUST reject an enabled policy without an explicitly supplied percentage, MUST reject an enabled policy with a `null` percentage, and MUST reject percentages outside the supported range.
+Each account SHALL support an optional maximum standard-quota used percentage greater than 0 and at most 100, plus an enabled state. The policy SHALL default to disabled for existing and new accounts. Disabling a configured policy SHALL retain its percentage for later re-enablement, while removing the policy SHALL clear the percentage and disable it. When the percentage field is omitted, an update MUST atomically retain the latest stored percentage. A disabled update MUST clear the percentage when the field is explicitly `null`. A numeric percentage MUST replace the saved value. Enabling without a saved percentage MUST return HTTP 409 with code `account_usage_limit_not_configured`; an absent account MUST return HTTP 404 with code `account_not_found`. The API MUST reject an enabled policy with a `null` percentage and MUST reject percentages outside the supported range.
 
 #### Scenario: Operator temporarily disables a configured limit
 
@@ -27,6 +27,20 @@ Each account SHALL support an optional maximum standard-quota used percentage gr
 - **WHEN** the operator removes the policy
 - **THEN** the percentage is cleared
 - **AND** the policy is disabled
+
+#### Scenario: Stale dashboard enables without reverting a newer percentage
+
+- **GIVEN** a dashboard loaded a disabled maximum of 10 percent
+- **AND** another client changes the stored maximum to 20 percent
+- **WHEN** the stale dashboard enables the policy while omitting the percentage field
+- **THEN** the policy is enabled with the stored maximum of 20 percent
+
+#### Scenario: Stale dashboard enables after the policy was removed
+
+- **GIVEN** another client removed the account's saved maximum
+- **WHEN** a stale dashboard enables the policy without a percentage
+- **THEN** the API returns HTTP 409 with code `account_usage_limit_not_configured`
+- **AND** the policy remains disabled with no saved percentage
 
 ### Requirement: Account usage limits are hard routing eligibility gates
 

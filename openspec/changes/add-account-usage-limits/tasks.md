@@ -18,3 +18,4 @@
 - [ ] 16. Verify the audited change with backend, frontend, migration, and OpenSpec checks.
 - [x] 17. Preserve telemetry precision when deduplicating observations across a cap.
 - [x] 18. Reload owner-authorization snapshots invalidated while being read.
+- [x] 19. Enable saved limits atomically without overwriting newer values from stale tabs.

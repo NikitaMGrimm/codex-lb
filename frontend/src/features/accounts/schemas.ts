@@ -279,11 +279,11 @@ export const AccountUsageLimitUpdateRequestSchema = z
     percent: z.number().gt(0).max(100).nullable().optional(),
   })
   .superRefine((value, context) => {
-    if (value.enabled && value.percent == null) {
+    if (value.enabled && value.percent === null) {
       context.addIssue({
         code: "custom",
         path: ["percent"],
-        message: "A percentage is required when the usage limit is enabled",
+        message: "The percentage cannot be null when the usage limit is enabled",
       });
     }
   });

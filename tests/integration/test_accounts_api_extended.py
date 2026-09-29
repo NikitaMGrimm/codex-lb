@@ -143,11 +143,25 @@ async def test_account_usage_limit_stale_disable_retains_latest_value_and_explic
     assert summary["usageLimitPercent"] == 20.0
     assert summary["usageLimitState"] == "disabled"
 
+    reenabled = await async_client.put(
+        f"/api/accounts/{account.id}/usage-limit",
+        json={"enabled": True},
+    )
+    assert reenabled.status_code == 200
+    assert reenabled.json() == {"accountId": account.id, "enabled": True, "percent": 20.0}
+
     removed = await async_client.put(
         f"/api/accounts/{account.id}/usage-limit",
         json={"enabled": False, "percent": None},
     )
     assert removed.status_code == 200
+
+    reenabled_after_removal = await async_client.put(
+        f"/api/accounts/{account.id}/usage-limit",
+        json={"enabled": True},
+    )
+    assert reenabled_after_removal.status_code == 409
+    assert reenabled_after_removal.json()["error"]["code"] == "account_usage_limit_not_configured"
 
     async with SessionLocal() as session:
         stored = await session.get(Account, account.id)
@@ -205,7 +219,6 @@ async def test_account_summary_reports_reached_and_available_usage_limit_states(
 @pytest.mark.parametrize(
     "payload",
     [
-        {"enabled": True},
         {"enabled": True, "percent": None},
         {"enabled": True, "percent": 0},
         {"enabled": True, "percent": 100.01},
@@ -222,14 +235,32 @@ async def test_account_usage_limit_rejects_invalid_configuration(async_client, d
 
 
 @pytest.mark.asyncio
-async def test_account_usage_limit_missing_account_returns_404(async_client):
+@pytest.mark.parametrize("percent_fields", [{"percent": 10}, {}])
+async def test_account_usage_limit_missing_account_returns_404(async_client, percent_fields):
     response = await async_client.put(
         "/api/accounts/missing/usage-limit",
-        json={"enabled": True, "percent": 10},
+        json={"enabled": True, **percent_fields},
     )
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "account_not_found"
+
+
+@pytest.mark.asyncio
+async def test_account_usage_limit_enable_requires_a_saved_configuration(async_client, db_setup):
+    account = _make_account("acc_usage_limit_unconfigured", "unconfigured@example.com")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+
+    response = await async_client.put(f"/api/accounts/{account.id}/usage-limit", json={"enabled": True})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "account_usage_limit_not_configured"
+    async with SessionLocal() as session:
+        stored = await session.get(Account, account.id)
+        assert stored is not None
+        assert stored.usage_limit_enabled is False
+        assert stored.usage_limit_percent is None
 
 
 @pytest.mark.asyncio

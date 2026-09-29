@@ -70,6 +70,7 @@ function idleMutation() {
   return {
     isPending: false,
     error: null,
+    mutate: vi.fn(),
     mutateAsync: vi.fn(),
   };
 }

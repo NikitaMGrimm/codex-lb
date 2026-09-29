@@ -45,6 +45,7 @@ describe("account usage limit flow", () => {
         return HttpResponse.json({
           accountId: String(params.accountId),
           ...payload,
+          percent: account.usageLimitPercent,
         });
       }),
     );
@@ -66,13 +67,13 @@ describe("account usage limit flow", () => {
     });
   });
 
-  it("disables from a stale tab without reverting the newer stored percentage", async () => {
+  it.each([false, true])("toggles from a stale tab with enabled=%s without reverting the newer stored percentage", async (enabled) => {
     const user = userEvent.setup({ delay: null });
     const staleAccount = createAccountSummary({
       accountId: "acc-stale-usage-limit",
       email: "stale-usage-limit@example.com",
       displayName: "Stale Usage Limit Account",
-      usageLimitEnabled: true,
+      usageLimitEnabled: !enabled,
       usageLimitPercent: 10,
       usageLimitState: "available",
     });
@@ -89,9 +90,9 @@ describe("account usage limit flow", () => {
               ? staleAccount
               : {
                   ...staleAccount,
-                  usageLimitEnabled: false,
+                  usageLimitEnabled: enabled,
                   usageLimitPercent: storedPercent,
-                  usageLimitState: "disabled",
+                  usageLimitState: enabled ? "available" : "disabled",
                 },
           ],
         });
@@ -119,15 +120,42 @@ describe("account usage limit flow", () => {
     const usageLimitSwitch = await screen.findByRole("switch", {
       name: "Usage limit",
     });
-    expect(usageLimitSwitch).toBeChecked();
+    expect(usageLimitSwitch).toHaveAttribute("aria-checked", String(!enabled));
     expect(screen.getByText("10% maximum used · 90% reserved")).toBeInTheDocument();
 
     await user.click(usageLimitSwitch);
 
     await waitFor(() => {
-      expect(updatePayloads).toEqual([{ enabled: false }]);
-      expect(screen.getByRole("switch", { name: "Usage limit" })).not.toBeChecked();
+      expect(updatePayloads).toEqual([{ enabled }]);
+      expect(screen.getByRole("switch", { name: "Usage limit" })).toHaveAttribute("aria-checked", String(enabled));
       expect(screen.getByText("20% maximum used · 80% reserved")).toBeInTheDocument();
     });
+  });
+
+  it("shows a conflict when a stale tab enables a removed policy", async () => {
+    const user = userEvent.setup({ delay: null });
+    const account = createAccountSummary({ usageLimitEnabled: false, usageLimitPercent: 10 });
+    const updatePayloads: unknown[] = [];
+    server.use(
+      http.get("/api/accounts", () => HttpResponse.json({ accounts: [account] })),
+      http.put("/api/accounts/:accountId/usage-limit", async ({ request }) => {
+        updatePayloads.push(await request.json());
+        return HttpResponse.json({
+          error: {
+            code: "account_usage_limit_not_configured",
+            message: "Configure a percentage before enabling the usage limit",
+          },
+        }, { status: 409 });
+      }),
+    );
+
+    window.history.pushState({}, "", "/accounts");
+    renderWithProviders(<App />);
+    const toggle = await screen.findByRole("switch", { name: "Usage limit" });
+    await user.click(toggle);
+
+    expect(await screen.findByText("Configure a percentage before enabling the usage limit")).toBeInTheDocument();
+    expect(toggle).not.toBeChecked();
+    expect(updatePayloads).toEqual([{ enabled: true }]);
   });
 });

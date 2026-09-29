@@ -51,10 +51,7 @@ export function AccountUsageLimitControl({
       return;
     }
     onChange(account.accountId, {
-      enabled:
-        configuredPercent === null
-          ? true
-          : usageLimitEnabled,
+      enabled: configuredPercent === null ? true : usageLimitEnabled,
       percent: parsedDraft,
     });
   };
@@ -73,14 +70,7 @@ export function AccountUsageLimitControl({
               aria-label={t("accounts.usageLimit.enableAria")}
               checked={usageLimitEnabled}
               disabled={disabled}
-              onCheckedChange={(enabled) =>
-                onChange(
-                  account.accountId,
-                  enabled
-                    ? { enabled: true, percent: configuredPercent }
-                    : { enabled: false },
-                )
-              }
+              onCheckedChange={(enabled) => onChange(account.accountId, { enabled })}
             />
           </div>
         ) : null}

@@ -21,3 +21,9 @@ needs atomic session accounting.
 The policy remains observation-bound: upstream reporting and already-dispatched
 work can overshoot the configured threshold. No new settings or dependencies
 are needed for these fixes.
+
+Both dashboard toggle directions omit the percentage. For example, a tab that
+loaded a disabled 10% limit must enable the latest saved 20% limit after another
+client edits it, rather than silently restoring 10%. A conditional database
+update prevents enabling a removed policy; this conflict returns 409 so the
+operator can reload or explicitly configure a new value.
