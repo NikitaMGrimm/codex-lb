@@ -428,30 +428,20 @@ class _WarmupMixin:
             if authorization.account is None:
                 error_code = "account_not_found"
                 error_message = "Account no longer exists"
-                return _WarmupSubmitResult(
-                    success=False,
-                    request_id=request_id,
-                    error_code=error_code,
-                    error_message=error_message,
-                )
-            if authorization.account.status != AccountStatus.ACTIVE:
+            elif authorization.account.status != AccountStatus.ACTIVE:
                 error_code = "account_not_active"
                 error_message = f"Account status is {authorization.account.status.value}"
-                return _WarmupSubmitResult(
-                    success=False,
-                    request_id=request_id,
-                    error_code=error_code,
-                    error_message=error_message,
-                )
-            if authorization.limit_state.blocks_account_use:
+            elif authorization.limit_state.blocks_account_use:
                 error_code = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
                 error_message = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
+            if error_code is not None:
                 return _WarmupSubmitResult(
                     success=False,
                     request_id=request_id,
                     error_code=error_code,
                     error_message=error_message,
                 )
+            assert authorization.account is not None
             live_account = _materialize_warmup_account(authorization.account)
             access_token = proxy._encryptor.decrypt(live_account.access_token_encrypted)
             account_header_id = _header_account_id(live_account.chatgpt_account_id)
