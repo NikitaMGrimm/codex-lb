@@ -1001,7 +1001,8 @@ def test_select_account_can_disable_pool_usage_exhaustion_for_owner_scope():
     assert result.error_message == "Rate limit exceeded. Try again in 300s"
 
 
-def test_budget_safe_selection_uses_full_scope_for_usage_exhaustion() -> None:
+@pytest.mark.parametrize("limit_state", list(AccountUsageLimitState))
+def test_budget_safe_selection_uses_full_scope_for_usage_exhaustion(limit_state: AccountUsageLimitState) -> None:
     now = time.time()
     cap_filtered_states = [
         AccountState(
@@ -1009,6 +1010,7 @@ def test_budget_safe_selection_uses_full_scope_for_usage_exhaustion() -> None:
             AccountStatus.QUOTA_EXCEEDED,
             used_percent=100.0,
             reset_at=int(now + 3600),
+            usage_limit_state=limit_state,
         )
     ]
     full_scope_states = [
@@ -1034,7 +1036,8 @@ def test_budget_safe_selection_uses_full_scope_for_usage_exhaustion() -> None:
     assert result.error_message == "Rate limit exceeded. Try again in 300s"
 
 
-def test_budget_safe_capacity_selection_forwards_usage_exhaustion_controls() -> None:
+@pytest.mark.parametrize("limit_state", list(AccountUsageLimitState))
+def test_budget_safe_capacity_selection_forwards_usage_exhaustion_controls(limit_state: AccountUsageLimitState) -> None:
     now = time.time()
     owner_scope = [
         AccountState(
@@ -1043,6 +1046,7 @@ def test_budget_safe_capacity_selection_forwards_usage_exhaustion_controls() -> 
             used_percent=100.0,
             reset_at=int(now + 600),
             primary_reset_at=int(now + 3600),
+            usage_limit_state=limit_state,
         )
     ]
     full_scope = [

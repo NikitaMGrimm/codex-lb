@@ -741,6 +741,34 @@ async def test_public_selection_applies_candidate_gates(
 
 
 @pytest.mark.asyncio
+async def test_usage_capped_exhausted_continuity_owner_retains_owner_error(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    owner = _account("contract-exhausted-capped-owner")
+    owner.status = AccountStatus.QUOTA_EXCEEDED
+    owner.reset_at = int(datetime.now(UTC).timestamp()) + 3600
+    owner.usage_limit_enabled = True
+    owner.usage_limit_percent = 10.0
+    peer = _account("contract-healthy-peer")
+    balancer, _, _, _ = _balancer(
+        [owner, peer],
+        selection_cache,
+        primary={owner.id: _usage_row(1, owner.id, window="primary", used_percent=100.0)},
+    )
+
+    selection = await balancer.select_account(
+        required_account_id=owner.id,
+        required_continuity_owner=True,
+        routing_strategy="capacity_weighted",
+        allow_usage_exhaustion_error=False,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == load_balancer_module.CONTINUITY_OWNER_UNAVAILABLE
+    assert selection_failure_response(selection)[0] == 503
+
+
+@pytest.mark.asyncio
 async def test_required_continuity_owner_miss_does_not_mark_healthy_pool_degraded(
     selection_cache: AccountSelectionCache,
     monkeypatch: pytest.MonkeyPatch,
