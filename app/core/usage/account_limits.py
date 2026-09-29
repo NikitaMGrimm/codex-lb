@@ -60,7 +60,8 @@ def evaluate_standard_usage_limit(
             (limit_5h_percent, "primary", 300),
             (limit_weekly_percent, "secondary", 10080),
         ):
-            if override is not None and (usage_core.capacity_for_plan(plan_type, window) or 0) > 0:
+            capacity = usage_core.capacity_for_plan(plan_type, window)
+            if override is not None and (capacity is None or capacity > 0):
                 if not any(
                     row.window_minutes == duration and not _window_elapsed(row, current_time) for row in relevant_rows
                 ):

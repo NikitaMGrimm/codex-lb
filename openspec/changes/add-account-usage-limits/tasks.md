@@ -41,3 +41,4 @@
 - [x] 25. Audit the published head `242a0f937` against base `ec994599`, reproduce and fix contract violations across policy, routing, owner lifecycle, telemetry, migrations, and dashboard flows.
 - [x] 26. Consolidate redundant implementation and tests while retaining distinct public-path and concurrency coverage.
 - [x] 27. Verify the corrected published implementation and report the entire PR's before/after diff against the same base.
+- [x] 28. Fail closed for overrides with unknown plan capacity and verify public selection and bridge authorization.

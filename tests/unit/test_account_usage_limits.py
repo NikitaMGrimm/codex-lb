@@ -228,9 +228,11 @@ def test_free_plan_evaluates_one_effective_long_window(
         (65, 90, AccountUsageLimitState.REACHED),
     ],
 )
-def test_unequal_overrides_replace_default_per_window(primary_used, weekly_used, expected):
+@pytest.mark.parametrize("plan_type", ["plus", "future-plan"])
+def test_unequal_overrides_replace_default_per_window(primary_used, weekly_used, expected, plan_type):
     assert (
         _evaluate(
+            plan_type=plan_type,
             limit_percent=80,
             limit_5h_percent=70,
             limit_weekly_percent=90,
@@ -322,7 +324,8 @@ def test_standalone_override_cannot_treat_unknown_window_placeholder_as_unrestri
 @pytest.mark.parametrize("window", ["primary", "secondary"])
 @pytest.mark.parametrize("sample", ["missing", "elapsed"])
 @pytest.mark.parametrize("default", [None, 80])
-def test_configured_window_override_requires_current_sample(window, sample, default):
+@pytest.mark.parametrize("plan_type", ["plus", "future-plan"])
+def test_configured_window_override_requires_current_sample(window, sample, default, plan_type):
     limited = (
         None
         if sample == "missing"
@@ -330,6 +333,7 @@ def test_configured_window_override_requires_current_sample(window, sample, defa
     )
     assert (
         _evaluate(
+            plan_type=plan_type,
             limit_percent=default,
             limit_5h_percent=70 if window == "primary" else None,
             limit_weekly_percent=90 if window == "secondary" else None,

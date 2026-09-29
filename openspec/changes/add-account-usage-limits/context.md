@@ -20,7 +20,7 @@ The scalar migration follows `20260918_000000_merge_scim_and_overflow_heads`; th
 
 ## Published PR audit
 
-The audit starts at GitHub PR #1528 head `242a0f937`, against base `ec994599`: 12,390 additions, 785 deletions, 135 files. Work stays local on `fix/pr1528-usage-audit` in a separate worktree, preserving the earlier scalar-only checkout. Verification uses this head's frozen dependency locks.
+The audit starts at GitHub PR #1528 head `242a0f937`, against base `ec994599`: 12,390 additions, 785 deletions, 135 files. Initial work stayed local on `fix/pr1528-usage-audit` in a separate worktree, preserving the earlier scalar-only checkout. Verification uses this head's frozen dependency locks.
 
 The audit fixes stale toggles overwriting newer thresholds, unhandled mutation rejection, lease cleanup after WebSocket expiry, and reserve controls offered for incorrect durations. It consolidates telemetry writes, warmup rejection handling, and retry tests. Duplicate assertions remain covered at the public paths. PostgreSQL reconciliation tests wait for the identity read to finish before releasing the writer; transient-stream tests fail whichever account is selected first, avoiding random selection assumptions.
 
@@ -30,11 +30,13 @@ A local component preview compares the published and reviewed controls for 60-mi
 
 Local checks used the published head's frozen dependencies. The affected unit suite passed 3,801 tests with three obsolete locking scenarios skipped; the final duplicate removal passed its focused 310-test suite. The wider frontend slice passed 556 tests, followed by 21 focused tests after removing its duplicate case. WebSocket, cancellation, and demultiplexing checks passed 229 tests. The bridge/telemetry/proxy/warmup integration slice passed 430 tests with 15 backend-specific skips; its one flaky retry test was corrected, then all 57 retry tests passed. PostgreSQL checks passed eight migration tests, 59 authorization/telemetry tests (five SQLite-specific skips), and nine selected policy/SQL-interruption tests. The corrected PostgreSQL reconciliation test passed three additional runs.
 
-Repository lint, architecture ratchets, type checks, frontend lint/type checks/build, strict change validation, and all 66 main-spec validations passed. Migration topology also passed against the actual PR base, with exactly two added revisions. GitHub's head and base still match the recorded baseline. These are local checks; the review commits have not been published to run cloud checks.
+Repository lint, architecture ratchets, type checks, frontend lint/type checks/build, strict change validation, and all 66 main-spec validations passed. Migration topology also passed against the actual PR base, with exactly two added revisions. GitHub's head and base matched the recorded baseline before publication. The seven audit commits were subsequently published at `f51a53758` for cloud CI and a full CodeRabbit review.
+
+CodeRabbit found an override sample check treating unknown plan capacity as zero. Unknown capacity now requires a matching current sample, while known zero capacity remains exempt. Expanded existing tests reproduced the selection bypass; all 505 focused evaluator, selection, and owner-authorization tests then passed, including bridge admission. Lint, types, and strict change and main-spec validation also passed.
 
 Both size columns below compare the entire PR against `ec994599`; tests include frontend mock support. Added/deleted are raw Git diff counts, while net is added minus deleted.
 
-| Entire PR | Published `242a0f937` | Reviewed |
+| Entire PR | Published `242a0f937` | Reviewed `f51a53758` |
 | --- | ---: | ---: |
 | Added | 12,390 | 12,194 |
 | Deleted | 785 | 836 |

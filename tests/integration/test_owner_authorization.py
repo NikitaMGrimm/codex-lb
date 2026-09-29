@@ -29,23 +29,28 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("policy", ["disabled", "available", "reached"])
+@pytest.mark.parametrize(
+    "policy", ["disabled", "available", "reached", "unknown-plan-missing-5h", "unknown-plan-missing-weekly"]
+)
 async def test_owner_authorization_query_budget_and_cached_selection(db_setup, monkeypatch, policy):
     owner_id = "authorization-query-budget"
     enabled, used = policy != "disabled", 10.0 if policy == "reached" else 5.0
+    missing_window = {"unknown-plan-missing-5h": "primary", "unknown-plan-missing-weekly": "secondary"}.get(policy)
     async with SessionLocal() as session:
         session.add(
             Account(
                 id=owner_id,
                 email="query-budget@example.test",
-                plan_type="plus",
+                plan_type="future-plan" if missing_window else "plus",
                 access_token_encrypted=b"test",
                 refresh_token_encrypted=b"test",
                 id_token_encrypted=b"test",
                 last_refresh=utcnow(),
                 status=AccountStatus.ACTIVE,
                 usage_limit_enabled=enabled,
-                usage_limit_percent=10.0 if enabled else None,
+                usage_limit_percent=10.0 if enabled and missing_window is None else None,
+                usage_limit_5h_percent=70.0 if missing_window == "primary" else None,
+                usage_limit_weekly_percent=90.0 if missing_window == "secondary" else None,
             )
         )
         session.add_all(
@@ -54,6 +59,7 @@ async def test_owner_authorization_query_budget_and_cached_selection(db_setup, m
                     account_id=owner_id, window=window, used_percent=used, window_minutes=minutes, recorded_at=utcnow()
                 )
                 for window, minutes in [("primary", 300), ("secondary", 10080)]
+                if window != missing_window
             ]
         )
         await session.commit()
@@ -76,7 +82,7 @@ async def test_owner_authorization_query_budget_and_cached_selection(db_setup, m
     balancer._selection_inputs_cache = AccountSelectionCache(ttl_seconds=60)
     bridge_owner = SimpleNamespace(_load_balancer=balancer)
     bridge_session = SimpleNamespace(account=SimpleNamespace(id=owner_id))
-    allowed = policy != "reached"
+    allowed = policy in {"disabled", "available"}
     statements: list[str] = []
 
     def record_sql(statement: str) -> None:

@@ -430,13 +430,14 @@ every replica. Already dispatched work MUST retain its settlement ownership.
 
 ### Requirement: Consolidated default and window overrides
 An account SHALL persist an optional default percentage and optional 5-hour and weekly percentages, with one enabled flag. Percentages SHALL be greater than zero and at most 100. An override SHALL replace the default only for the matching normalized duration. Monthly and nonstandard windows SHALL use only the default. Missing overrides SHALL inherit the default; absent default SHALL leave unmatched windows unrestricted. Disable SHALL retain saved values; removal SHALL clear all values. Enabling SHALL require at least one percentage.
+An enabled window override MUST require a current matching observation when its plan capacity is unknown or positive. Known zero capacity and normalized monthly-only shapes MUST remain exempt from this sample requirement.
 
 #### Scenario: Unequal window thresholds
 - **WHEN** the default is 80, the 5-hour override is 70, the weekly override is 90, and fresh usage is 65 and 75 respectively
 - **THEN** the account SHALL remain available.
 
 #### Scenario: Configured override has no current observation
-- **GIVEN** an enabled override for a plan-supported 5-hour or weekly window
+- **GIVEN** an enabled override for a 5-hour or weekly window whose plan capacity is positive or unknown
 - **WHEN** its matching normalized observation is absent or its reset has elapsed without a new measurement
 - **THEN** admission SHALL report data unavailable even if another window is fresh or has a configured default.
 - **AND** a normalized monthly-only shape SHALL remain exempt from 5-hour and weekly overrides.
