@@ -741,6 +741,38 @@ async def test_public_selection_applies_candidate_gates(
 
 
 @pytest.mark.asyncio
+async def test_owner_usage_authorization_reloads_a_snapshot_invalidated_during_its_read(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _account("contract-owner-policy-read-race")
+    owner.usage_limit_enabled = True
+    owner.usage_limit_percent = 10.0
+    balancer, accounts_repo, _, _ = _balancer(
+        [owner],
+        selection_cache,
+        primary={owner.id: _usage_row(1, owner.id, window="primary", used_percent=5.0)},
+    )
+    original_load = balancer._load_selection_inputs
+    policy_changed = False
+
+    async def load_and_change_policy(**kwargs):
+        nonlocal policy_changed
+        snapshot = await original_load(**kwargs)
+        if not policy_changed:
+            policy_changed = True
+            accounts_repo.accounts[0].usage_limit_percent = 1.0
+            selection_cache.invalidate()
+        return snapshot
+
+    monkeypatch.setattr(balancer, "_load_selection_inputs", load_and_change_policy)
+
+    state = await balancer.check_account_usage_limit(owner.id)
+
+    assert state is load_balancer_module.AccountUsageLimitState.REACHED
+
+
+@pytest.mark.asyncio
 async def test_usage_capped_exhausted_continuity_owner_retains_owner_error(
     selection_cache: AccountSelectionCache,
 ) -> None:

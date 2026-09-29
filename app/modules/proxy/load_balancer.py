@@ -101,6 +101,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _state_above_sticky_budget_threshold as _state_above_sticky_budget_threshold,
 )
 from app.modules.proxy._load_balancer.types import (
+    MAX_SELECTION_ATTEMPTS,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
@@ -370,25 +371,30 @@ class LoadBalancer:
 
         ``None`` means the persisted owner no longer exists or is not routable.
         """
-        selection_inputs = await self._load_selection_inputs(model=None, clone_cached=False)
-        account = selection_inputs.runtime_account(account_id)
-        if account is None or account.status in {
-            AccountStatus.REAUTH_REQUIRED,
-            AccountStatus.DEACTIVATED,
-            AccountStatus.PAUSED,
-        }:
-            return None
-        return evaluate_account_usage_limit(
-            account,
-            primary=_standard_usage_entry(
-                selection_inputs.latest_primary, selection_inputs.standard_latest_primary, account_id
-            ),
-            secondary=_standard_usage_entry(
-                selection_inputs.latest_secondary, selection_inputs.standard_latest_secondary, account_id
-            ),
-            monthly=selection_inputs.latest_monthly.get(account_id),
-            refresh_interval_seconds=_usage_refresh_interval_seconds(),
-        )
+        for _ in range(MAX_SELECTION_ATTEMPTS):
+            generation = self._selection_inputs_cache.generation
+            selection_inputs = await self._load_selection_inputs(model=None, clone_cached=False)
+            if generation != self._selection_inputs_cache.generation:
+                continue
+            account = selection_inputs.runtime_account(account_id)
+            if account is None or account.status in {
+                AccountStatus.REAUTH_REQUIRED,
+                AccountStatus.DEACTIVATED,
+                AccountStatus.PAUSED,
+            }:
+                return None
+            return evaluate_account_usage_limit(
+                account,
+                primary=_standard_usage_entry(
+                    selection_inputs.latest_primary, selection_inputs.standard_latest_primary, account_id
+                ),
+                secondary=_standard_usage_entry(
+                    selection_inputs.latest_secondary, selection_inputs.standard_latest_secondary, account_id
+                ),
+                monthly=selection_inputs.latest_monthly.get(account_id),
+                refresh_interval_seconds=_usage_refresh_interval_seconds(),
+            )
+        raise RuntimeError("Account selection state changed during usage authorization")
 
     def _acquire_account_lease_locked(
         self,
