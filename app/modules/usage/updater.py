@@ -695,48 +695,23 @@ class UsageUpdater:
         primary = normalized_windows.primary
         secondary = normalized_windows.secondary
         monthly = normalized_windows.monthly
-        if primary is None and secondary is None:
-            if monthly is None:
-                additional_synced = (
-                    self._additional_usage_repo is not None and payload.additional_rate_limits is not None
-                )
-                return AccountRefreshResult(usage_written=additional_synced)
         if primary is None and secondary is None and monthly is None:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         snapshot_windows: list[UsageWindowWrite] = []
 
-        if primary is not None and (primary.used_percent is not None or account.usage_limit_enabled):
+        for window, usage_window in (("primary", primary), ("secondary", secondary), ("monthly", monthly)):
+            if usage_window is None or (usage_window.used_percent is None and not account.usage_limit_enabled):
+                continue
             snapshot_windows.append(
                 _standard_usage_window_write(
-                    window="primary",
-                    usage_window=primary,
+                    window=window,
+                    usage_window=usage_window,
                     now_epoch=now_epoch,
-                    credits_has=credits_has,
-                    credits_unlimited=credits_unlimited,
-                    credits_balance=credits_balance,
-                )
-            )
-
-        if secondary is not None and (secondary.used_percent is not None or account.usage_limit_enabled):
-            snapshot_windows.append(
-                _standard_usage_window_write(
-                    window="secondary",
-                    usage_window=secondary,
-                    now_epoch=now_epoch,
-                )
-            )
-
-        if monthly is not None and (monthly.used_percent is not None or account.usage_limit_enabled):
-            snapshot_windows.append(
-                _standard_usage_window_write(
-                    window="monthly",
-                    usage_window=monthly,
-                    now_epoch=now_epoch,
-                    credits_has=credits_has,
-                    credits_unlimited=credits_unlimited,
-                    credits_balance=credits_balance,
+                    credits_has=credits_has if window != "secondary" else None,
+                    credits_unlimited=credits_unlimited if window != "secondary" else None,
+                    credits_balance=credits_balance if window != "secondary" else None,
                 )
             )
 
@@ -1106,22 +1081,17 @@ def _standard_usage_window_write(
     credits_balance: float | None = None,
 ) -> UsageWindowWrite:
     used_percent = usage_window.used_percent
-    if used_percent is None:
-        # UsageHistory.used_percent is non-nullable. Persist the established
-        # no-data placeholder shape so this successful fetch supersedes an
-        # older measured row while hard usage limits still fail closed.
-        return UsageWindowWrite(
-            window=window,
-            used_percent=0.0,
-            credits_has=credits_has,
-            credits_unlimited=credits_unlimited,
-            credits_balance=credits_balance,
-        )
+    # A missing observation supersedes older measurements with the established
+    # no-data placeholder: zero usage, no reset, and no window metadata.
     return UsageWindowWrite(
         window=window,
-        used_percent=float(used_percent),
-        reset_at=_reset_at(usage_window.reset_at, usage_window.reset_after_seconds, now_epoch),
-        window_minutes=_window_minutes(usage_window.limit_window_seconds),
+        used_percent=float(used_percent) if used_percent is not None else 0.0,
+        reset_at=(
+            _reset_at(usage_window.reset_at, usage_window.reset_after_seconds, now_epoch)
+            if used_percent is not None
+            else None
+        ),
+        window_minutes=_window_minutes(usage_window.limit_window_seconds) if used_percent is not None else None,
         credits_has=credits_has,
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
