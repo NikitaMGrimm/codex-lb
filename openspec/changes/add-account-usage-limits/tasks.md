@@ -14,7 +14,7 @@
 - [x] 12. Preserve caller exhaustion controls when every account is locally blocked.
 - [x] 13. Close WebSocket dispatch races across admission and authorization waits.
 - [x] 14. Keep HTTP bridge authorization waits outside pending-response locks and preserve typed failures.
-- [ ] 15. Remove redundant frontend validation and misleading mock policy states.
+- [x] 15. Remove redundant frontend validation and misleading mock policy states.
 - [ ] 16. Verify the audited change with backend, frontend, migration, and OpenSpec checks.
 - [x] 17. Preserve telemetry precision when deduplicating observations across a cap.
 - [x] 18. Reload owner-authorization snapshots invalidated while being read.

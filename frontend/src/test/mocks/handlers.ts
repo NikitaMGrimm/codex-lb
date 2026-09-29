@@ -1,6 +1,7 @@
 import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
+import { AccountUsageLimitUpdateRequestSchema } from "@/features/accounts/schemas";
 import {
   LIMIT_TYPES,
   LIMIT_WINDOWS,
@@ -105,13 +106,6 @@ const TelemetryConsentPayloadSchema = z.object({
 const AccountRoutingPolicyPayloadSchema = z.object({
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
 });
-
-const AccountUsageLimitPayloadSchema = z
-  .object({
-    enabled: z.boolean(),
-    percent: z.number().gt(0).max(100).nullable().optional(),
-  })
-  .refine((value) => !value.enabled || value.percent != null);
 
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
@@ -996,7 +990,7 @@ export const handlers = [
           { status: 404 },
         );
       }
-      const payload = await parseJsonBody(request, AccountUsageLimitPayloadSchema);
+      const payload = await parseJsonBody(request, AccountUsageLimitUpdateRequestSchema);
       if (!payload) {
         return HttpResponse.json(
           {
@@ -1008,11 +1002,36 @@ export const handlers = [
           { status: 422 },
         );
       }
+      const percent = payload.percent === undefined ? account.usageLimitPercent : payload.percent;
+      if (payload.enabled && percent == null) {
+        return HttpResponse.json(
+          { error: {
+            code: "account_usage_limit_not_configured",
+            message: "Configure a percentage before enabling the usage limit",
+          } },
+          { status: 409 },
+        );
+      }
       account.usageLimitEnabled = payload.enabled;
       if (payload.percent !== undefined) {
         account.usageLimitPercent = payload.percent;
       }
-      account.usageLimitState = payload.enabled ? "available" : "disabled";
+      // Summary usage is already normalized; these fixtures have no telemetry
+      // timestamps with which to reproduce backend freshness checks.
+      const remainingPercents = (
+        account.usage?.monthlyRemainingPercent != null
+          ? [account.usage.monthlyRemainingPercent]
+          : [account.usage?.primaryRemainingPercent, account.usage?.secondaryRemainingPercent]
+      ).filter((remaining): remaining is number => remaining != null);
+      if (!payload.enabled) {
+        account.usageLimitState = "disabled";
+      } else if (percent == null || remainingPercents.length === 0) {
+        account.usageLimitState = "data_unavailable";
+      } else {
+        account.usageLimitState = remainingPercents.some((remaining) => 100 - remaining >= percent)
+          ? "reached"
+          : "available";
+      }
       return HttpResponse.json({
         accountId,
         enabled: account.usageLimitEnabled,
