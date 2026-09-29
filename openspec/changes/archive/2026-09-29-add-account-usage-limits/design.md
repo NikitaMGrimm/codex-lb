@@ -16,7 +16,7 @@
 
 ### D1: Persist configuration and activation separately
 
-Accounts gain nullable `usage_limit_percent` and non-null `usage_limit_enabled` fields. A disabled row retains its percentage for one-click re-enablement; removing the limit clears the percentage and disables it. Enabled-without-percentage is invalid. Percentages are greater than 0 and at most 100.
+Accounts gain nullable `usage_limit_percent` and non-null `usage_limit_enabled` fields. A disabled row retains its percentage for one-click re-enablement; removing the limit clears the percentage and disables it. An enabled stored policy requires a percentage. Toggle requests omit the percentage to retain the latest stored value atomically; enabling a removed policy returns a configuration conflict. Percentages are greater than 0 and at most 100.
 
 ### D2: One cap applies to every current standard quota window
 
@@ -34,7 +34,7 @@ Selection inputs retain cloned standard primary, secondary, and monthly rows sep
 
 ### D4: The canonical selector owns the hard gate
 
-`AccountState` carries the evaluated limit state and percentage. `select_account` applies the policy after status, upstream-quota, and cooldown checks, but before error-backoff classification, health, stickiness, policy, or strategy handling. This makes the local policy authoritative only for accounts that would otherwise be routing candidates: an account that is also upstream-exhausted retains the established `usage_limit_reached` 429 and reset metadata, while a locally blocked account never enters the error-backoff fallback set. If all otherwise eligible candidates are blocked by limits, selection returns stable error code `account_usage_limit_reached`; opportunistic prechecks preserve that typed error instead of rewriting it. The account's persisted `active`/rate-limit status is not changed.
+`AccountState` carries the evaluated limit state. `select_account` applies the policy after status, upstream-quota, and cooldown checks, but before error-backoff classification, health, stickiness, policy, or strategy handling. This makes the local policy authoritative only for accounts that would otherwise be routing candidates: an account that is also upstream-exhausted retains the established `usage_limit_reached` 429 and reset metadata, while a locally blocked account never enters the error-backoff fallback set. If all otherwise eligible candidates are blocked by limits, selection returns stable error code `account_usage_limit_reached`; opportunistic prechecks preserve that typed error instead of rewriting it. The account's persisted `active`/rate-limit status is not changed.
 
 Fair-share admission derives capacity and lease/key counters from the same usage-policy-eligible candidate set used for routing. Locally blocked accounts contribute neither capacity nor in-flight counters; an entirely locally blocked pool bypasses fair-share admission and reaches the canonical policy error. A hard-sticky owner blocked by the policy also bypasses peer-pool fair-share denial: congestion relief cannot make that owner eligible, so the owner selector returns `account_usage_limit_reached` immediately while preserving the mapping.
 

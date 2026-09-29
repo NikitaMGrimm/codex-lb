@@ -6,6 +6,38 @@ The normative routing contract is in [spec.md](spec.md). This context explains
 why transient health is replica-local and how drained accounts return to normal
 routing without becoming permanently invisible behind healthier accounts.
 
+## Account usage limits
+
+Account limits reserve part of the observed standard quota for direct use. They
+are optional hard policies, separate from advisory routing preferences and
+upstream rate-limit status. One shared evaluator supplies routing, dashboard,
+and warmup decisions, including weekly-only and monthly-only account shapes.
+See the usage-limit requirements in [spec.md](spec.md) for the exact contract.
+
+For example, a 10% maximum leaves roughly 90% reserved. Once a current standard
+observation reaches 10%, newly dispatched work is blocked. Delayed observations
+and work already sent upstream can overshoot the threshold. Missing or stale
+observations also block an enabled policy until current data becomes available.
+Disabling the policy restores ordinary advisory usage behavior.
+
+Both toggle directions retain the latest saved percentage in the database.
+A tab showing a disabled 10% limit therefore enables a newer saved 20% value
+without overwriting it. If another client removed the value, the API returns a
+configuration conflict so the operator can reload or explicitly set a new limit.
+
+Selection invalidation keeps committed telemetry and policy edits visible.
+Capped live observations invalidate selection immediately; uncapped observations
+retain the existing throttled refresh. Owner authorization retries snapshots
+invalidated during their read. Cached snapshots remain bounded by freshness;
+cross-replica visibility uses the existing account-selection invalidation signal.
+
+Shared transports authorize each new turn, including after admission waits.
+Policy reads run outside HTTP bridge response locks and within the request
+deadline, so a slow read cannot hold up older responses. A denied new turn
+leaves already-dispatched work to settle; a failed read returns a separate
+authorization error. WebSocket dispatch also checks pending ownership after
+asynchronous authorization to avoid sending or settling reader-finalized work.
+
 ## Replica-local soft health
 
 Error counts, backoff, health tiers, and probe streaks are advisory signals.

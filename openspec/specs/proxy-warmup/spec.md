@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change add-v1-warmup-endpoint. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Warmup endpoint is exposed on the v1 proxy surface
 The system SHALL expose `POST /v1/warmup` on the same authenticated proxy surface as other `/v1/*` routes. The endpoint SHALL accept a JSON body with `mode` and SHALL return HTTP 200 with a structured JSON summary of submitted, skipped, and failed account warmups for every valid execution. Per-account `ProxyAuthError` and `ProxyRateLimitError` failures SHALL be represented in the `failed` summary regardless of the number of target accounts.
 
@@ -40,27 +42,37 @@ The warmup target pool SHALL be derived from the authenticated API key. If `acco
 - **THEN** warmup evaluates and submits requests against all active accounts
 
 ### Requirement: Warmup mode semantics are deterministic
+
 The endpoint SHALL implement three warmup modes with deterministic behavior:
-- `normal`: submit warmup only for accounts that have a primary (5h) usage row and 100% remaining primary usage.
-- `strict`: if any target account fails the same eligibility check, reject the entire request and submit no warmups.
-- `force`: submit warmup for all target accounts regardless of usage.
+
+- `normal`: submit warmup only for accounts that have a primary (5h) usage row, 100% remaining primary usage, and no blocking account usage limit.
+- `strict`: if any target account fails the same eligibility checks, reject the entire request and submit no warmups.
+- `force`: bypass the primary-window usage check, but not an enabled account usage limit in `reached` or `data_unavailable` state.
 
 An account SHALL be considered eligible for `normal` and `strict` only when:
+
 - a primary usage row exists,
-- `window_minutes=300`, and
-- remaining usage is 100% (used percent is 0).
+- `window_minutes=300`,
+- remaining usage is 100% (used percent is 0), and
+- its account usage limit is disabled or `available`.
 
 #### Scenario: Normal mode skips ineligible accounts
+
 - **WHEN** a `normal` warmup request includes eligible and ineligible accounts
 - **THEN** only eligible accounts are submitted and ineligible accounts are returned as skipped
 
 #### Scenario: All-or-none rejects mixed eligibility pool
+
 - **WHEN** a `strict` warmup request includes any ineligible account
 - **THEN** the system rejects the request and submits zero warmup upstream requests
 
 #### Scenario: Force bypasses usage eligibility
-- **WHEN** a `force` request is submitted
-- **THEN** the system submits warmup requests for every target account regardless of usage state
+
+- **GIVEN** a `force` request includes an account that fails the primary-window usage check
+- **AND** the account's enabled usage limit is `reached` or `data_unavailable`
+- **WHEN** warmup eligibility is evaluated
+- **THEN** the system bypasses the primary-window check but skips that account with reason `account_usage_limit_reached`
+- **AND** no warmup request is submitted for that account
 
 ### Requirement: Warmup sends minimal upstream responses request
 For each submitted account, the system SHALL send a minimal upstream Responses API request intended to warm transport/session/model path behavior. The model used SHALL be the configured warmup model unless the authenticated API key has `enforcedModel`, in which case that enforced model is used instead (consistent with normal request enforcement). `warmup_model` SHALL NOT be sent as an upstream field. The warmup request SHALL remain small and deterministic. Submissions SHALL run in parallel with a maximum concurrency of 5 accounts per warmup execution.
@@ -101,4 +113,3 @@ Warmup request rows SHALL be excluded from aggregate dashboard request/error/cos
 #### Scenario: API key usage summaries ignore warmup rows
 - **WHEN** API key usage summary/trend endpoints are queried for a key with warmup and normal rows
 - **THEN** warmup rows do not contribute to API key request/token/cost usage totals
-
