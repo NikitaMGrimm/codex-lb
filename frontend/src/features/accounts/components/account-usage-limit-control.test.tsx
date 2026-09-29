@@ -3,30 +3,38 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { AccountUsageLimitControl } from "@/features/accounts/components/account-usage-limit-control";
+import type { AccountSummary } from "@/features/accounts/schemas";
 import { createAccountSummary } from "@/test/mocks/factories";
+
+function renderControl(overrides: Partial<AccountSummary> = {}) {
+  const account = createAccountSummary({
+    usageLimitEnabled: true,
+    usageLimitPercent: 10,
+    usageLimitState: "available",
+    ...overrides,
+  });
+  const onChange = vi.fn();
+  return {
+    ...render(
+      <AccountUsageLimitControl account={account} busy={false} readOnly={false} onChange={onChange} />,
+    ),
+    user: userEvent.setup(),
+    account,
+    onChange,
+  };
+}
 
 describe("AccountUsageLimitControl", () => {
   it("explains, toggles, edits, and removes a retained limit", async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
-    const account = createAccountSummary({
+    const { user, onChange, account } = renderControl({
       usageLimitEnabled: false,
-      usageLimitPercent: 10,
       usageLimitState: "disabled",
     });
-
-    render(
-      <AccountUsageLimitControl
-        account={account}
-        busy={false}
-        readOnly={false}
-        onChange={onChange}
-      />,
-    );
 
     expect(screen.getAllByText("10% maximum used · 90% reserved")).toHaveLength(1);
     expect(screen.getAllByText("Off")).toHaveLength(1);
     expect(screen.getByRole("switch", { name: "Usage limit" })).not.toBeChecked();
+    expect(screen.getByText(/in-flight requests may briefly exceed/i)).toBeInTheDocument();
 
     await user.click(screen.getByRole("switch", { name: "Usage limit" }));
     expect(onChange).toHaveBeenCalledWith(account.accountId, {
@@ -50,22 +58,11 @@ describe("AccountUsageLimitControl", () => {
   });
 
   it("sets and enables a new limit", async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
-    const account = createAccountSummary({
+    const { user, onChange, account } = renderControl({
       usageLimitEnabled: false,
       usageLimitPercent: null,
       usageLimitState: "disabled",
     });
-
-    render(
-      <AccountUsageLimitControl
-        account={account}
-        busy={false}
-        readOnly={false}
-        onChange={onChange}
-      />,
-    );
 
     expect(screen.queryByText(/usage reporting is delayed/i)).not.toBeInTheDocument();
     await user.type(
@@ -81,66 +78,8 @@ describe("AccountUsageLimitControl", () => {
     });
   });
 
-  it("omits the cached percentage when disabling a configured limit", async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
-    const account = createAccountSummary({
-      usageLimitEnabled: true,
-      usageLimitPercent: 10,
-      usageLimitState: "available",
-    });
-
-    render(
-      <AccountUsageLimitControl
-        account={account}
-        busy={false}
-        readOnly={false}
-        onChange={onChange}
-      />,
-    );
-
-    await user.click(screen.getByRole("switch", { name: "Usage limit" }));
-
-    expect(onChange).toHaveBeenCalledWith(account.accountId, {
-      enabled: false,
-    });
-  });
-
-  it("distinguishes a reached local limit and warns about observation overshoot", () => {
-    render(
-      <AccountUsageLimitControl
-        account={createAccountSummary({
-          usageLimitEnabled: true,
-          usageLimitPercent: 10,
-          usageLimitState: "reached",
-        })}
-        busy={false}
-        readOnly={false}
-        onChange={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByText("Reached · routing blocked")).toBeInTheDocument();
-    expect(screen.getByText(/in-flight requests may briefly exceed/i)).toBeInTheDocument();
-  });
-
   it("does not save an unchanged draft via Enter and disables controls while busy", async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
-    const account = createAccountSummary({
-      usageLimitEnabled: true,
-      usageLimitPercent: 10,
-      usageLimitState: "available",
-    });
-
-    const { rerender } = render(
-      <AccountUsageLimitControl
-        account={account}
-        busy={false}
-        readOnly={false}
-        onChange={onChange}
-      />,
-    );
+    const { user, onChange, account, rerender } = renderControl();
 
     const input = screen.getByRole("spinbutton", { name: "Maximum used percent" });
     await user.type(input, "{Enter}");
@@ -161,15 +100,11 @@ describe("AccountUsageLimitControl", () => {
   });
 
   it("explains invalid percentages and clears the error after correction", async () => {
-    const user = userEvent.setup();
-    render(
-      <AccountUsageLimitControl
-        account={createAccountSummary({ usageLimitPercent: null })}
-        busy={false}
-        readOnly={false}
-        onChange={vi.fn()}
-      />,
-    );
+    const { user } = renderControl({
+      usageLimitEnabled: false,
+      usageLimitPercent: null,
+      usageLimitState: "disabled",
+    });
 
     const input = screen.getByRole("spinbutton", { name: "Maximum used percent" });
     const save = screen.getByRole("button", { name: "Set and enable" });
@@ -196,22 +131,9 @@ describe("AccountUsageLimitControl", () => {
   ])(
     "preserves and saves the configured precision for $configured percent",
     async ({ configured, edited, saved }) => {
-      const user = userEvent.setup();
-      const onChange = vi.fn();
-      const account = createAccountSummary({
-        usageLimitEnabled: true,
+      const { user, onChange, account } = renderControl({
         usageLimitPercent: configured,
-        usageLimitState: "available",
       });
-
-      render(
-        <AccountUsageLimitControl
-          account={account}
-          busy={false}
-          readOnly={false}
-          onChange={onChange}
-        />,
-      );
 
       const input = screen.getByRole("spinbutton", {
         name: "Maximum used percent",

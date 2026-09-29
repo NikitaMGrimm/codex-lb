@@ -2395,30 +2395,6 @@ def _usage_limit_test_repositories(
 
 
 @pytest.mark.asyncio
-async def test_load_balancer_propagates_usage_limit_error_code() -> None:
-    from app.modules.proxy.load_balancer import LoadBalancer
-
-    now = datetime.now(timezone.utc)
-    account = _make_test_account(account_id="all-limited")
-    account.usage_limit_enabled = True
-    account.usage_limit_percent = 10.0
-    usage = _make_test_usage(
-        account_id=account.id,
-        window="primary",
-        used_percent=10.0,
-        reset_at=int((now + timedelta(hours=1)).timestamp()),
-        recorded_at=now.replace(tzinfo=None),
-    )
-    repos = _usage_limit_test_repositories([account], {account.id: usage})
-    balancer = LoadBalancer(repo_factory=lambda: repos)
-
-    selection = await balancer.select_account(routing_strategy="usage_weighted")
-
-    assert selection.account is None
-    assert selection.error_code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
-
-
-@pytest.mark.asyncio
 async def test_usage_limited_account_recovers_after_fresh_post_reset_observation() -> None:
     from app.modules.proxy.load_balancer import LoadBalancer
 

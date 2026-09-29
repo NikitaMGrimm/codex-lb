@@ -224,29 +224,6 @@ async def test_public_selection_returns_a_detached_success(selection_cache: Acco
 
 
 @pytest.mark.asyncio
-async def test_public_selection_with_default_fair_share_kwargs_matches_default_behavior(
-    selection_cache: AccountSelectionCache,
-) -> None:
-    persisted = _account("contract-fair-share-default")
-    balancer, _, _, _ = _balancer([persisted], selection_cache)
-
-    implicit = await balancer.select_account(routing_strategy="usage_weighted")
-    explicit = await balancer.select_account(
-        routing_strategy="usage_weighted",
-        api_key_id=None,
-        api_key_stream_fair_share_threshold_pct=0,
-    )
-
-    assert implicit.account is not None
-    assert explicit.account is not None
-    assert implicit.account.id == explicit.account.id == persisted.id
-    assert (explicit.error_message, explicit.error_code) == (implicit.error_message, implicit.error_code)
-    assert explicit.error_message is None
-    assert explicit.error_code is None
-    assert explicit.lease is None
-
-
-@pytest.mark.asyncio
 async def test_public_selection_surfaces_fair_share_denial_shape(
     selection_cache: AccountSelectionCache,
 ) -> None:

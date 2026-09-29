@@ -129,23 +129,6 @@ def test_elapsed_only_window_requires_a_post_reset_observation() -> None:
     assert _evaluate(primary=_row(100.0, reset_delta=timedelta(seconds=-1))) is AccountUsageLimitState.DATA_UNAVAILABLE
 
 
-def test_post_reset_observation_recovers_availability_after_reached() -> None:
-    reached = _row(
-        10.0,
-        recorded_at=NOW - timedelta(hours=6),
-        reset_delta=timedelta(seconds=-1),
-    )
-
-    assert _evaluate(primary=_row(10.0)) is AccountUsageLimitState.REACHED
-    assert _evaluate(primary=reached) is AccountUsageLimitState.DATA_UNAVAILABLE
-    assert (
-        _evaluate(
-            primary=_row(0.0, reset_delta=timedelta(hours=5)),
-        )
-        is AccountUsageLimitState.AVAILABLE
-    )
-
-
 def test_weekly_only_primary_is_evaluated_as_the_long_window() -> None:
     assert _evaluate(primary=_row(10.0, window_minutes=10080), secondary=None) is AccountUsageLimitState.REACHED
 

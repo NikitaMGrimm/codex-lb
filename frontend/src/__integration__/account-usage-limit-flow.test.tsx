@@ -4,11 +4,24 @@ import { HttpResponse, http } from "msw";
 import { describe, expect, it, vi } from "vitest";
 
 import App from "@/App";
+import type { AccountSummary } from "@/features/accounts/schemas";
 import { createAccountSummary } from "@/test/mocks/factories";
 import * as factories from "@/test/mocks/factories";
 import { resetMockState } from "@/test/mocks/handlers";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
+
+function renderAccounts(account: AccountSummary) {
+  const defaults = vi.spyOn(factories, "createDefaultAccounts").mockReturnValue([account]);
+  try {
+    resetMockState();
+  } finally {
+    defaults.mockRestore();
+  }
+  window.history.pushState({}, "", "/accounts");
+  renderWithProviders(<App />);
+  return userEvent.setup({ delay: null });
+}
 
 describe("account usage limit flow", () => {
   it.each([
@@ -18,32 +31,21 @@ describe("account usage limit flow", () => {
     },
     { usage: null, expected: "Usage unavailable · routing blocked" },
   ])("shows $expected after saving and re-enabling with the shared mock", async ({ usage, expected }) => {
-    const user = userEvent.setup({ delay: null });
-    const defaults = vi.spyOn(factories, "createDefaultAccounts").mockReturnValue([
-      createAccountSummary({ usage }),
-    ]);
-    resetMockState();
-    try {
-      window.history.pushState({}, "", "/accounts");
-      renderWithProviders(<App />);
-      await user.type(await screen.findByRole("spinbutton", { name: "Maximum used percent" }), "10");
-      await user.click(screen.getByRole("button", { name: "Set and enable" }));
-      expect(await screen.findByText(expected)).toBeInTheDocument();
+    const user = renderAccounts(createAccountSummary({ usage }));
+    await user.type(await screen.findByRole("spinbutton", { name: "Maximum used percent" }), "10");
+    await user.click(screen.getByRole("button", { name: "Set and enable" }));
+    expect(await screen.findByText(expected)).toBeInTheDocument();
 
-      await user.click(screen.getByRole("switch", { name: "Usage limit" }));
-      await waitFor(() => {
-        expect(screen.getByRole("switch", { name: "Usage limit" })).not.toBeChecked();
-        expect(screen.queryByText(expected)).not.toBeInTheDocument();
-      });
-      await user.click(screen.getByRole("switch", { name: "Usage limit" }));
-      expect(await screen.findByText(expected)).toBeInTheDocument();
-    } finally {
-      defaults.mockRestore();
-    }
+    await user.click(screen.getByRole("switch", { name: "Usage limit" }));
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "Usage limit" })).not.toBeChecked();
+      expect(screen.queryByText(expected)).not.toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("switch", { name: "Usage limit" }));
+    expect(await screen.findByText(expected)).toBeInTheDocument();
   });
 
   it("shows a successful limit update when the account-list refetch fails", async () => {
-    const user = userEvent.setup({ delay: null });
     const account = createAccountSummary({
       accountId: "acc-usage-limit",
       email: "usage-limit@example.com",
@@ -70,21 +72,9 @@ describe("account usage limit flow", () => {
           { status: 500 },
         );
       }),
-      http.put("/api/accounts/:accountId/usage-limit", async ({ params, request }) => {
-        const payload = (await request.json()) as {
-          enabled: boolean;
-          percent?: number | null;
-        };
-        return HttpResponse.json({
-          accountId: String(params.accountId),
-          ...payload,
-          percent: account.usageLimitPercent,
-        });
-      }),
     );
 
-    window.history.pushState({}, "", "/accounts");
-    renderWithProviders(<App />);
+    const user = renderAccounts(account);
 
     const usageLimitSwitch = await screen.findByRole("switch", {
       name: "Usage limit",
@@ -101,18 +91,17 @@ describe("account usage limit flow", () => {
   });
 
   it.each([false, true])("toggles from a stale tab with enabled=%s without reverting the newer stored percentage", async (enabled) => {
-    const user = userEvent.setup({ delay: null });
-    const staleAccount = createAccountSummary({
+    const storedAccount = createAccountSummary({
       accountId: "acc-stale-usage-limit",
       email: "stale-usage-limit@example.com",
       displayName: "Stale Usage Limit Account",
       usageLimitEnabled: !enabled,
-      usageLimitPercent: 10,
-      usageLimitState: "available",
+      usageLimitPercent: 20,
+      usageLimitState: enabled ? "disabled" : "available",
+      usage: { primaryRemainingPercent: 99, secondaryRemainingPercent: 99 },
     });
     let accountListRequests = 0;
-    let storedPercent: number | null = 20;
-    const updatePayloads: Array<{ enabled: boolean; percent?: number | null }> = [];
+    const updatePayloads: unknown[] = [];
 
     server.use(
       http.get("/api/accounts", () => {
@@ -120,35 +109,18 @@ describe("account usage limit flow", () => {
         return HttpResponse.json({
           accounts: [
             accountListRequests === 1
-              ? staleAccount
-              : {
-                  ...staleAccount,
-                  usageLimitEnabled: enabled,
-                  usageLimitPercent: storedPercent,
-                  usageLimitState: enabled ? "available" : "disabled",
-                },
+              ? { ...storedAccount, usageLimitPercent: 10 }
+              : storedAccount,
           ],
         });
       }),
-      http.put("/api/accounts/:accountId/usage-limit", async ({ params, request }) => {
-        const payload = (await request.json()) as {
-          enabled: boolean;
-          percent?: number | null;
-        };
-        updatePayloads.push(payload);
-        if (payload.percent !== undefined) {
-          storedPercent = payload.percent;
-        }
-        return HttpResponse.json({
-          accountId: String(params.accountId),
-          enabled: payload.enabled,
-          percent: storedPercent,
-        });
+      http.put("/api/accounts/:accountId/usage-limit", async ({ request }) => {
+        // Record the request, then let the shared handler apply it to storedAccount.
+        updatePayloads.push(await request.clone().json());
       }),
     );
 
-    window.history.pushState({}, "", "/accounts");
-    renderWithProviders(<App />);
+    const user = renderAccounts(storedAccount);
 
     const usageLimitSwitch = await screen.findByRole("switch", {
       name: "Usage limit",
@@ -166,24 +138,16 @@ describe("account usage limit flow", () => {
   });
 
   it("shows a conflict when a stale tab enables a removed policy", async () => {
-    const user = userEvent.setup({ delay: null });
-    const account = createAccountSummary({ usageLimitEnabled: false, usageLimitPercent: 10 });
+    const account = createAccountSummary({ usageLimitEnabled: false, usageLimitPercent: null });
     const updatePayloads: unknown[] = [];
     server.use(
-      http.get("/api/accounts", () => HttpResponse.json({ accounts: [account] })),
+      http.get("/api/accounts", () => HttpResponse.json({ accounts: [{ ...account, usageLimitPercent: 10 }] })),
       http.put("/api/accounts/:accountId/usage-limit", async ({ request }) => {
-        updatePayloads.push(await request.json());
-        return HttpResponse.json({
-          error: {
-            code: "account_usage_limit_not_configured",
-            message: "Configure a percentage before enabling the usage limit",
-          },
-        }, { status: 409 });
+        updatePayloads.push(await request.clone().json());
       }),
     );
 
-    window.history.pushState({}, "", "/accounts");
-    renderWithProviders(<App />);
+    const user = renderAccounts(account);
     const toggle = await screen.findByRole("switch", { name: "Usage limit" });
     await user.click(toggle);
 

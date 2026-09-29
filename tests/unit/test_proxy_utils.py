@@ -3496,10 +3496,65 @@ async def test_opportunistic_admission_uses_api_key_enforced_model():
 
 
 @pytest.mark.asyncio
-async def test_opportunistic_admission_preserves_local_account_usage_limit_denial():
+@pytest.mark.parametrize(
+    ("selection", "expected_status", "expected_error", "retry_after"),
+    [
+        (
+            AccountSelection(
+                account=None,
+                error_message="Account usage limit reached; reserved quota is unavailable",
+                error_code="account_usage_limit_reached",
+            ),
+            503,
+            {
+                "code": "account_usage_limit_reached",
+                "message": "Account usage limit reached; reserved quota is unavailable",
+                "type": "server_error",
+            },
+            None,
+        ),
+        (
+            AccountSelection(
+                account=None,
+                error_message="No account plan supports model gpt-5.4",
+                error_code="no_plan_support_for_model",
+            ),
+            429,
+            {
+                "code": "rate_limit_exceeded",
+                "message": "opportunistic burn window closed: No account plan supports model gpt-5.4",
+                "type": "rate_limit_error",
+            },
+            str(proxy_api._OPPORTUNISTIC_RETRY_AFTER_SECONDS),
+        ),
+        (
+            AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 1h",
+                error_code="usage_limit_reached",
+                resets_at=1_700_003_600,
+            ),
+            429,
+            {
+                "code": "usage_limit_reached",
+                "message": "Rate limit exceeded. Try again in 1h",
+                "resets_at": 1_700_003_600,
+                "type": "usage_limit_reached",
+            },
+            None,
+        ),
+    ],
+    ids=["local-usage-limit", "setup-failure", "upstream-usage-limit"],
+)
+async def test_opportunistic_admission_denial_contract(
+    selection: AccountSelection,
+    expected_status: int,
+    expected_error: dict[str, JsonValue],
+    retry_after: str | None,
+) -> None:
     api_key = ApiKeyData(
-        id="key_opportunistic_usage_limit",
-        name="opportunistic usage limit",
+        id="key_opportunistic_denial",
+        name="opportunistic denial",
         key_prefix="sk-opportunistic",
         allowed_models=None,
         enforced_model=None,
@@ -3511,111 +3566,20 @@ async def test_opportunistic_admission_preserves_local_account_usage_limit_denia
         created_at=utcnow(),
         last_used_at=None,
     )
-    selection = AccountSelection(
-        account=None,
-        error_message="Account usage limit reached; reserved quota is unavailable",
-        error_code="account_usage_limit_reached",
-    )
     service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
-    context = SimpleNamespace(service=service)
     request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
 
     response = await proxy_api._opportunistic_admission_denial(
         request,
-        cast(proxy_api.ProxyContext, context),
-        api_key,
-        model="gpt-5.1",
-    )
-
-    assert response is not None
-    assert response.status_code == 503
-    body = json.loads(bytes(response.body))
-    assert body["error"]["code"] == "account_usage_limit_reached"
-    assert body["error"]["type"] == "server_error"
-    assert body["error"]["message"] == "Account usage limit reached; reserved quota is unavailable"
-    assert "resets_at" not in body["error"]
-    assert "Retry-After" not in response.headers
-
-
-@pytest.mark.asyncio
-async def test_opportunistic_admission_keeps_setup_failures_on_burn_window_contract():
-    api_key = cast(
-        ApiKeyData,
-        SimpleNamespace(
-            id="key_opportunistic_setup_failure",
-            traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
-            enforced_model=None,
-        ),
-    )
-    selection = AccountSelection(
-        account=None,
-        error_message="No account plan supports model gpt-5.4",
-        error_code="no_plan_support_for_model",
-    )
-    service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
-    context = SimpleNamespace(service=service)
-    request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
-
-    response = await proxy_api._opportunistic_admission_denial(
-        request,
-        cast(proxy_api.ProxyContext, context),
+        cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
         api_key,
         model="gpt-5.4",
     )
 
     assert response is not None
-    assert response.status_code == 429
-    assert json.loads(bytes(response.body))["error"] == {
-        "code": "rate_limit_exceeded",
-        "message": "opportunistic burn window closed: No account plan supports model gpt-5.4",
-        "type": "rate_limit_error",
-    }
-    assert response.headers["Retry-After"] == str(proxy_api._OPPORTUNISTIC_RETRY_AFTER_SECONDS)
-
-
-@pytest.mark.asyncio
-async def test_opportunistic_admission_preserves_upstream_usage_limit_denial():
-    api_key = ApiKeyData(
-        id="key_opportunistic_upstream_usage_limit",
-        name="opportunistic upstream usage limit",
-        key_prefix="«redacted:sk-…»",
-        allowed_models=None,
-        enforced_model=None,
-        enforced_reasoning_effort=None,
-        enforced_service_tier=None,
-        traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
-        expires_at=None,
-        is_active=True,
-        created_at=utcnow(),
-        last_used_at=None,
-    )
-    selection = AccountSelection(
-        account=None,
-        error_message="Rate limit exceeded. Try again in 1h",
-        error_code="usage_limit_reached",
-        resets_at=1_700_003_600,
-    )
-    service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
-    context = SimpleNamespace(service=service)
-    request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
-
-    response = await proxy_api._opportunistic_admission_denial(
-        request,
-        cast(proxy_api.ProxyContext, context),
-        api_key,
-        model="gpt-5.1",
-    )
-
-    assert response is not None
-    assert response.status_code == 429
-    body = json.loads(bytes(response.body))
-    assert body["error"] == {
-        "code": "usage_limit_reached",
-        "message": "Rate limit exceeded. Try again in 1h",
-        "resets_at": 1_700_003_600,
-        "type": "usage_limit_reached",
-    }
-    assert "Retry-After" not in response.headers
+    assert response.status_code == expected_status
+    assert json.loads(bytes(response.body)) == {"error": expected_error}
+    assert response.headers.get("Retry-After") == retry_after
 
 
 @pytest.mark.asyncio
