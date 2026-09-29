@@ -30,9 +30,6 @@ describe("AccountUsageLimitControl", () => {
     await user.click(screen.getByRole("switch", { name: "Protect reserved quota" }));
     expect(onChange).toHaveBeenCalledWith(account.accountId, {
       enabled: true,
-      percent: 10,
-      percent5H: null,
-      percentWeekly: null,
     });
 
     const input = screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" });
@@ -360,9 +357,7 @@ describe("AccountUsageLimitControl", () => {
     expect(onChange).toHaveBeenLastCalledWith(account.accountId, { enabled: false });
     rerender(<AccountUsageLimitControl account={{ ...account, usageLimitEnabled: false, usageLimitPercent: 80 }} busy={false} readOnly={false} onChange={onChange} />);
     await user.click(screen.getByRole("switch", { name: "Protect reserved quota" }));
-    expect(onChange).toHaveBeenLastCalledWith(account.accountId, {
-      enabled: true, percent: 80, percent5H: null, percentWeekly: null,
-    });
+    expect(onChange).toHaveBeenLastCalledWith(account.accountId, { enabled: true });
   });
 
   it("offers only a shared reserve when quota windows are unknown", () => {

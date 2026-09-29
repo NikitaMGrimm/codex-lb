@@ -78,7 +78,7 @@ export function AccountUsageLimitControl({ account, busy, readOnly, onChange }: 
               checked={enabled}
               disabled={disabled}
               onCheckedChange={(nextEnabled) =>
-                onChange(account.accountId, nextEnabled ? { enabled: true, ...saved } : { enabled: false })
+                onChange(account.accountId, { enabled: nextEnabled })
               }
             />
           </div>

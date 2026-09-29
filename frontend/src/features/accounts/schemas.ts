@@ -286,7 +286,7 @@ export const AccountUsageLimitUpdateRequestSchema = z
     percentWeekly: z.number().gt(0).max(100).nullable().optional(),
   })
   .superRefine((value, context) => {
-    if (value.enabled && value.percent == null && value.percent5H == null && value.percentWeekly == null) {
+    if (value.enabled && value.percent === null && value.percent5H === null && value.percentWeekly === null) {
       context.addIssue({
         code: "custom",
         path: ["percent"],

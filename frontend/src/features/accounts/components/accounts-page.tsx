@@ -242,7 +242,7 @@ export function AccountsPage() {
               })
             }
             onUsageLimitChange={(accountId, update) =>
-              void usageLimitMutation.mutateAsync({ accountId, update })
+              usageLimitMutation.mutate({ accountId, update })
             }
             onSecurityWorkAuthorizedChange={(accountId, enabled) =>
               void updateMutation.mutateAsync({

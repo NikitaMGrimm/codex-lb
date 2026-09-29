@@ -1,6 +1,7 @@
 import { HttpResponse, http } from "msw";
 import { z } from "zod";
 
+import { AccountUsageLimitUpdateRequestSchema } from "@/features/accounts/schemas";
 import type { InviteDescription } from "@/features/auth/schemas";
 import type { DashboardRole, DashboardUser } from "@/features/access/api";
 import type { AuditEntry, AuthProvider, RoleMapping, ScimToken } from "@/features/organisation/api";
@@ -206,15 +207,6 @@ const TelemetryConsentPayloadSchema = z.object({
 const AccountRoutingPolicyPayloadSchema = z.object({
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
 });
-
-const AccountUsageLimitPayloadSchema = z
-  .object({
-    enabled: z.boolean(),
-    percent: z.number().gt(0).max(100).nullable().optional(),
-    percent5H: z.number().gt(0).max(100).nullable().optional(),
-    percentWeekly: z.number().gt(0).max(100).nullable().optional(),
-  })
-  .refine((value) => !value.enabled || value.percent != null || value.percent5H != null || value.percentWeekly != null);
 
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
@@ -1197,8 +1189,13 @@ export const handlers = [
           { status: 404 },
         );
       }
-      const payload = await parseJsonBody(request, AccountUsageLimitPayloadSchema);
-      if (!payload) {
+      const payload = await parseJsonBody(request, AccountUsageLimitUpdateRequestSchema);
+      const percentages = payload && [
+        payload.percent === undefined ? account.usageLimitPercent : payload.percent,
+        payload.percent5H === undefined ? account.usageLimit5HPercent : payload.percent5H,
+        payload.percentWeekly === undefined ? account.usageLimitWeeklyPercent : payload.percentWeekly,
+      ];
+      if (!payload || (payload.enabled && !percentages?.some((value) => value != null))) {
         return HttpResponse.json(
           {
             error: {
