@@ -751,38 +751,19 @@ class UsageUpdater:
                 )
             )
 
-        if primary is not None:
-            snapshot_windows.append(
-                _standard_usage_window_write(
-                    window="primary",
-                    usage_window=primary,
-                    now_epoch=now_epoch,
-                    credits_has=credits_has,
-                    credits_unlimited=credits_unlimited,
-                    credits_balance=credits_balance,
+        for window, usage_window in (("primary", primary), ("secondary", secondary), ("monthly", monthly)):
+            if usage_window is not None:
+                carries_credits = window != "secondary"
+                snapshot_windows.append(
+                    _standard_usage_window_write(
+                        window=window,
+                        usage_window=usage_window,
+                        now_epoch=now_epoch,
+                        credits_has=credits_has if carries_credits else None,
+                        credits_unlimited=credits_unlimited if carries_credits else None,
+                        credits_balance=credits_balance if carries_credits else None,
+                    )
                 )
-            )
-
-        if secondary is not None:
-            snapshot_windows.append(
-                _standard_usage_window_write(
-                    window="secondary",
-                    usage_window=secondary,
-                    now_epoch=now_epoch,
-                )
-            )
-
-        if monthly is not None:
-            snapshot_windows.append(
-                _standard_usage_window_write(
-                    window="monthly",
-                    usage_window=monthly,
-                    now_epoch=now_epoch,
-                    credits_has=credits_has,
-                    credits_unlimited=credits_unlimited,
-                    credits_balance=credits_balance,
-                )
-            )
 
         entries = await self._usage_repo.add_account_snapshot(
             account.id,

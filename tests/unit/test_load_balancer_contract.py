@@ -1540,129 +1540,30 @@ async def test_public_selection_rechecks_usage_limit_when_inputs_change_before_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
-async def test_public_selection_rechecks_usage_limit_when_inputs_change_during_persist(
+@pytest.mark.parametrize("reached_at", [1, 4, None], ids=["first-attempt", "final-attempt", "continuous-churn"])
+async def test_public_selection_handles_input_changes_during_persistence(
     selection_cache: AccountSelectionCache,
     monkeypatch: pytest.MonkeyPatch,
     sticky: bool,
+    reached_at: int | None,
 ) -> None:
-    account = _account(f"contract-input-generation-limit-{sticky}")
-    account.usage_limit_enabled = True
-    account.usage_limit_percent = 10.0
-    initial_usage = _usage_row(80, account.id, window="primary", used_percent=5.0)
+    account = _account(f"contract-input-generation-{sticky}-{reached_at}")
+    account.usage_limit_enabled = reached_at is not None
+    account.usage_limit_percent = 10.0 if reached_at is not None else None
     balancer, _, usage_repo, sticky_repo = _balancer(
         [account],
         selection_cache,
-        primary={account.id: initial_usage},
+        primary={account.id: _usage_row(80, account.id, window="primary", used_percent=5.0)},
     )
-    load_spy = AsyncMock(side_effect=balancer._load_selection_inputs)
-    persist_calls = 0
-
-    async def cross_limit_during_first_persist(*_args: Any, **_kwargs: Any) -> set[str]:
-        nonlocal persist_calls
-        persist_calls += 1
-        if persist_calls == 1:
-            usage_repo.rows["primary"][account.id] = _usage_row(
-                81,
-                account.id,
-                window="primary",
-                used_percent=10.0,
-            )
-            selection_cache.invalidate()
-        return set()
-
-    release_spy = AsyncMock(wraps=balancer.release_account_lease)
-    monkeypatch.setattr(balancer, "_load_selection_inputs", load_spy)
-    monkeypatch.setattr(balancer, "_persist_selection_state", cross_limit_during_first_persist)
-    monkeypatch.setattr(balancer, "release_account_lease", release_spy)
-
-    selection = await asyncio.wait_for(_select_with_lease(balancer, sticky=sticky), timeout=1.0)
-
-    assert selection.account is None
-    assert selection.lease is None
-    assert selection.error_code == "account_usage_limit_reached"
-    # A deterministic policy denial does not burn the remaining retry budget;
-    # only the first attempt acquired a stale lease.
-    assert load_spy.await_count == 2
-    release_spy.assert_awaited_once()
-    release_call = release_spy.await_args
-    assert release_call is not None
-    released_lease = release_call.args[0]
-    assert released_lease is not None
-    assert sticky_repo.account_id is None
-    assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
-async def test_public_selection_bounds_continuous_input_generation_changes(
-    selection_cache: AccountSelectionCache,
-    monkeypatch: pytest.MonkeyPatch,
-    sticky: bool,
-) -> None:
-    account = _account(f"contract-input-generation-churn-{sticky}")
-    balancer, _, usage_repo, sticky_repo = _balancer([account], selection_cache)
-    original_last_selected_at = 123.0
-    balancer._runtime[account.id] = load_balancer_module.RuntimeState(
-        last_selected_at=original_last_selected_at,
-    )
-    original_load = balancer._load_selection_inputs
-    load_spy = AsyncMock(side_effect=original_load)
-    release_spy = AsyncMock(wraps=balancer.release_account_lease)
-    persist_calls = 0
-
-    async def invalidate_after_each_admission(*_args: Any, **_kwargs: Any) -> set[str]:
-        nonlocal persist_calls
-        persist_calls += 1
-        selection_cache.invalidate()
-        return set()
-
-    monkeypatch.setattr(balancer, "_load_selection_inputs", load_spy)
-    monkeypatch.setattr(balancer, "_persist_selection_state", invalidate_after_each_admission)
-    monkeypatch.setattr(balancer, "release_account_lease", release_spy)
-
-    selection = await asyncio.wait_for(_select_with_lease(balancer, sticky=sticky), timeout=1.0)
-
-    assert selection.account is None
-    assert selection.lease is None
-    assert selection.error_code == "no_accounts"
-    assert selection_failure_response(selection)[0] == 503
-    assert persist_calls == 4
-    assert load_spy.await_count == 4
-    assert release_spy.await_count == 4
-    assert usage_repo.snapshot_calls == 1
-    assert sticky_repo.account_id is None
-    # The cursor is replica-local fairness state, so each locally admitted
-    # attempt consumes a turn even when a newer policy snapshot supersedes it.
-    last_selected_at = balancer._runtime[account.id].last_selected_at
-    assert last_selected_at is not None
-    assert last_selected_at > original_last_selected_at
-    assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
-async def test_public_selection_final_generation_check_rejects_newly_reached_usage_limit(
-    selection_cache: AccountSelectionCache,
-    monkeypatch: pytest.MonkeyPatch,
-    sticky: bool,
-) -> None:
-    account = _account(f"contract-input-generation-final-limit-{sticky}")
-    account.usage_limit_enabled = True
-    account.usage_limit_percent = 10.0
-    initial_usage = _usage_row(80, account.id, window="primary", used_percent=5.0)
-    balancer, _, usage_repo, sticky_repo = _balancer(
-        [account],
-        selection_cache,
-        primary={account.id: initial_usage},
-    )
+    balancer._runtime[account.id] = load_balancer_module.RuntimeState(last_selected_at=123.0)
     load_spy = AsyncMock(side_effect=balancer._load_selection_inputs)
     release_spy = AsyncMock(wraps=balancer.release_account_lease)
     persist_calls = 0
 
-    async def invalidate_and_cross_limit_on_final_attempt(*_args: Any, **_kwargs: Any) -> set[str]:
+    async def change_inputs(*_args: Any, **_kwargs: Any) -> set[str]:
         nonlocal persist_calls
         persist_calls += 1
-        if persist_calls == 4:
+        if persist_calls == reached_at:
             usage_repo.rows["primary"][account.id] = _usage_row(
                 81,
                 account.id,
@@ -1673,20 +1574,32 @@ async def test_public_selection_final_generation_check_rejects_newly_reached_usa
         return set()
 
     monkeypatch.setattr(balancer, "_load_selection_inputs", load_spy)
-    monkeypatch.setattr(balancer, "_persist_selection_state", invalidate_and_cross_limit_on_final_attempt)
+    monkeypatch.setattr(balancer, "_persist_selection_state", change_inputs)
     monkeypatch.setattr(balancer, "release_account_lease", release_spy)
 
     selection = await asyncio.wait_for(_select_with_lease(balancer, sticky=sticky), timeout=1.0)
 
     assert selection.account is None
     assert selection.lease is None
-    assert selection.error_code == "account_usage_limit_reached"
-    assert persist_calls == 4
-    assert load_spy.await_count == 4
-    assert release_spy.await_count == 4
-    assert usage_repo.snapshot_calls == 1
+    assert selection.error_code == ("no_accounts" if reached_at is None else "account_usage_limit_reached")
+    # Deterministic denial stops after one stale admission; ongoing churn uses
+    # the bounded retry budget and authorizes the final owner once.
+    expected_attempts = 1 if reached_at == 1 else 4
+    assert persist_calls == (2 if reached_at == 1 else 4)
+    assert load_spy.await_count == (2 if reached_at == 1 else 4)
+    assert release_spy.await_count == expected_attempts
+    released = [call.args[0] for call in release_spy.await_args_list]
+    assert all(lease is not None for lease in released)
+    assert len({lease.lease_id for lease in released}) == expected_attempts
+    assert usage_repo.snapshot_calls == (0 if reached_at == 1 else 1)
     assert sticky_repo.account_id is None
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+    if reached_at is None:
+        assert selection_failure_response(selection)[0] == 503
+        # The cursor is local fairness state: superseded admissions still
+        # consume a turn so concurrent round-robin requests cannot reuse it.
+        last_selected_at = balancer._runtime[account.id].last_selected_at
+        assert last_selected_at is not None and last_selected_at > 123.0
 
 
 @pytest.mark.asyncio
