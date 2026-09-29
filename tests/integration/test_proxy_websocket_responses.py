@@ -5067,7 +5067,14 @@ def test_v1_responses_websocket_owner_authorization_timeout_fails_frame(app_inst
     assert upstream.sent_text == []
 
 
-def test_v1_responses_websocket_expiry_during_owner_authorization_does_not_dispatch(app_instance, monkeypatch) -> None:
+@pytest.mark.parametrize("stall_phase", ["initial_authorization", "lease", "final_authorization"])
+@pytest.mark.parametrize("denied", [False, True])
+def test_v1_responses_websocket_expiry_during_owner_authorization_does_not_dispatch(
+    app_instance,
+    monkeypatch,
+    stall_phase,
+    denied,
+) -> None:
     release_authorization = threading.Event()
     final_authorization_started = threading.Event()
 
@@ -5086,6 +5093,11 @@ def test_v1_responses_websocket_expiry_during_owner_authorization_does_not_dispa
     account = SimpleNamespace(id="acct_ws_expired_before_dispatch")
     authorization_calls = 0
     terminal_errors: list[str] = []
+    acquired_leases = []
+    released_leases = []
+    failure_logs = []
+    original_acquire = proxy_module.ProxyService._acquire_account_response_create_lease_or_overload
+    original_release = proxy_module.LoadBalancer.release_account_lease
     original_emit_error = proxy_module.ProxyService._emit_websocket_terminal_error
 
     class _FakeSettingsCache:
@@ -5107,10 +5119,29 @@ def test_v1_responses_websocket_expiry_during_owner_authorization_does_not_dispa
         del self
         assert account_id == account.id
         authorization_calls += 1
-        if authorization_calls == 2:
+        if authorization_calls == (1 if stall_phase == "initial_authorization" else 2):
+            if stall_phase != "lease":
+                final_authorization_started.set()
+                await asyncio.to_thread(release_authorization.wait)
+            if denied:
+                return OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.REACHED)
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+
+    async def acquire_create_lease(self, **kwargs):
+        if stall_phase == "lease" and not acquired_leases:
             final_authorization_started.set()
             await asyncio.to_thread(release_authorization.wait)
-        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+        lease = await original_acquire(self, **kwargs)
+        acquired_leases.append(lease)
+        return lease
+
+    async def release_create_lease(self, lease):
+        if lease is not None:
+            released_leases.append(lease)
+        await original_release(self, lease)
+
+    async def record_failure(self, **kwargs):
+        failure_logs.append(kwargs)
 
     async def record_terminal_error(self, websocket, **kwargs):
         terminal_errors.append(kwargs["error_code"])
@@ -5122,6 +5153,11 @@ def test_v1_responses_websocket_expiry_during_owner_authorization_does_not_dispa
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
     monkeypatch.setattr(proxy_module.ProxyService, "_emit_websocket_terminal_error", record_terminal_error)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_websocket_connect_failure", record_failure)
+    monkeypatch.setattr(
+        proxy_module.ProxyService, "_acquire_account_response_create_lease_or_overload", acquire_create_lease
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "release_account_lease", release_create_lease)
     monkeypatch.setattr(proxy_module, "_stream_request_budget_seconds", lambda _settings, *, request_transport: 0.05)
 
     with TestClient(app_instance) as client:
@@ -5141,10 +5177,12 @@ def test_v1_responses_websocket_expiry_during_owner_authorization_does_not_dispa
                 release_authorization.set()
                 upstream.closed_event.set()
 
-    assert authorization_calls >= 4
     assert len(upstream.sent_text) == 1
     assert _without_installation_metadata(json.loads(upstream.sent_text[0]))["input"][0]["content"][0]["text"] == "next"
     assert terminal_errors == ["upstream_request_timeout"]
+    assert failure_logs == []
+    assert acquired_leases
+    assert sorted(lease.lease_id for lease in released_leases) == sorted(lease.lease_id for lease in acquired_leases)
 
 
 def test_v1_responses_websocket_reconnects_when_owner_auth_outlives_socket(app_instance, monkeypatch) -> None:

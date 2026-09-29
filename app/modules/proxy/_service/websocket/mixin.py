@@ -2774,7 +2774,15 @@ class _WebSocketMixin:
                                         request_state.response_create_sent_at = clock.monotonic()
                         if not dispatch_requires_reconnect:
                             if not dispatch_pending:
-                                # The reader already owns finalization.
+                                # Admission may have acquired a lease after the
+                                # reader finalized this unsent frame.
+                                retired_create_lease_release_task = scheduler_for(proxy).create_task(
+                                    proxy._release_request_state_account_response_create_lease(request_state),
+                                    name="proxy-websocket-finalization-late-create-lease",
+                                )
+                                _track_websocket_owned_task(proxy, retired_create_lease_release_task)
+                                await asyncio.shield(retired_create_lease_release_task)
+                                retired_create_lease_release_task = None
                                 continue
                             if dispatch_expired:
                                 expired_timeout = _websocket_receive_timeout_for_pending_requests(
@@ -2899,12 +2907,18 @@ class _WebSocketMixin:
                     error_message = error.message if error and error.message else "Upstream error"
                     error_type = error.type if error and error.type else "server_error"
                     if request_state is not None:
-                        await proxy._release_websocket_request_state_reservation(request_state)
-                        await proxy._release_request_state_account_response_create_lease(request_state)
+                        rejection_owned = True
                         if request_state_registered:
                             async with pending_lock:
-                                if request_state in pending_requests:
+                                rejection_owned = request_state in pending_requests
+                                if rejection_owned:
                                     pending_requests.remove(request_state)
+                        await proxy._release_request_state_account_response_create_lease(request_state)
+                        if not rejection_owned:
+                            # The reader already settled and reported this frame.
+                            continue
+                        await proxy._release_websocket_request_state_reservation(request_state)
+                        if request_state_registered:
                             await _release_websocket_response_create_gate(
                                 request_state, response_create_gate, scheduler=scheduler_for(proxy)
                             )
