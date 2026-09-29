@@ -328,6 +328,7 @@ from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
+    _check_account_usage_limit,
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
@@ -1255,6 +1256,31 @@ async def _process_upstream_websocket_transport_end(
 
 
 class _WebSocketMixin:
+    async def _authorize_websocket_account_usage(
+        self,
+        account_id: str,
+        *,
+        request_state: _WebSocketRequestState,
+        request_budget_seconds: float,
+    ) -> None:
+        proxy = cast(_WebSocketServiceProtocol, self)
+        state = await _check_account_usage_limit(
+            proxy._load_balancer,
+            account_id,
+            deadline=request_state.started_at + request_budget_seconds,
+        )
+        if state is None:
+            raise _http_bridge_previous_response_owner_unavailable_error()
+        if state.blocks_account_use:
+            status_code, error_payload = selection_failure_response(
+                AccountSelection(
+                    account=None,
+                    error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+                    error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+                )
+            )
+            raise ProxyResponseError(status_code, error_payload)
+
     async def _touch_active_websocket_thread_affinity(
         self,
         request_state: _WebSocketRequestState,
@@ -2466,37 +2492,13 @@ class _WebSocketMixin:
                         and _is_websocket_response_create(payload)
                     )
                     if is_response_create:
-                        try:
-                            usage_limit_state = await proxy._load_balancer.check_account_usage_limit(account.id)
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception:
-                            _facade().logger.warning(
-                                "Failed to authorize websocket response against account usage limit "
-                                "account_id=%s request_id=%s",
-                                account.id,
-                                request_state.request_log_id or request_state.request_id,
-                                exc_info=True,
-                            )
-                            raise ProxyResponseError(
-                                503,
-                                openai_error(
-                                    "account_usage_limit_authorization_failed",
-                                    "Unable to verify account usage limit; retry later.",
-                                    error_type="server_error",
-                                ),
-                            )
-                        if usage_limit_state is None:
-                            raise _http_bridge_previous_response_owner_unavailable_error()
-                        if usage_limit_state.blocks_account_use:
-                            status_code, error_payload = selection_failure_response(
-                                AccountSelection(
-                                    account=None,
-                                    error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
-                                    error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
-                                )
-                            )
-                            raise ProxyResponseError(status_code, error_payload)
+                        await self._authorize_websocket_account_usage(
+                            account.id,
+                            request_state=request_state,
+                            request_budget_seconds=_facade()._stream_request_budget_seconds(
+                                runtime_settings, request_transport="websocket"
+                            ),
+                        )
                     if (
                         is_response_create
                         and request_state is not None
@@ -2533,12 +2535,45 @@ class _WebSocketMixin:
                             request_state.fresh_upstream_request_text = fresh_upstream_request_text
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
+                    reconnect_before_send = False
+                    if is_response_create and request_state is not None and account is not None:
+                        # Admission may wait while another turn crosses the cap.
+                        await self._authorize_websocket_account_usage(
+                            account.id,
+                            request_state=request_state,
+                            request_budget_seconds=_facade()._stream_request_budget_seconds(
+                                runtime_settings, request_transport="websocket"
+                            ),
+                        )
+                        await pending_lock.acquire()
+                        try:
+                            request_is_pending = request_state in pending_requests
+                            deadline = request_state.started_at + _facade()._stream_request_budget_seconds(
+                                runtime_settings, request_transport="websocket"
+                            )
+                            if request_is_pending and time.monotonic() >= deadline:
+                                raise ProxyResponseError(
+                                    504,
+                                    openai_error(
+                                        "upstream_request_timeout", "Request deadline elapsed before dispatch"
+                                    ),
+                                )
+                            reconnect_before_send = (
+                                upstream_control is not None and upstream_control.reconnect_requested
+                            )
+                        finally:
+                            pending_lock.release()
+                        if not request_is_pending:
+                            # Admission can install a lease after the reader
+                            # settled the request. Release that late lease too.
+                            await proxy._release_request_state_account_response_create_lease(request_state)
+                            continue
                     if (
                         is_response_create
                         and text_data is not None
                         and request_state is not None
                         and upstream_control is not None
-                        and upstream_control.reconnect_requested
+                        and reconnect_before_send
                     ):
                         # Admission and account-cap waits can outlive a clean
                         # close observed by the upstream reader. Re-check at
@@ -2638,11 +2673,16 @@ class _WebSocketMixin:
                     error_message = error.message if error and error.message else "Upstream error"
                     error_type = error.type if error and error.type else "server_error"
                     if request_state is not None:
-                        await proxy._release_websocket_request_state_reservation(request_state)
                         if request_state_registered:
                             async with pending_lock:
-                                if request_state in pending_requests:
+                                request_is_pending = request_state in pending_requests
+                                if request_is_pending:
                                     pending_requests.remove(request_state)
+                            if not request_is_pending:
+                                await proxy._release_request_state_account_response_create_lease(request_state)
+                                continue
+                        await proxy._release_websocket_request_state_reservation(request_state)
+                        if request_state_registered:
                             await _release_websocket_response_create_gate(request_state, response_create_gate)
                         await proxy._emit_websocket_terminal_error(
                             websocket,

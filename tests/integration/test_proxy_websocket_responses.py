@@ -4665,11 +4665,13 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
         (RuntimeError("usage database unavailable"), "account_usage_limit_authorization_failed"),
     ],
 )
+@pytest.mark.parametrize("denial_phase", ["before_admission", "after_admission", "after_finalization"])
 def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_request(
     app_instance,
     monkeypatch,
     second_check,
     expected_error_code,
+    denial_phase,
 ) -> None:
     release_first_response = threading.Event()
 
@@ -4688,7 +4690,9 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
                         separators=(",", ":"),
                     ),
                 )
-            await asyncio.to_thread(release_first_response.wait)
+            if self._receive_count > 2:
+                await asyncio.Future()
+            assert await asyncio.to_thread(release_first_response.wait, 5.0)
             return _FakeUpstreamMessage(
                 "text",
                 text=json.dumps(
@@ -4706,7 +4710,9 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
 
     upstream = _OverlappingUpstreamWebSocket()
     account = SimpleNamespace(id="acct_ws_usage_limit_read_failure")
-    authorization_checks = 0
+    reject_new_request = False
+    relay_context = {}
+    proxy_instance = None
 
     class _FakeSettingsCache:
         async def get(self):
@@ -4719,19 +4725,56 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
         return None
 
     async def fake_connect_proxy_websocket(self, headers, **kwargs):
-        del self, headers, kwargs
+        nonlocal proxy_instance
+        del headers, kwargs
+        proxy_instance = self
         return account, upstream
 
     async def check_account_usage_limit(self, account_id):
-        nonlocal authorization_checks
         del self
         assert account_id == account.id
-        authorization_checks += 1
-        if authorization_checks == 2:
+        if len(upstream.sent_text) == 1 and (denial_phase == "before_admission" or reject_new_request):
+            if denial_phase == "after_finalization":
+                assert proxy_instance is not None
+                async with relay_context["pending_lock"]:
+                    request_state = relay_context["pending_requests"].pop()
+                await proxy_instance._fail_pending_websocket_requests(
+                    account=None,
+                    account_id_value=account.id,
+                    pending_requests=deque([request_state]),
+                    pending_lock=relay_context["pending_lock"],
+                    error_code="upstream_request_timeout",
+                    error_message="Request expired during authorization",
+                    api_key=None,
+                    websocket=relay_context["websocket"],
+                    client_send_lock=relay_context["client_send_lock"],
+                    response_create_gate=relay_context["response_create_gate"],
+                    penalize_account=False,
+                )
             if isinstance(second_check, Exception):
                 raise second_check
             return second_check
         return AccountUsageLimitState.DISABLED
+
+    original_relay = proxy_module.ProxyService._relay_upstream_websocket_messages
+
+    async def capture_relay(self, websocket, upstream_socket, **kwargs):
+        relay_context.update(kwargs, websocket=websocket)
+        return await original_relay(self, websocket, upstream_socket, **kwargs)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_relay_upstream_websocket_messages", capture_relay)
+    original_acquire = proxy_module.ProxyService._acquire_account_response_create_lease_or_overload
+
+    async def acquire_and_change_policy(self, **kwargs):
+        nonlocal reject_new_request
+        lease = await original_acquire(self, **kwargs)
+        if len(upstream.sent_text) == 1:
+            reject_new_request = True
+        return lease
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService, "_acquire_account_response_create_lease_or_overload", acquire_and_change_policy
+    )
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -4756,7 +4799,10 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
 
                 assert first_created["type"] == "response.created"
                 assert rejected["type"] == "response.failed"
-                assert rejected["response"]["error"]["code"] == expected_error_code
+                expected_code = (
+                    "upstream_request_timeout" if denial_phase == "after_finalization" else expected_error_code
+                )
+                assert rejected["response"]["error"]["code"] == expected_code
                 assert len(upstream.sent_text) == 1
                 assert upstream.closed is False
 

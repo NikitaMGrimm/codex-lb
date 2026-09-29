@@ -28,6 +28,7 @@ from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_COD
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.sse import sse_event_type_from_block
 from app.db.models import Account
 from app.modules.api_keys.service import (
@@ -40,11 +41,37 @@ from app.modules.proxy.load_balancer import (
     AccountLease,
     AccountSelection,
     CatalogOmissionQuotaAdmission,
+    LoadBalancer,
 )
 from app.modules.proxy.tool_call_dedupe import ToolCallDedupeKey
 from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
+
+
+async def _check_account_usage_limit(
+    load_balancer: LoadBalancer,
+    account_id: str,
+    *,
+    deadline: float,
+) -> AccountUsageLimitState | None:
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Account usage authorization deadline elapsed")
+        async with asyncio.timeout(remaining):
+            return await load_balancer.check_account_usage_limit(account_id)
+    except Exception:
+        logger.warning("Account usage authorization failed account_id=%s", account_id, exc_info=True)
+        raise ProxyResponseError(
+            503,
+            openai_error(
+                "account_usage_limit_authorization_failed",
+                "Unable to verify account usage limit; retry later.",
+                error_type="server_error",
+            ),
+        ) from None
+
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
@@ -102,6 +129,7 @@ _LOCAL_PROXY_ERROR_CODES = frozenset(
         "no_plan_support_for_model",
         "additional_quota_data_unavailable",
         "account_usage_limit_reached",
+        "account_usage_limit_authorization_failed",
         "no_additional_quota_eligible_accounts",
         "payload_too_large",
         "proxy_overloaded",
