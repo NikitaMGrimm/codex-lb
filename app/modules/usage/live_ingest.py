@@ -260,11 +260,9 @@ class LiveUsageIngestor:
         await self._invalidate_caches_throttled()
 
     async def _invalidate_caches_throttled(self) -> None:
-        # Header-cache invalidations are throttled, but every write must still
-        # be covered: a write inside the throttle window schedules one trailing
-        # invalidation at window expiry. Selection inputs for accounts with an
-        # enabled usage policy are invalidated synchronously above because
-        # routing eligibility cannot tolerate this throttle window.
+        # Every write remains covered by a throttled selection/header refresh.
+        # Enabled usage policies additionally invalidate selection immediately
+        # above because their hard gate cannot tolerate this throttle window.
         now = time.monotonic()
         remaining = _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS - (now - self._last_cache_invalidation)
         if remaining <= 0:
@@ -283,6 +281,7 @@ class LiveUsageIngestor:
 
     async def _invalidate_caches_now(self) -> None:
         self._last_cache_invalidation = time.monotonic()
+        get_account_selection_cache().invalidate()
         # Downstream x-codex-* headers are served from a TTL cache that only
         # the poller invalidates otherwise; drop it so clients see the live
         # values before the TTL expires.

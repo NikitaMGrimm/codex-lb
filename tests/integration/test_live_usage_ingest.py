@@ -210,6 +210,62 @@ async def test_live_ingestor_immediately_invalidates_selection_only_for_enabled_
 
 
 @pytest.mark.asyncio
+async def test_uncapped_live_usage_refreshes_cached_routing_after_throttled_invalidation(
+    monkeypatch: pytest.MonkeyPatch,
+    db_setup,
+) -> None:
+    del db_setup
+    account_id = "acc_live_uncapped_routing"
+    account = _make_account(account_id, "uncapped-routing@example.com")
+    account.reset_at = naive_utc_to_epoch(utcnow()) + 3600
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        await UsageRepository(session).add_entry(
+            account_id, 5.0, window="primary", reset_at=account.reset_at, window_minutes=300
+        )
+
+    selection_cache = AccountSelectionCache(ttl_seconds=60)
+    monkeypatch.setattr(live_ingest, "get_account_selection_cache", lambda: selection_cache)
+    balancer = LoadBalancer(_proxy_repositories)
+    balancer._selection_inputs_cache = selection_cache
+    before = await balancer._load_selection_inputs(model=None)
+    assert before.latest_primary[account_id].used_percent == 5.0
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    try:
+        await ingestor._ingest(
+            live_ingest._QueuedSnapshot(account_id=account_id, chatgpt_account_id=None, snapshot=_snapshot())
+        )
+        refreshed = await balancer._load_selection_inputs(model=None)
+        assert refreshed.latest_primary[account_id].used_percent == 33.0
+
+        # Cover writes coalesced into the trailing invalidation too.
+        monkeypatch.setattr(live_ingest, "_CACHE_INVALIDATION_MIN_INTERVAL_SECONDS", 3600.0)
+        await ingestor._ingest(
+            live_ingest._QueuedSnapshot(
+                account_id=account_id,
+                chatgpt_account_id=None,
+                snapshot=LiveRateLimitSnapshot(
+                    primary=LiveUsageWindow(
+                        used_percent=10.0, window_minutes=300, reset_at=naive_utc_to_epoch(utcnow()) + 3600
+                    ),
+                    secondary=None,
+                    credits_has=None,
+                    credits_unlimited=None,
+                    credits_balance=None,
+                ),
+            )
+        )
+        cached = await balancer._load_selection_inputs(model=None)
+        assert cached.latest_primary[account_id].used_percent == 33.0
+        await ingestor._trailing_invalidate(0.0)
+        refreshed = await balancer._load_selection_inputs(model=None)
+        assert refreshed.latest_primary[account_id].used_percent == 10.0
+    finally:
+        await ingestor.stop()
+
+
+@pytest.mark.asyncio
 async def test_live_ingest_at_cap_immediately_changes_public_selection_inside_header_throttle(
     monkeypatch: pytest.MonkeyPatch,
     db_setup,
