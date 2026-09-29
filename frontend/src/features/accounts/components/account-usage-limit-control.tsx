@@ -32,8 +32,9 @@ export function AccountUsageLimitControl({ account, busy, readOnly, onChange }: 
   const hasWeekly = account.windowMinutesSecondary != null || account.usage?.secondaryRemainingPercent != null;
   const hasMonthly = account.windowMinutesMonthly != null || account.usage?.monthlyRemainingPercent != null;
   const monthlyOnly = hasMonthly && !hasPrimary && !hasWeekly;
+  const reportedDurations = [account.windowMinutesPrimary, account.windowMinutesSecondary];
   const visibleFields = fields.filter((field) =>
-    field === "percent" || (field === "percent5H" ? hasPrimary : hasWeekly),
+    field === "percent" || reportedDurations.includes(field === "percent5H" ? 300 : 10080),
   );
   const saved = {
     percent: account.usageLimitPercent ?? null,

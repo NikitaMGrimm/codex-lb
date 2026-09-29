@@ -468,3 +468,8 @@ The editor SHALL ask how much quota to keep for direct use, converting reserve p
 - **THEN** the editor SHALL offer a monthly reserve backed by the shared percentage without 5-hour or weekly overrides.
 - **WHEN** the operator saves, disables, or re-enables that policy
 - **THEN** the monthly effective limit SHALL retain the same shared-policy semantics.
+
+#### Scenario: Nonstandard windows do not offer standard overrides
+- **WHEN** reported windows have durations other than 300 or 10080 minutes
+- **THEN** the editor SHALL offer only the shared reserve for those windows
+- **AND** a 10080-minute window in either reported slot SHALL offer a weekly reserve.
