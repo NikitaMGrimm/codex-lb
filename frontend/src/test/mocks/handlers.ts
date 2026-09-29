@@ -725,11 +725,16 @@ function refreshMockUsageLimitSnapshot(account: AccountSummary): void {
       { minutes: account.windowMinutesSecondary, remaining: account.usage?.secondaryRemainingPercent,
         limit: account.effectiveLimitSecondary },
     ];
+  const missingOverrideWindow = !hasMonthly && [
+    { limit: account.usageLimit5HPercent, capacity: account.capacityCreditsPrimary, minutes: 300 },
+    { limit: account.usageLimitWeeklyPercent, capacity: account.capacityCreditsSecondary, minutes: 10_080 },
+  ].some(({ limit, capacity, minutes }) => limit != null && (capacity == null || capacity > 0) &&
+    !windows.some((window) => window.minutes === minutes));
   const observed = windows.filter(({ minutes, remaining }) => minutes != null || remaining != null);
   const limited = observed.filter(({ limit }) => limit != null);
   const missingLimitedMeasurement = limited.some(({ remaining }) =>
     remaining == null || !Number.isFinite(remaining) || remaining < 0 || remaining > 100);
-  if (observed.length === 0 || missingLimitedMeasurement) {
+  if (observed.length === 0 || missingOverrideWindow || missingLimitedMeasurement) {
     account.usageLimitState = "data_unavailable";
   } else if (limited.some(({ remaining, limit }) => remaining != null && limit != null && 100 - remaining >= limit)) {
     account.usageLimitState = "reached";

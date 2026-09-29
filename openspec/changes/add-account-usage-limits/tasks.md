@@ -42,3 +42,5 @@
 - [x] 26. Consolidate redundant implementation and tests while retaining distinct public-path and concurrency coverage.
 - [x] 27. Verify the corrected published implementation and report the entire PR's before/after diff against the same base.
 - [x] 28. Fail closed for overrides with unknown plan capacity and verify public selection and bridge authorization.
+- [x] 29. Align mock override eligibility with the required-window contract and verify frontend regressions.
+- [ ] 30. Verify existing-schema override upgrades and include both PostgreSQL policy round trips in CI.

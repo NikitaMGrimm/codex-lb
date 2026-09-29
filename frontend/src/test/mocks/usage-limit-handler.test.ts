@@ -119,4 +119,30 @@ describe("default account usage-limit handler", () => {
       usageLimitState: "data_unavailable",
     });
   });
+
+  it.each([
+    ["primary", 225, "data_unavailable"],
+    ["primary", null, "data_unavailable"],
+    ["primary", 0, "available"],
+    ["secondary", 7_560, "data_unavailable"],
+    ["secondary", null, "data_unavailable"],
+  ] as const)("handles an absent %s override window with capacity %s", async (window, capacity, expected) => {
+    resetMockState([createAccountSummary({
+      capacityCreditsPrimary: window === "primary" ? capacity : 225,
+      capacityCreditsSecondary: window === "secondary" ? capacity : 7_560,
+      windowMinutesPrimary: window === "primary" ? null : 300,
+      windowMinutesSecondary: window === "secondary" ? null : 10_080,
+      usage: {
+        primaryRemainingPercent: window === "primary" ? null : 82,
+        secondaryRemainingPercent: window === "secondary" ? null : 67,
+      },
+    })]);
+    await updateAccountUsageLimit("acc_primary", {
+      enabled: true,
+      percent5H: window === "primary" ? 40 : null,
+      percentWeekly: window === "secondary" ? 40 : null,
+    });
+    const account = (await listAccounts()).accounts.find((item) => item.accountId === "acc_primary");
+    expect(account).toMatchObject({ usageLimitState: expected });
+  });
 });
