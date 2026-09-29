@@ -1,64 +1,44 @@
-# Reconciliation with PR #2147
+# Account usage limits
 
-## Published PR audit baseline
+## Purpose and model
 
-The audit starts at the actual GitHub PR #1528 head `242a0f937`, against its base `ec994599`: 12,390 additions, 785 deletions, 135 files. Work is local on `fix/pr1528-usage-audit` in a separate worktree; the older scalar-only checkout and its commits are preserved. Verification uses this head's frozen Python and frontend dependency locks.
+Operators can reserve quota for direct use by limiting how much Codex LB consumes from an account. This combines the scalar policy from PR #1528 with the independent windows and reserve presentation proposed in PR #2147.
 
-Compared against Soju06/codex-lb#2147 at f777d8ec1cc65caf98687b02feff401e3f787a49. The table records the proposals before their behavior was consolidated into this PR. The current implementation is described below.
+One enabled flag controls a default maximum-used percentage and optional 5-hour and weekly overrides. An absent override inherits the default; without a default, unmatched windows remain unrestricted. Disabling retains saved values, while removal clears them. Existing scalar policies retain their behavior without a conversion to the lowest window threshold.
 
-## Pre-consolidation baselines
+With 54% consumed and an 80% cap, the provider has 46 percentage points remaining: 20 reserved and 26 usable. With primary/weekly usage of 65%/75% and caps of 70%/90%, both windows remain available; primary usage of 72% blocks the account. The editor displays reserve percentages, while the API stores maximum-used percentages.
 
-| Concern | Earlier #1528 scalar draft | #2147 proposal |
-| --- | --- | --- |
-| Threshold | One maximum-used percentage for applicable standard windows | Independent optional 5-hour and weekly maximum-used percentages |
-| Disable/remove | Disabling retains the saved value; removing clears it | Each nullable window cap is independently disabled |
-| Monthly plans | Normalized monthly and weekly-only observations participate | Monthly and nonstandard-duration windows are outside the two window caps |
-| Missing/stale observations | Enabled policy fails closed with data_unavailable | reached_usage_cap_resets only blocks a present matching-duration row at its cap; it has no recorded-at freshness gate |
-| Presentation | Provider usage remains visible alongside policy state | Reserved/usable segments, credit donuts and weekly pace reflect the configured reserve |
-| Local error | account_usage_limit_reached | account_usage_cap_reached |
+## Observation and ownership boundaries
 
-Both percentages denote the maximum fraction of provider quota that may be consumed, not a remaining-quota threshold. With 54% consumed and an 80% cap, 46 percentage points remain at the provider, 20 are reserved, and 26 are usable. The consolidated implementation includes that reserve presentation.
+The shared evaluator normalizes weekly-only and monthly-only observations. Window overrides match duration, so monthly and other nonstandard windows use the default. Applicable missing, stale, or elapsed observations fail closed until a fresh measurement arrives. A reset deadline alone does not prove a new zero measurement. Unknown placeholders remain current-state evidence but are excluded from numeric history and demand calculations.
 
-The earlier scalar draft could not represent unequal window caps. For example, primary/weekly usage of 65%/75% is allowed by respective caps of 70%/90%; 72%/75% is blocked by the primary cap. Replacing the pair with 70% would also block the first case on its weekly window. The current implementation persists a shared `usage_limit_percent` plus optional `usage_limit_5h_percent` and `usage_limit_weekly_percent` overrides, exposes them as `percent5H` and `percentWeekly`, and displays their effective reserves.
+The policy is a hard eligibility gate, including for additional-quota requests. It does not change persisted upstream status. Continuity owners stay pinned: bridge/WebSocket dispatch and every warmup surface authorize the selected account from committed database state. A policy change after an authorization read is not retroactive; already dispatched requests retain ownership and settlement paths. The design document records cache, timeout, retry, and cleanup boundaries.
 
-## Consolidation design
+## Migration topology
 
-Use one policy model and evaluator, extending this change's normalized-window evaluation and fresh owner-authorization path with optional primary and weekly overrides. Keep the scalar as the default for every applicable standard window, including monthly plans. An absent override inherits that default; standalone window caps without a scalar default affect only their specified windows. Preserve disable-versus-remove behavior and fail-closed telemetry handling for every enabled effective cap.
+The scalar migration follows `20260918_000000_merge_scim_and_overflow_heads`; the override migration follows the scalar migration. Existing accounts start disabled. Override downgrade disables policies with no scalar threshold before removing the override columns. SQLite and PostgreSQL upgrade/downgrade coverage checks the resulting constraints and data.
 
-An existing enabled scalar value maps to the same default with no overrides, preserving its exact behavior. Independently configured values from #2147 map to matching explicit window overrides without creating an implicit monthly cap. Avoid two parallel admission gates, duplicate policy columns, or a lowest-threshold conversion. Resolve the public field/error naming once before exposing both interfaces.
+## Published PR audit
 
-Reuse #2147's accessible reserved/usable visualization against this single effective policy. Keep provider remaining quota distinct from usable quota and use the same duration normalization for selection, account summaries, donuts and pacing. Do not apply a weekly reserve to a monthly or other non-weekly observation. Preserve pinned ownership and capability authorization ordering when validating reused connections.
+The audit starts at GitHub PR #1528 head `242a0f937`, against base `ec994599`: 12,390 additions, 785 deletions, 135 files. Work stays local on `fix/pr1528-usage-audit` in a separate worktree, preserving the earlier scalar-only checkout. Verification uses this head's frozen dependency locks.
 
-## Merge boundary and verification
+The audit fixes stale toggles overwriting newer thresholds, unhandled mutation rejection, lease cleanup after WebSocket expiry, and reserve controls offered for incorrect durations. It consolidates telemetry writes, warmup rejection handling, and retry tests. Duplicate assertions remain covered at the public paths. PostgreSQL reconciliation tests wait for the identity read to finish before releasing the writer; transient-stream tests fail whichever account is selected first, avoiding random selection assumptions.
 
-The combined implementation includes the per-window extension and reserve visualization described above. It uses the existing usage-limit API with percent5H and percentWeekly additions, and returns effective window thresholds for dashboard consumers. Existing scalar rows retain their behavior through a new forward migration.
+A local component preview compares the published and reviewed controls for 60-minute and 1440-minute windows. It uses synthetic accounts and makes no provider requests. The feature change remains active while the PR is being reviewed locally.
 
-A consolidated implementation needs coverage for equal and unequal window caps, scalar migration and disable/remove semantics, weekly-only/monthly/nonstandard-duration plans, absent/stale observations, additional-quota routes, reused HTTP/WebSocket turns, cancellation cleanup, replica refresh, and accessible reserve/pacing calculations. Reuse the existing public-path tests in both PRs rather than duplicating their internal helper tests.
+## Audit verification and size
 
+Local checks used the published head's frozen dependencies. The affected unit suite passed 3,801 tests with three obsolete locking scenarios skipped; the final duplicate removal passed its focused 310-test suite. The wider frontend slice passed 556 tests, followed by 21 focused tests after removing its duplicate case. WebSocket, cancellation, and demultiplexing checks passed 229 tests. The bridge/telemetry/proxy/warmup integration slice passed 430 tests with 15 backend-specific skips; its one flaky retry test was corrected, then all 57 retry tests passed. PostgreSQL checks passed eight migration tests, 59 authorization/telemetry tests (five SQLite-specific skips), and nine selected policy/SQL-interruption tests. The corrected PostgreSQL reconciliation test passed three additional runs.
 
-## Preview verification environment
-The preview runs in a separate worktree with its own SQLite database and loopback port 8766. Seven synthetic accounts exercise default, unequal overrides, standalone override, disabled, reached, missing-data and monthly cases. Background provider polling is disabled using the repository browser-smoke harness, upstream points to an unused local port, and the preview permits only usage-limit and local dashboard-auth/consent writes. Production containers and databases are not accessed.
+Repository lint, architecture ratchets, type checks, frontend lint/type checks/build, strict change validation, and all 66 main-spec validations passed. Migration topology also passed against the actual PR base, with exactly two added revisions. GitHub's head and base still match the recorded baseline. These are local checks; the review commits have not been published to run cloud checks.
 
-Reserved/usable display is inspired by PR #2147; this implementation extends the existing #1528 policy and editor rather than copying the other branch's admission gate.
+Both size columns below compare the entire PR against `ec994599`; tests include frontend mock support. Added/deleted are raw Git diff counts, while net is added minus deleted.
 
-CI run 34471699010 failed only test_dashboard_overview_combines_data: its synthetic usage lacked both duration and reset metadata, which correctly denotes no data under the reviewed shared mapper. The local fixture now supplies standard durations; the runtime no-data guard remains intact.
+| Entire PR | Published `242a0f937` | Reviewed |
+| --- | ---: | ---: |
+| Added | 12,390 | 12,194 |
+| Deleted | 785 | 836 |
+| Net growth | 11,605 | 11,358 |
+| Changed files | 135 | 135 |
 
-
-## Consolidation coverage
-
-The combined implementation retains the independent-window and reserve-display requirements from #2147 through the existing #1528 policy path. It deliberately retains #1528's fail-closed behavior after telemetry expires; elapsed reset metadata alone does not constitute a fresh zero measurement.
-
-| Requirement | Coverage |
-| --- | --- |
-| Unequal thresholds, weekly-only normalization, unrelated durations and unknown telemetry | account usage-limit unit suite |
-| API persistence, immediate policy updates, disable-retain, explicit removal and standalone window limits | combined policy Accounts API integration test |
-| Existing owner authorization | HTTP bridge second-turn test covers both shared and per-window policies; existing WebSocket and cancellation suites retain their authorization/cleanup contracts |
-| Existing scalar rows and independent window policies | SQLite/PostgreSQL override migration round trip |
-| Reserved versus provider/usable quota | quota bar, dashboard donut and account editor suites |
-| Weekly pace uses usable capacity without scaling observed provider burn | weekly credit pace reserve test |
-
-No separate cap cache or second admission evaluator is introduced. Existing ownership, retry, trusted-access and additional-quota tests continue to cover the canonical gate.
-
-## September 18 migration integration
-
-Main now owns the forward-only `20260918_000000_merge_scim_and_overflow_heads` revision joining the released SCIM-token and subscription-overflow-removal histories. The usage-limit migration follows that revision, and the override migration follows the scalar migration. The topology checker treats their shared timestamp slot as historical because the main revision converges both branches. A missing convergence or additional collision still fails the checker; the single-head and cycle checks remain unchanged.
+Net growth by category: production: +2,672 to +2,648; tests: +8,006 to +7,802; docs: +925 to +906; other: +2 to +2.

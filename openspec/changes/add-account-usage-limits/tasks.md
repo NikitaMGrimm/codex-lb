@@ -38,6 +38,6 @@
 
 ## Published PR audit
 
-- [ ] 25. Audit the published head `242a0f937` against base `ec994599`, reproduce and fix contract violations across policy, routing, owner lifecycle, telemetry, migrations, and dashboard flows.
-- [ ] 26. Consolidate redundant implementation and tests while retaining distinct public-path and concurrency coverage.
-- [ ] 27. Verify the corrected published implementation and report the entire PR's before/after diff against the same base.
+- [x] 25. Audit the published head `242a0f937` against base `ec994599`, reproduce and fix contract violations across policy, routing, owner lifecycle, telemetry, migrations, and dashboard flows.
+- [x] 26. Consolidate redundant implementation and tests while retaining distinct public-path and concurrency coverage.
+- [x] 27. Verify the corrected published implementation and report the entire PR's before/after diff against the same base.

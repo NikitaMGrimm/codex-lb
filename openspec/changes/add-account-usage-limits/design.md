@@ -46,11 +46,6 @@ Every synthetic warmup surface uses the same hard policy. The public `/v1/warmup
 
 `PUT /api/accounts/{account_id}/usage-limit` accepts the enabled flag, optional default percentage, and optional 5-hour and weekly override percentages. An omitted percentage retains its stored value; explicit null clears it. The API returns all persisted policy fields, invalidates the local selection-input cache, and emits the existing account-selection invalidation signal for peers. Account summaries expose the fields and evaluated state. The Accounts page edits shared and applicable window reserves, with `10% reserved` corresponding to a `90% maximum used` API threshold. The dashboard initializes editable values from persisted numbers without decimal-place quantization, so every API-valid percentage remains valid and unchanged until the operator edits it.
 
-### D6: The guarantee is observation-bound
-
-Codex LB cannot know the upstream percentage cost of a request before sending it. Fresh selection observes the bounded global-cache invalidation contract, while continuity-pinned HTTP bridge and WebSocket dispatches perform the account-scoped database authorization described above. Once either path observes a current standard usage value at or above the cap, it stops new dispatches for that owner until the window resets, telemetry becomes current below the cap, or the operator disables/removes the cap. Live observations retain the existing five-second trailing invalidation bound so high-frequency telemetry cannot keep the global selection cache cold. The UI explains that delayed upstream reporting, propagation delay for fresh selection, and in-flight requests can overshoot the displayed percentage.
-
-
 ### D7: Owner authorization is a total decision, not an optional policy state
 
 `app/modules/usage/authorization.py` owns `OwnerAuthorization`, whose kind is
@@ -64,8 +59,9 @@ can apply their separate short-window heuristic without another read.
 `response.create`, public warmup, limit warmup, and quota warmup consume this
 contract. Warmups request an active owner; ordinary routing still owns transient
 rate-limit/quota recovery and additional-quota semantics. Missing, paused,
-deactivated, and reauthentication-required owners are never allowed by a
-disabled policy. Repository/context failures are explicit local authorization
+and deactivated owners are unavailable regardless of policy. A reauthentication
+warning remains routable while its token is not known to have expired; transports
+reject a known-expired token. Repository/context failures are explicit local authorization
 failures. Cancellation remains an exception, not a policy state.
 
 A final selection attempt maps unavailable owners to
@@ -111,20 +107,12 @@ A real zero with reset/window metadata remains a measured sample; the legacy
 zero/no-metadata placeholder is not a sample. The SQLite direct-read predicate
 has equivalent semantics and is exercised along with PostgreSQL.
 
-No second current-state table or migration is added. That would introduce dual
-writes, backfill and mixed-version deployment concerns without addressing a
-measured scan problem. The existing indexed snapshot plus explicit decision and
-measurement projections resolve the reproduced failures without another source
-of truth. A future storage redesign would need its own ingestion/upgrade
-analysis, not an unverified optimization inside this fix.
-
 ### D10: Local authorization failure is not upstream HTTP telemetry
 
 `account_usage_limit_authorization_failed` is registered as a local proxy error,
 so full request-log metadata leaves upstream HTTP status absent for a local
-503. This change does not claim a change to account health or circuit-breaker
-penalties. A shared error-origin framework is deliberately not introduced into
-unrelated proxy failures.
+503. The local failure retains its provenance without changing account health or
+circuit-breaker penalties.
 
 ### D11: Policy edits are serialized through cache reconciliation
 
@@ -188,14 +176,3 @@ cached ordinary selection adds no database reads for this policy check.
 ## Migration
 
 The scalar Alembic revision follows upstream `20260918_000000_merge_scim_and_overflow_heads` and adds `usage_limit_enabled` and nullable `usage_limit_percent` with range and enabled/value checks. Existing accounts remain disabled with no percentage. The subsequent `20260910_010000_add_usage_limit_overrides` revision adds nullable 5-hour and weekly percentages, checks each range, and permits an enabled policy when any of the three percentages is present. Downgrading the override revision first disables policies that have no scalar percentage; downgrading the scalar revision then removes its checks and columns. Batch operations support SQLite and PostgreSQL round trips.
-
-## Test plan
-
-- Pure evaluator tests for disabled, available, reached, stale, missing, elapsed, weekly-only, and monthly-only windows.
-- Selector tests proving equality blocks, one limited account falls back to another, all-limited returns the stable error, locally blocked accounts cannot enter backoff fallback, and standard limits survive the additional-quota bypass flag.
-- Load-balancer tests proving standard rows gate a request whose ranking rows come from an additional quota and sticky selection cannot reuse a capped account.
-- Accounts API/service/mapper tests for set, disable-retain, remove, validation, response state, and cache invalidation.
-- Migration upgrade/downgrade/upgrade coverage.
-- Dashboard schema, request hook, control interaction, and reached-state presentation tests.
-- Reused HTTP bridge admission tests for retained and released leases, including public policy errors and drain-safe retirement.
-- Quota planner and execution-gate tests for reached, unavailable, available, and disabled usage-limit states.
