@@ -41,6 +41,7 @@ If the final policy read fails, the new frame MUST fail closed with `account_usa
 HTTP bridge policy reads MUST NOT hold the pending-response lock. A failed read MUST reject the new turn with `account_usage_limit_authorization_failed`, without interrupting already-admitted turns.
 
 Live standard usage writes for capped accounts MUST invalidate selection inputs immediately. Uncapped accounts MUST retain throttled selection invalidation so their ranking and quota-status recovery receive committed observations.
+Snapshot deduplication MUST preserve reported percentage precision so an observation crossing a configured cap is not discarded as unchanged.
 
 #### Scenario: Equality reaches the limit
 

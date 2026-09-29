@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -261,6 +262,40 @@ async def test_uncapped_live_usage_refreshes_cached_routing_after_throttled_inva
         await ingestor._trailing_invalidate(0.0)
         refreshed = await balancer._load_selection_inputs(model=None)
         assert refreshed.latest_primary[account_id].used_percent == 10.0
+    finally:
+        await ingestor.stop()
+
+
+@pytest.mark.asyncio
+async def test_live_usage_preserves_subcent_precision_when_crossing_a_cap(db_setup) -> None:
+    del db_setup
+    account_id = "acc_live_precise_cap"
+    account = _make_account(account_id, "precise-cap@example.com")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 50.0
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=60.0)
+    balancer = LoadBalancer(_proxy_repositories)
+    below = _snapshot()
+    assert below.primary is not None
+    below = replace(below, primary=replace(below.primary, used_percent=49.999))
+    assert below.primary is not None
+    reached = replace(below, primary=replace(below.primary, used_percent=50.0))
+    try:
+        await ingestor._ingest(
+            live_ingest._QueuedSnapshot(account_id=account_id, chatgpt_account_id=None, snapshot=below)
+        )
+        admitted = await balancer.select_account()
+        assert admitted.account is not None
+
+        await ingestor._ingest(
+            live_ingest._QueuedSnapshot(account_id=account_id, chatgpt_account_id=None, snapshot=reached)
+        )
+        denied = await balancer.select_account()
+        assert denied.account is None
+        assert denied.error_code == "account_usage_limit_reached"
     finally:
         await ingestor.stop()
 

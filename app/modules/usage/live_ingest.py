@@ -80,7 +80,7 @@ def _fingerprint(snapshot: LiveRateLimitSnapshot) -> tuple[object, ...]:
     def window_key(window: LiveUsageWindow | None) -> tuple[object, ...] | None:
         if window is None:
             return None
-        return (round(window.used_percent, 2), window.window_minutes, window.reset_at)
+        return (window.used_percent, window.window_minutes, window.reset_at)
 
     return (
         window_key(snapshot.primary),

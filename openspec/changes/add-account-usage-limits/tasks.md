@@ -16,4 +16,4 @@
 - [ ] 14. Keep HTTP bridge authorization waits outside pending-response locks and preserve typed failures.
 - [ ] 15. Remove redundant frontend validation and misleading mock policy states.
 - [ ] 16. Verify the audited change with backend, frontend, migration, and OpenSpec checks.
-- [ ] 17. Preserve telemetry precision when deduplicating observations across a cap.
+- [x] 17. Preserve telemetry precision when deduplicating observations across a cap.
