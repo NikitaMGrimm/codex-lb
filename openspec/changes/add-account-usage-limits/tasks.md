@@ -35,3 +35,9 @@
 - [x] 22. Re-enable saved account thresholds atomically and cover omitted and explicitly cleared fields at the API.
 - [x] 23. Guard partial-schema override migration downgrades and verify the downgrade path.
 - [x] 24. Run focused regressions, lint, type checks, migration topology, and strict OpenSpec validation.
+
+## Published PR audit
+
+- [ ] 25. Audit the published head `242a0f937` against base `ec994599`, reproduce and fix contract violations across policy, routing, owner lifecycle, telemetry, migrations, and dashboard flows.
+- [ ] 26. Consolidate redundant implementation and tests while retaining distinct public-path and concurrency coverage.
+- [ ] 27. Verify the corrected published implementation and report the entire PR's before/after diff against the same base.

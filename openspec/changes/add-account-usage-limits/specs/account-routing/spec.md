@@ -155,6 +155,13 @@ Each account SHALL support an optional default maximum standard-quota used perce
 - **THEN** the policy is disabled
 - **AND** the stored maximum remains 20 percent
 
+#### Scenario: Stale dashboard re-enables the current saved policy
+
+- **GIVEN** a dashboard has cached a disabled policy and another client changes its saved thresholds
+- **WHEN** the stale dashboard re-enables the policy
+- **THEN** it MUST send only the enabled flag and retain the current stored thresholds
+- **AND** if the stored policy has been removed, the request MUST fail without restoring cached thresholds
+
 #### Scenario: Operator removes a configured limit
 
 - **GIVEN** an account has a configured maximum usage
@@ -171,6 +178,8 @@ If the final direct owner-policy snapshot read fails, the new turn MUST fail clo
 
 Each newly admitted `response.create` on an existing proxy WebSocket MUST re-evaluate the socket-pinned account through the same standard usage-limit policy. Authorization MUST precede response-create lease acquisition so concurrency exhaustion cannot mask an owner-policy denial, and MUST run again immediately before dispatch to catch policy changes during admission. Each authorization wait MUST have a five-second deadline. After the final authorization wait, a pending upstream reconnect MUST transfer the unsent frame through the existing reconnect path before dispatch. The sender MUST atomically verify that the pending frame still owns dispatch and has not expired before binding its owner or sending upstream; a frame already finalized by the reader MUST NOT be dispatched or finalized again. A `reached` or `data_unavailable` result MUST reject only the new frame with `account_usage_limit_reached` before upstream dispatch, without disrupting already-admitted responses on the shared socket.
 If a policy read fails or times out, the new frame MUST fail closed with `account_usage_limit_authorization_failed` before upstream dispatch, without retiring the shared upstream or disrupting already-admitted responses. Cancellation MUST continue to propagate.
+
+A response-create lease acquired after the reader has finalized its pending frame MUST be released before the sender continues. The sender MUST NOT dispatch that frame or duplicate its terminal response, reservation settlement, or request log.
 
 #### Scenario: Equality reaches the limit
 

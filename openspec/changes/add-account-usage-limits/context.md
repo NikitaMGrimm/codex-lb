@@ -1,5 +1,9 @@
 # Reconciliation with PR #2147
 
+## Published PR audit baseline
+
+The audit starts at the actual GitHub PR #1528 head `242a0f937`, against its base `ec994599`: 12,390 additions, 785 deletions, 135 files. Work is local on `fix/pr1528-usage-audit` in a separate worktree; the older scalar-only checkout and its commits are preserved. Verification uses this head's frozen Python and frontend dependency locks.
+
 Compared against Soju06/codex-lb#2147 at f777d8ec1cc65caf98687b02feff401e3f787a49. The table records the proposals before their behavior was consolidated into this PR. The current implementation is described below.
 
 ## Pre-consolidation baselines
