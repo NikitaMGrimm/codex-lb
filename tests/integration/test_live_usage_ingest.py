@@ -791,7 +791,7 @@ async def test_postgresql_live_ingest_recovers_when_current_identity_reconciliat
 
     reconciliation_commit_started = asyncio.Event()
     release_reconciliation_commit = asyncio.Event()
-    settlement_local_lookup_started = asyncio.Event()
+    settlement_local_lookup_observed = asyncio.Event()
     settlement_session = SessionLocal()
     reconciliation_session = SessionLocal()
     settlement_task: asyncio.Task[None] | None = None
@@ -800,10 +800,13 @@ async def test_postgresql_live_ingest_recovers_when_current_identity_reconciliat
     reconciliation_commit = reconciliation_session.commit
 
     async def _settlement_execute(statement: Any, *args: Any, **kwargs: Any):
+        result = await settlement_execute(statement, *args, **kwargs)
         sql = str(statement)
         if sql.startswith("SELECT accounts.id, accounts.chatgpt_account_id") and "WHERE accounts.id =" in sql:
-            settlement_local_lookup_started.set()
-        return await settlement_execute(statement, *args, **kwargs)
+            # The recovery identity must be observed before reconciliation
+            # commits; starting execute() does not establish an MVCC snapshot.
+            settlement_local_lookup_observed.set()
+        return result
 
     async def _reconciliation_commit() -> None:
         reconciliation_commit_started.set()
@@ -830,7 +833,7 @@ async def test_postgresql_live_ingest_recovers_when_current_identity_reconciliat
         await asyncio.wait_for(reconciliation_commit_started.wait(), timeout=5.0)
 
         settlement_task = asyncio.create_task(ingestor._ingest(queued))
-        await asyncio.wait_for(settlement_local_lookup_started.wait(), timeout=5.0)
+        await asyncio.wait_for(settlement_local_lookup_observed.wait(), timeout=5.0)
         assert not settlement_task.done()
 
         release_reconciliation_commit.set()

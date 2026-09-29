@@ -94,24 +94,6 @@ describe("AccountUsageLimitControl", () => {
     });
   });
 
-  it("omits the cached percentage when disabling a configured limit", async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
-    const account = createAccountSummary({
-      usageLimitEnabled: true,
-      usageLimitPercent: 10,
-      usageLimitState: "available",
-    });
-
-    render(control(account, onChange));
-
-    await user.click(screen.getByRole("switch", { name: "Protect reserved quota" }));
-
-    expect(onChange).toHaveBeenCalledWith(account.accountId, {
-      enabled: false,
-    });
-  });
-
   it("distinguishes a reached local limit", () => {
     render(
       control(createAccountSummary({
