@@ -10,3 +10,9 @@
 - [x] 8. Run focused backend/frontend, migration, precision, telemetry-freshness, error-precedence, continuity, and warmup regressions plus lint, formatting, type, architecture, and OpenSpec checks.
 - [x] 9. Resolve final review findings for warmup spec ownership, opportunistic error precedence, dashboard blocked-state display, and accessible percentage validation.
 - [x] 10. Make disable-retain atomic across the account API and dashboard, with stale-client regressions.
+- [ ] 11. Preserve throttled selection invalidation for uncapped live telemetry.
+- [ ] 12. Preserve caller exhaustion controls when every account is locally blocked.
+- [ ] 13. Close WebSocket dispatch races across admission and authorization waits.
+- [ ] 14. Keep HTTP bridge authorization waits outside pending-response locks and preserve typed failures.
+- [ ] 15. Remove redundant frontend validation and misleading mock policy states.
+- [ ] 16. Verify the audited change with backend, frontend, migration, and OpenSpec checks.

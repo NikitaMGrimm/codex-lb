@@ -35,7 +35,12 @@ For an account with an enabled maximum usage policy, the selector MUST evaluate 
 Each newly admitted logical HTTP bridge turn MUST re-evaluate its continuity-pinned account through the same standard usage-limit policy, including when a reused bridge retains its stream lease and when an idle bridge would otherwise reacquire that lease. A policy denial MUST occur before the new turn is queued or sent, MUST use the `account_usage_limit_reached` response contract, and MUST retire the bridge after already-admitted turns drain without rebinding or disrupting their ownership and settlement. If the pinned account no longer exists or becomes administratively unavailable, admission MUST fail closed with the established bridge continuity-lost response and retire the bridge without creating a new runtime lease for that owner.
 
 Each newly admitted `response.create` on an existing proxy WebSocket MUST re-evaluate the socket-pinned account through the same standard usage-limit policy. A `reached` or `data_unavailable` result MUST reject only the new frame with `account_usage_limit_reached` before upstream dispatch, without disrupting already-admitted responses on the shared socket.
+The policy MUST be checked again after account-cap admission waits and before dispatch. After an asynchronous policy read, dispatch MUST atomically verify that the request is still pending and has not expired or been finalized. A request already finalized during the read MUST NOT be dispatched or finalized twice. Policy reads MUST remain bounded by the request deadline.
 If the final policy read fails, the new frame MUST fail closed with `account_usage_limit_authorization_failed` before upstream dispatch, without retiring the shared upstream or disrupting already-admitted responses. Cancellation MUST continue to propagate.
+
+HTTP bridge policy reads MUST NOT hold the pending-response lock. A failed read MUST reject the new turn with `account_usage_limit_authorization_failed`, without interrupting already-admitted turns.
+
+Live standard usage writes for capped accounts MUST invalidate selection inputs immediately. Uncapped accounts MUST retain throttled selection invalidation so their ranking and quota-status recovery receive committed observations.
 
 #### Scenario: Equality reaches the limit
 
