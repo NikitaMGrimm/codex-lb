@@ -44,3 +44,4 @@
 - [x] 28. Fail closed for overrides with unknown plan capacity and verify public selection and bridge authorization.
 - [x] 29. Align mock override eligibility with the required-window contract and verify frontend regressions.
 - [x] 30. Verify existing-schema override upgrades and include both PostgreSQL policy round trips in CI.
+- [x] 31. Bound the reconnect regression's worker-thread waits and release them before test teardown.

@@ -5190,7 +5190,8 @@ def test_v1_responses_websocket_reconnects_when_owner_auth_outlives_socket(app_i
 
     class _ClosingUpstreamWebSocket(_FakeUpstreamWebSocket):
         async def receive(self) -> _FakeUpstreamMessage:
-            await asyncio.to_thread(close_first.wait)
+            closed = await asyncio.to_thread(close_first.wait, 5)
+            assert closed, "the test must request upstream closure"
             return _FakeUpstreamMessage("close", close_code=1000)
 
     first_upstream = _ClosingUpstreamWebSocket([])
@@ -5223,7 +5224,8 @@ def test_v1_responses_websocket_reconnects_when_owner_auth_outlives_socket(app_i
         authorization_calls += 1
         if authorization_calls == 2:
             close_first.set()
-            await asyncio.to_thread(first_upstream.closed_event.wait)
+            closed = await asyncio.to_thread(first_upstream.closed_event.wait, 2)
+            assert closed, "the proxy must retire the first upstream while owner authorization is pending"
         return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
@@ -5232,15 +5234,16 @@ def test_v1_responses_websocket_reconnects_when_owner_auth_outlives_socket(app_i
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
-    try:
-        with TestClient(app_instance) as client:
-            with client.websocket_connect("/v1/responses") as websocket:
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/v1/responses") as websocket:
+            try:
                 websocket.send_text(json.dumps(_websocket_response_create("reconnect after auth")))
-                events = [json.loads(websocket.receive_text()) for _ in range(2)]
-    finally:
-        close_first.set()
+                for expected_type in ("response.created", "response.completed"):
+                    assert json.loads(websocket.receive_text())["type"] == expected_type
+            finally:
+                close_first.set()
+                first_upstream.closed_event.set()
 
-    assert [event["type"] for event in events] == ["response.created", "response.completed"]
     assert first_upstream.sent_text == []
     assert len(second_upstream.sent_text) == 1
     assert authorization_calls >= 3
