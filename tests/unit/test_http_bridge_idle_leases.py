@@ -410,7 +410,7 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        started_at=proxy_service.time.monotonic(),
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
@@ -463,7 +463,7 @@ async def test_turn_rechecks_usage_policy_after_prewarm_before_queue_admission(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        started_at=proxy_service.time.monotonic(),
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
@@ -504,8 +504,7 @@ async def test_turn_fails_closed_when_pinned_owner_is_missing() -> None:
     )
 
     with pytest.raises(ProxyResponseError) as exc_info:
-        async with session.pending_lock:
-            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+        await mixin._authorize_http_bridge_account_usage(cast(Any, fake_self), session)
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
@@ -549,7 +548,7 @@ async def test_final_lease_check_failure_removes_admission_waiter(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        started_at=proxy_service.time.monotonic(),
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
@@ -627,7 +626,7 @@ async def test_stale_finalizer_cannot_release_lease_reacquired_for_new_turn(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        started_at=proxy_service.time.monotonic(),
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
@@ -694,7 +693,7 @@ async def test_prewarm_failure_retires_closed_session_after_last_waiter(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        started_at=proxy_service.time.monotonic(),
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
@@ -774,7 +773,7 @@ async def test_prewarm_cancellation_cannot_interrupt_waiter_cleanup(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        started_at=proxy_service.time.monotonic(),
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
@@ -828,7 +827,7 @@ async def test_queue_full_submit_unregisters_admission_waiter(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=1.0,
+        started_at=proxy_service.time.monotonic(),
         awaiting_response_created=True,
         event_queue=asyncio.Queue(),
         request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',

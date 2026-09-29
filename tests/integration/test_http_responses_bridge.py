@@ -4610,10 +4610,12 @@ async def test_v1_responses_http_bridge_revalidates_usage_limit_before_second_tu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("policy_read", ["reached", "failed", "stalled_reached", "stalled_failed"])
 async def test_v1_responses_http_bridge_usage_limit_rejects_only_overlapping_new_turn(
     async_client,
     app_instance,
     monkeypatch,
+    policy_read,
 ) -> None:
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -4711,6 +4713,9 @@ async def test_v1_responses_http_bridge_usage_limit_rejects_only_overlapping_new
         "prompt_cache_key": prompt_cache_key,
     }
     first_task = asyncio.create_task(async_client.post("/v1/responses", json=payload))
+    second_task = None
+    authorization_started = asyncio.Event()
+    finish_authorization = asyncio.Event()
     try:
         await _wait_for_event(upstream.first_request_sent)
         bridge_key = proxy_module._HTTPBridgeSessionKey("prompt_cache", prompt_cache_key, None)
@@ -4722,28 +4727,57 @@ async def test_v1_responses_http_bridge_usage_limit_rejects_only_overlapping_new
             json={"enabled": True, "percent": 10.0},
         )
         assert changed.status_code == 200
-        second = await async_client.post(
-            "/v1/responses",
-            json={**payload, "input": "second turn"},
-        )
+        original_check = service._load_balancer.check_account_usage_limit
+        read_fails = policy_read.endswith("failed")
+        read_stalls = policy_read.startswith("stalled")
 
+        async def check_usage(account_id):
+            authorization_started.set()
+            if read_stalls:
+                await finish_authorization.wait()
+            if read_fails:
+                raise RuntimeError("Usage database unavailable")
+            return await original_check(account_id)
+
+        monkeypatch.setattr(service._load_balancer, "check_account_usage_limit", check_usage)
+        second_task = asyncio.create_task(async_client.post("/v1/responses", json={**payload, "input": "second turn"}))
+        if read_stalls:
+            await _wait_for_event(authorization_started)
+            await upstream.complete_first_response()
+            # A slow policy read cannot prevent the reader settling an older
+            # response on this same bridge.
+            first = await asyncio.wait_for(asyncio.shield(first_task), timeout=2.0)
+            finish_authorization.set()
+        second = await asyncio.wait_for(asyncio.shield(second_task), timeout=5.0)
         assert second.status_code == 503
-        assert second.json()["error"]["code"] == "account_usage_limit_reached"
+        expected_code = "account_usage_limit_authorization_failed" if read_fails else "account_usage_limit_reached"
+        assert second.json()["error"]["code"] == expected_code
         assert len(upstream.sent_text) == 1
-        assert upstream.closed is False
-
-        await upstream.complete_first_response()
-        first = await first_task
+        if not read_stalls:
+            assert upstream.closed is False
+            await upstream.complete_first_response()
+            first = await asyncio.wait_for(asyncio.shield(first_task), timeout=5.0)
         assert first.status_code == 200
         assert first.json()["id"] == "resp_usage_limit_overlap"
-        await _wait_for_event(upstream.closed_event)
-        assert bridge_session.closed is True
-        assert upstream.closed is True
+        if not read_fails:
+            await _wait_for_event(upstream.closed_event)
+            assert bridge_session.closed is True
+            assert upstream.closed is True
+        else:
+            assert bridge_session.closed is False
+            assert upstream.closed is False
         assert bridge_session.account_lease is None
     finally:
+        finish_authorization.set()
         if not first_task.done():
             await upstream.complete_first_response()
-            await first_task
+        tasks = [first_task, *([second_task] if second_task is not None else [])]
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=5.0)
+        except TimeoutError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -153,6 +153,7 @@ from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _api_key_fair_share_threshold_pct_from_settings,
+    _check_account_usage_limit,
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
@@ -1545,6 +1546,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_enqueued = False
         admission_waiter_registered = False
         try:
+            await self._authorize_http_bridge_account_usage(session, request_state=request_state)
             async with session.pending_lock:
                 await self._ensure_http_bridge_session_stream_lease_locked(session, request_state=request_state)
                 # Register the submit as an admission waiter atomically with the
@@ -1581,6 +1583,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 text_data=text_data,
             )
+            await self._authorize_http_bridge_account_usage(session, request_state=request_state)
             async with session.pending_lock:
                 if session.queued_request_count >= queue_limit:
                     _log_http_bridge_event(
@@ -1651,6 +1654,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.latency_bridge_queue_wait_ms = int(
                     max(0.0, _service_time().monotonic() - request_state.bridge_queue_wait_started_at) * 1000
                 )
+            await self._authorize_http_bridge_account_usage(session, request_state=request_state)
             async with session.lifecycle_lock:
                 current_session = session
                 http_bridge_sessions = getattr(self, "_http_bridge_sessions", None)
@@ -2157,6 +2161,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 transport=_REQUEST_TRANSPORT_HTTP,
                 request_text=warmup_text,
                 skip_request_log=True,
+                bridge_request_deadline=request_state.bridge_request_deadline,
             )
             gate_acquired = False
             request_enqueued = False
@@ -2172,6 +2177,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     bridge_session=session,
                 )
                 gate_acquired = True
+                await self._authorize_http_bridge_account_usage(session, request_state=warmup_state)
                 async with session.lifecycle_lock:
                     current_session = session
                     http_bridge_sessions = getattr(self, "_http_bridge_sessions", None)
@@ -2464,6 +2470,40 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         await self._maybe_release_idle_http_bridge_session_lease(session)
 
+    async def _authorize_http_bridge_account_usage(
+        self,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState | None = None,
+    ) -> None:
+        """Check the pinned owner without holding response lifecycle locks."""
+        load_balancer = getattr(self, "_load_balancer", None)
+        if load_balancer is None:
+            return
+        settings = _service_get_settings()
+        deadline = (
+            request_state.bridge_request_deadline
+            if request_state is not None and request_state.bridge_request_deadline is not None
+            else (request_state.started_at if request_state is not None else _service_time().monotonic())
+            + _http_bridge_request_budget_seconds(settings)
+        )
+        usage_limit_state = await _check_account_usage_limit(load_balancer, session.account.id, deadline=deadline)
+        if usage_limit_state is None:
+            session.upstream_control.reconnect_requested = True
+            session.upstream_control.retire_after_drain = True
+            raise _http_bridge_previous_response_owner_unavailable_error()
+        if usage_limit_state.blocks_account_use:
+            session.upstream_control.reconnect_requested = True
+            session.upstream_control.retire_after_drain = True
+            status_code, error_payload = selection_failure_response(
+                AccountSelection(
+                    account=None,
+                    error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+                    error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+                )
+            )
+            raise ProxyResponseError(status_code, error_payload)
+
     async def _ensure_http_bridge_session_stream_lease_locked(
         self: Any,
         session: "_HTTPBridgeSession",
@@ -2477,11 +2517,6 @@ class _HTTPBridgeRequestSubmitMixin:
         occupy a per-account stream slot; the next turn must pass normal cap
         admission again. Denial raises the standard local-cap envelope so the
         existing recoverable capacity wait applies.
-
-        Every admission check first revalidates the continuity-pinned account's
-        local usage policy, including sessions that still hold their lease. The
-        submit path calls this before prewarm and again immediately before queue
-        admission so a policy change during that gap cannot dispatch the turn.
 
         The lease stays per-session (one upstream stream): a session that
         already holds a lease admits further queued turns without acquiring
@@ -2498,22 +2533,6 @@ class _HTTPBridgeRequestSubmitMixin:
         load_balancer = getattr(self, "_load_balancer", None)
         if load_balancer is None:
             return
-        usage_limit_state = await load_balancer.check_account_usage_limit(session.account.id)
-        if usage_limit_state is None:
-            session.upstream_control.reconnect_requested = True
-            session.upstream_control.retire_after_drain = True
-            raise _http_bridge_previous_response_owner_unavailable_error()
-        if usage_limit_state.blocks_account_use:
-            session.upstream_control.reconnect_requested = True
-            session.upstream_control.retire_after_drain = True
-            status_code, error_payload = selection_failure_response(
-                AccountSelection(
-                    account=None,
-                    error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
-                    error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
-                )
-            )
-            raise ProxyResponseError(status_code, error_payload)
         if session.account_lease is not None or session.closed:
             return
         api_key_id = session.key.api_key_id

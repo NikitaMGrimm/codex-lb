@@ -33654,7 +33654,7 @@ async def test_proxy_responses_websocket_releases_reservation_on_local_account_c
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=reservation,
-        started_at=10.0,
+        started_at=proxy_service.time.monotonic(),
         request_text=request_text,
         awaiting_response_created=True,
         affinity_policy=affinity,
@@ -44999,7 +44999,7 @@ async def test_http_bridge_session_events_keepalive_backstop_uses_replay_downstr
 @pytest.mark.asyncio
 async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    service = proxy_service.ProxyService(_repo_factory(request_logs, accounts=[_make_account("acc_prewarm_timeout")]))
     settings = _make_proxy_settings()
     settings.http_responses_session_bridge_codex_prewarm_enabled = True
 
