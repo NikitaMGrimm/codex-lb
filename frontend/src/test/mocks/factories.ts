@@ -889,6 +889,7 @@ export function createDashboardSettings(
 		proxyAccountLeaseTtlSeconds: 900,
 		weeklyPaceWorkingDays: "0,1,2,3,4,5,6",
 		weeklyPaceSmoothingMinutes: 30,
+		proWeeklyCapacityMultiplier: null,
 		openaiCacheAffinityMaxAgeSeconds: 300,
 		dashboardSessionTtlSeconds: 31536000,
 		stickyReallocationBudgetThresholdPct: 95,

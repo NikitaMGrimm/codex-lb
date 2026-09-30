@@ -14,7 +14,8 @@ from app.modules.dashboard.builders import (
     build_overview_timeframe,
     resolve_overview_timeframe,
 )
-from app.modules.dashboard.repository import DashboardRepository
+from app.modules.dashboard.quota_lb_share import estimate_quota_lb_share
+from app.modules.dashboard.repository import DashboardRepository, QuotaObservation
 from app.modules.dashboard.schemas import (
     DashboardMetricsComparison,
     DashboardMetricsComparisonPrevious,
@@ -24,6 +25,8 @@ from app.modules.dashboard.schemas import (
     DashboardSubscriptionOverflow,
     DashboardUsageWindows,
     DepletionResponse,
+    QuotaLbShareEstimate,
+    QuotaLbShareResponse,
     WeeklyCreditApiKeyAttribution,
     WeeklyCreditPaceResponse,
 )
@@ -86,6 +89,89 @@ class DashboardService:
     def __init__(self, repo: DashboardRepository) -> None:
         self._repo = repo
         self._encryptor = TokenEncryptor()
+
+    async def get_quota_lb_share(self) -> QuotaLbShareResponse:
+        now = utcnow()
+        accounts = await self._repo.list_accounts()
+        settings = await self._repo.get_settings()
+        primary = await self._repo.latest_usage_by_account("primary")
+        secondary = await self._repo.latest_usage_by_account("secondary")
+        monthly = await self._repo.latest_usage_by_account("monthly")
+        window_minutes_by_account: dict[str, int] = {}
+        capacity_by_account: dict[str, float] = {}
+        for account in accounts:
+            weekly_capacity = usage_core.capacity_for_plan(account.plan_type, "secondary")
+            monthly_capacity = usage_core.capacity_for_plan(account.plan_type, "monthly")
+            monthly_row = monthly.get(account.id)
+            if monthly_capacity is not None and monthly_capacity > 0 and monthly_row is not None:
+                if monthly_row.window_minutes != 43200:
+                    continue
+                latest, capacity = monthly_row, monthly_capacity
+            elif weekly_capacity is not None and weekly_capacity > 0:
+                if account.plan_type.lower() == "pro" and settings.pro_weekly_capacity_multiplier is not None:
+                    plus_capacity = usage_core.capacity_for_plan("plus", "secondary")
+                    assert plus_capacity is not None
+                    weekly_capacity = plus_capacity * settings.pro_weekly_capacity_multiplier
+                primary_row = primary.get(account.id)
+                secondary_row = secondary.get(account.id)
+                if primary_row is not None and _should_use_weekly_primary_history(primary_row, secondary_row):
+                    latest = primary_row
+                elif secondary_row is not None and secondary_row.window_minutes == 10080:
+                    latest = secondary_row
+                else:
+                    continue
+                capacity = weekly_capacity
+            else:
+                continue
+            if now - latest.recorded_at > timedelta(minutes=5):
+                continue
+            window_minutes_by_account[account.id] = latest.window_minutes
+            capacity_by_account[account.id] = capacity
+        if len(window_minutes_by_account) < 3:
+            return QuotaLbShareResponse()
+
+        baselines: dict[str, QuotaObservation] = {}
+        for account_id, window_minutes in window_minutes_by_account.items():
+            row = await self._repo.latest_full_long_observation(
+                account_id, window_minutes, now - timedelta(days=30), now
+            )
+            if row is not None:
+                baselines[account_id] = row
+        if not baselines:
+            return QuotaLbShareResponse()
+        observations = await self._repo.long_quota_observations(
+            window_minutes_by_account,
+            min(row.recorded_at for row in baselines.values()),
+            now,
+        )
+        rows_by_account: dict[str, list[QuotaObservation]] = {}
+        for row in observations:
+            rows_by_account.setdefault(row.account_id, []).append(row)
+
+        estimates: list[QuotaLbShareEstimate] = []
+        for account_id in baselines:
+            target_rows = rows_by_account.get(account_id, [])
+            if not target_rows or now - target_rows[-1].recorded_at > timedelta(minutes=5):
+                continue
+            last_full = next((row for row in reversed(target_rows) if row.used_percent >= 100), None)
+            if last_full is None:
+                continue
+            references = {peer_id: rows for peer_id, rows in rows_by_account.items() if peer_id != account_id}
+            costs = await self._repo.successful_costs_by_account(
+                [account_id, *references], last_full.recorded_at, target_rows[-1].recorded_at
+            )
+            estimate = estimate_quota_lb_share(
+                account_id=account_id,
+                target_rows=target_rows,
+                target_capacity_credits=capacity_by_account[account_id],
+                window_minutes=window_minutes_by_account[account_id],
+                reference_rows=references,
+                reference_capacities=capacity_by_account,
+                costs_by_account=costs,
+            )
+            if estimate is not None:
+                estimates.append(estimate)
+        return QuotaLbShareResponse(estimates=estimates)
 
     async def get_overview(
         self,

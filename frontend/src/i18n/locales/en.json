@@ -732,6 +732,8 @@
   "dashboard.filters.sources": "Source",
   "dashboard.filters.statuses": "Statuses",
   "dashboard.filters.timeframe": "Timeframe",
+  "dashboard.lbShare.explainer": "Estimated share of this quota used by successful requests through Codex LB since the last 100% observation. Calibrated from other accounts using their subscription-credit capacities and any configured Pro ratio; direct use and request mix can affect the estimate. It does not identify a person.",
+  "dashboard.lbShare.label": "≈{{percent}}% via LB",
   "dashboard.page.refresh": "Refresh dashboard",
   "dashboard.page.subtitle": "Overview, account health, and recent request logs.",
   "dashboard.page.title": "Dashboard",
@@ -2012,5 +2014,13 @@
   "organisation.group.summaryRestricted_other": "Company login is set up. {{count}} sign-in rules. Password sign-in is restricted.",
   "organisation.group.summaryPolicyOnly": "Password sign-in is restricted.",
   "access.errors.last_break_glass_protected": "This is the only emergency account that can still get in while password sign-in is restricted. Set up another one first.",
-  "access.errors.break_glass_requires_totp": "Turn on two-factor for the emergency account first. Without it, restricting password sign-in could lock everybody out."
+  "access.errors.break_glass_requires_totp": "Turn on two-factor for the emergency account first. Without it, restricting password sign-in could lock everybody out.",
+  "settings.lbAttribution.title": "LB usage attribution",
+  "settings.lbAttribution.description": "Set the Pro weekly capacity relative to Plus/Team for the approximate “via LB” indicator. This changes attribution only.",
+  "settings.lbAttribution.multiplier": "Pro / Plus weekly ratio",
+  "settings.lbAttribution.placeholder": "Use subscription credits",
+  "settings.lbAttribution.save": "Save ratio",
+  "settings.lbAttribution.reset": "Use credits",
+  "settings.lbAttribution.usingCredits": "Using maintained Subscription credit capacities.",
+  "settings.lbAttribution.current": "Pro weekly capacity is {{value}}× Plus."
 }

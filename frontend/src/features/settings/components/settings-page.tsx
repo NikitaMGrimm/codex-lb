@@ -27,6 +27,7 @@ import { ResilienceSettings } from "@/features/settings/components/resilience-se
 import { SessionBridgeSettings } from "@/features/settings/components/session-bridge-settings";
 import { BackgroundJobsSettings } from "@/features/settings/components/background-jobs-settings";
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
+import { LbAttributionSettings } from "@/features/settings/components/lb-attribution-settings";
 import { UpstreamTimeoutSettings } from "@/features/settings/components/upstream-timeout-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
@@ -251,6 +252,7 @@ export function SettingsPage() {
                 busy={controlsDisabled}
                 onSave={handleSave}
               />
+              <LbAttributionSettings key={settings.proWeeklyCapacityMultiplier ?? "default"} settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <ResilienceSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <SessionBridgeSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <BackgroundJobsSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />

@@ -14,6 +14,8 @@ import {
 } from "@/features/dashboard/account-credit-display";
 import { cn } from "@/lib/utils";
 import type { AccountSummary } from "@/features/dashboard/schemas";
+import type { QuotaLbShareEstimate } from "@/features/dashboard/schemas";
+import { QuotaLbShareIndicator } from "@/features/dashboard/components/quota-lb-share-indicator";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import {
   getAccountDisplayStatus,
@@ -31,6 +33,7 @@ export type AccountAction = "details" | "resume" | "reauth" | "warmup-toggle" | 
 
 export type AccountCardProps = {
   account: AccountSummary;
+  quotaLbShare?: QuotaLbShareEstimate;
   showAccountId?: boolean;
   readOnly?: boolean;
   onAction?: (account: AccountSummary, action: AccountAction) => void;
@@ -45,11 +48,13 @@ function QuotaBar({
   percent,
   cap,
   resetLabel,
+  quotaLbShare,
 }: {
   label: string;
   percent: number | null;
   cap?: number | null;
   resetLabel: string;
+  quotaLbShare?: QuotaLbShareEstimate;
 }) {
   const clamped = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   const hasPercent = percent !== null;
@@ -78,11 +83,12 @@ function QuotaBar({
         <span>{resetLabel}</span>
       </div>
       <UsageQuotaSummary percent={percent} cap={cap} />
+      {quotaLbShare ? <QuotaLbShareIndicator estimate={quotaLbShare} /> : null}
     </div>
   );
 }
 
-export function AccountCard({ account, showAccountId = false, readOnly = false, onAction }: AccountCardProps) {
+export function AccountCard({ account, quotaLbShare, showAccountId = false, readOnly = false, onAction }: AccountCardProps) {
   const { t } = useTranslation();
   const blurred = usePrivacyStore((s) => s.blurred);
   const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
@@ -167,11 +173,11 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
       {/* Quota bars */}
       <div className={cn("mt-3.5 grid gap-3", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-2")}>
         {monthlyOnly ? (
-          <QuotaBar label={t("common.time.monthly")} percent={monthlyRemaining} cap={account.effectiveLimitMonthly} resetLabel={monthlyReset} />
+          <QuotaBar label={t("common.time.monthly")} percent={monthlyRemaining} cap={account.effectiveLimitMonthly} resetLabel={monthlyReset} quotaLbShare={quotaLbShare?.windowMinutes === 43200 ? quotaLbShare : undefined} />
         ) : (
           <>
             {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} cap={account.effectiveLimitPrimary} resetLabel={primaryReset} />}
-            <QuotaBar label={t("common.time.weekly")} percent={secondaryRemaining} cap={account.effectiveLimitSecondary} resetLabel={secondaryReset} />
+            <QuotaBar label={t("common.time.weekly")} percent={secondaryRemaining} cap={account.effectiveLimitSecondary} resetLabel={secondaryReset} quotaLbShare={quotaLbShare?.windowMinutes === 10080 ? quotaLbShare : undefined} />
           </>
         )}
       </div>

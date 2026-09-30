@@ -182,6 +182,7 @@ export const DashboardSettingsSchema = z
       .default(100),
     weeklyPaceWorkingDays: WeeklyPaceWorkingDaysSchema,
     weeklyPaceSmoothingMinutes: WeeklyPaceSmoothingMinutesSchema.optional().default(30),
+    proWeeklyCapacityMultiplier: z.number().positive().max(1000).nullable().optional().default(null),
     guestAccessEnabled: z.boolean().optional().default(false),
     guestPasswordConfigured: z.boolean().optional().default(false),
     limitWarmupStaggeredIdleEnabled: z.boolean().optional().default(false),
@@ -321,6 +322,7 @@ export const SettingsUpdateRequestSchema = z
     limitWarmupMinAvailablePercent: z.number().positive().max(100).optional(),
     weeklyPaceWorkingDays: WeeklyPaceWorkingDaysValueSchema.optional(),
     weeklyPaceSmoothingMinutes: WeeklyPaceSmoothingMinutesSchema.optional(),
+    proWeeklyCapacityMultiplier: z.number().positive().max(1000).nullable().optional(),
     guestAccessEnabled: z.boolean().optional(),
     limitWarmupStaggeredIdleEnabled: z.boolean().optional(),
     // Tri-state overrides: absent = unchanged, null = clear (inherit env

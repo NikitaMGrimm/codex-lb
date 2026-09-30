@@ -12,7 +12,7 @@ import {
 } from "@/test/mocks/factories";
 import { useAccountMutations } from "@/features/accounts/hooks/use-accounts";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
-import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
+import { useDashboard, useDashboardProjections, useDashboardQuotaLbShare } from "@/features/dashboard/hooks/use-dashboard";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { REQUEST_LOG_TABLE_PREFERENCES_STORAGE_KEY } from "@/features/dashboard/hooks/use-request-log-table-preferences";
@@ -44,6 +44,7 @@ vi.mock("@/features/accounts/hooks/use-accounts", () => ({
 vi.mock("@/features/dashboard/hooks/use-dashboard", () => ({
   useDashboard: vi.fn(),
   useDashboardProjections: vi.fn(),
+  useDashboardQuotaLbShare: vi.fn(),
 }));
 
 vi.mock("@/features/dashboard/hooks/use-request-logs", async (importOriginal) => {
@@ -155,6 +156,7 @@ vi.mock("@/features/dashboard/components/weekly-credits-pace-card", () => ({
 const useAccountMutationsMock = vi.mocked(useAccountMutations);
 const useDashboardMock = vi.mocked(useDashboard);
 const useDashboardProjectionsMock = vi.mocked(useDashboardProjections);
+const useDashboardQuotaLbShareMock = vi.mocked(useDashboardQuotaLbShare);
 const useRequestLogsMock = vi.mocked(useRequestLogs);
 const useConversationsMock = vi.mocked(useConversations);
 const buildDashboardViewMock = vi.mocked(buildDashboardView);
@@ -188,6 +190,8 @@ describe("DashboardPage", () => {
     useAccountMutationsMock.mockReset();
     useDashboardMock.mockReset();
     useDashboardProjectionsMock.mockReset();
+    useDashboardQuotaLbShareMock.mockReset();
+    useDashboardQuotaLbShareMock.mockReturnValue({ data: { estimates: [] }, isFetching: false } as unknown as ReturnType<typeof useDashboardQuotaLbShare>);
     useRequestLogsMock.mockReset();
     useConversationsMock.mockReset();
     buildDashboardViewMock.mockReset();

@@ -732,6 +732,8 @@
   "dashboard.filters.sources": "来源",
   "dashboard.filters.statuses": "状态",
   "dashboard.filters.timeframe": "时间范围",
+  "dashboard.lbShare.explainer": "自上次观测到 100% 用量以来，经 Codex LB 成功请求占此配额的估计比例。依据其他账户的订阅积分容量及已设置的 Pro 比率校准；直接使用和请求组合会影响估计，且无法识别具体用户。",
+  "dashboard.lbShare.label": "≈{{percent}}% 经 LB",
   "dashboard.page.refresh": "刷新仪表盘",
   "dashboard.page.subtitle": "实时路由、账户健康与最近请求流量。",
   "dashboard.page.title": "仪表盘",
@@ -2012,5 +2014,13 @@
   "organisation.group.summaryRestricted_other": "公司登录已配置。{{count}} 条登录规则。密码登录已受限。",
   "organisation.group.summaryPolicyOnly": "密码登录已受限。",
   "access.errors.last_break_glass_protected": "在密码登录受限期间，这是唯一还能进入的应急账户。请先准备另一个。",
-  "access.errors.break_glass_requires_totp": "请先为应急账户启用两步验证。否则限制密码登录可能会把所有人都锁在外面。"
+  "access.errors.break_glass_requires_totp": "请先为应急账户启用两步验证。否则限制密码登录可能会把所有人都锁在外面。",
+  "settings.lbAttribution.title": "LB 用量归因",
+  "settings.lbAttribution.description": "设置 Pro 相对 Plus/Team 的每周容量比率，供“经 LB”估算使用。仅影响归因。",
+  "settings.lbAttribution.multiplier": "Pro / Plus 每周比率",
+  "settings.lbAttribution.placeholder": "使用订阅积分",
+  "settings.lbAttribution.save": "保存比率",
+  "settings.lbAttribution.reset": "使用积分",
+  "settings.lbAttribution.usingCredits": "使用维护的订阅积分容量。",
+  "settings.lbAttribution.current": "Pro 每周容量按 Plus 的 {{value}} 倍计算。"
 }

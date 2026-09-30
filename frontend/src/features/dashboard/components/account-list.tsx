@@ -14,6 +14,8 @@ import {
   formatPurchasedCredits,
 } from "@/features/dashboard/account-credit-display";
 import type { AccountSummary } from "@/features/dashboard/schemas";
+import type { QuotaLbShareEstimate } from "@/features/dashboard/schemas";
+import { QuotaLbShareIndicator } from "@/features/dashboard/components/quota-lb-share-indicator";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useSmoothPercent } from "@/hooks/use-smooth-percent";
@@ -34,6 +36,7 @@ const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2f
 
 type AccountListProps = {
   accounts: AccountSummary[];
+  quotaLbShares?: ReadonlyMap<string, QuotaLbShareEstimate>;
   readOnly?: boolean;
   sort?: AccountListSort;
   onSortChange?: (sort: AccountListSort) => void;
@@ -237,7 +240,7 @@ function SortHeader({
   );
 }
 
-function AccountQuotaCells({ account }: { account: AccountSummary }) {
+function AccountQuotaCells({ account, quotaLbShare }: { account: AccountSummary; quotaLbShare?: QuotaLbShareEstimate }) {
   const { t } = useTranslation();
   const primaryState = useSmoothPercent(account.usage?.primaryRemainingPercent ?? null);
   const secondaryState = useSmoothPercent(account.usage?.secondaryRemainingPercent ?? null);
@@ -262,9 +265,12 @@ function AccountQuotaCells({ account }: { account: AccountSummary }) {
           <span className="text-muted-foreground">{localizedQuotaLabel(quota.label, t)}</span>
           <span className="font-medium tabular-nums text-foreground">{quota.percentLabel}</span>
           <QuotaMeter label={localizedQuotaLabel(quota.label, t)} percent={quota.percent} cap={quota.label === "5h" ? account.effectiveLimitPrimary : quota.label === "Weekly" ? account.effectiveLimitSecondary : account.effectiveLimitMonthly} />
-          <span className="inline-flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
-            <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
-            <span className="truncate">{quota.resetLabel}</span>
+          <span className="flex min-w-0 flex-col text-[11px] text-muted-foreground">
+            <span className="inline-flex min-w-0 items-center gap-1">
+              <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
+              <span className="truncate">{quota.resetLabel}</span>
+            </span>
+            {((quota.label === "Weekly" && quotaLbShare?.windowMinutes === 10080) || (quota.label === "Monthly" && quotaLbShare?.windowMinutes === 43200)) ? <QuotaLbShareIndicator estimate={quotaLbShare} /> : null}
           </span>
         </div>
       ))}
@@ -291,6 +297,7 @@ function QuotaMeter({ percent, cap, label }: { percent: number | null; cap?: num
 
 export function AccountList({
   accounts,
+  quotaLbShares,
   readOnly = false,
   sort: controlledSort,
   onSortChange,
@@ -412,7 +419,7 @@ export function AccountList({
               </div>
               <StatusBadge status={displayStatus} />
               <span className="text-xs text-muted-foreground">{formatSlug(account.planType)}</span>
-              <AccountQuotaCells account={account} />
+              <AccountQuotaCells account={account} quotaLbShare={quotaLbShares?.get(account.accountId)} />
 	              <span className="font-medium tabular-nums">
 	                {formatCreditValue(accountSubscriptionCredits(account))}
 	              </span>

@@ -14,6 +14,51 @@ afterEach(() => {
 });
 
 describe("AccountList", () => {
+  it("shows the LB share in the Pro account's weekly quota row", () => {
+    const account = createAccountSummary({ accountId: "pro-1", planType: "pro" });
+    const estimate = {
+      accountId: "pro-1",
+      since: "2026-09-22T09:08:40Z",
+      asOf: "2026-09-30T16:31:06Z",
+      windowMinutes: 10080,
+      observedUsedPercent: 160,
+      observedUsedCredits: 241920,
+      estimatedLbUsedCredits: 140616,
+      estimatedLbUsedPercent: 93,
+      estimatedLbSharePercent: 58,
+      referenceAccountCount: 3,
+    };
+    const { rerender } = render(<AccountList accounts={[account]} quotaLbShares={new Map([[account.accountId, estimate]])} />);
+    expect(screen.getByTestId("quota-lb-share")).toHaveTextContent("≈58% via LB");
+    rerender(<AccountList accounts={[account]} />);
+    expect(screen.queryByTestId("quota-lb-share")).not.toBeInTheDocument();
+  });
+
+  it("shows a monthly LB share for a Free account", () => {
+    const account = createAccountSummary({
+      accountId: "free-1",
+      planType: "free",
+      usage: { primaryRemainingPercent: null, secondaryRemainingPercent: null, monthlyRemainingPercent: 50 },
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+      windowMinutesMonthly: 43200,
+    });
+    render(<AccountList accounts={[account]} quotaLbShares={new Map([[account.accountId, {
+      accountId: account.accountId,
+      since: "2026-09-22T09:08:40Z",
+      asOf: "2026-09-30T16:31:06Z",
+      windowMinutes: 43200,
+      observedUsedPercent: 50,
+      observedUsedCredits: 567,
+      estimatedLbUsedCredits: 283.5,
+      estimatedLbUsedPercent: 25,
+      estimatedLbSharePercent: 50,
+      referenceAccountCount: 2,
+    }]])} />);
+    expect(screen.getByText("Monthly")).toBeInTheDocument();
+    expect(screen.getByTestId("quota-lb-share")).toHaveTextContent("≈50% via LB");
+  });
+
   function rowNames() {
     return screen.getAllByTestId("account-list-row").map((row) => {
       const paragraph = within(row).getAllByText(/Account$/)[0];

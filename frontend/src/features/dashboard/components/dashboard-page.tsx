@@ -33,7 +33,7 @@ import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
 import { useAuthStore, usePermission } from "@/features/auth/hooks/use-auth";
-import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
+import { useDashboard, useDashboardProjections, useDashboardQuotaLbShare } from "@/features/dashboard/hooks/use-dashboard";
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { useRequestLogTablePreferences } from "@/features/dashboard/hooks/use-request-log-table-preferences";
 import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
@@ -124,6 +124,13 @@ export function DashboardPage() {
   const [overviewRetryTimeframe, setOverviewRetryTimeframe] =
     useState<OverviewTimeframe | null>(null);
   const projectionsQuery = useDashboardProjections(Boolean(dashboardQuery.data));
+  const quotaLbShareQuery = useDashboardQuotaLbShare(
+    Boolean(dashboardQuery.data?.accounts.length),
+  );
+  const quotaLbShares = useMemo(
+    () => new Map((quotaLbShareQuery.data?.estimates ?? []).map((estimate) => [estimate.accountId, estimate])),
+    [quotaLbShareQuery.data?.estimates],
+  );
   const conversationsState = useConversations({
     enabled: canReadConversations && dashboardView === "conversations",
   });
@@ -141,7 +148,7 @@ export function DashboardPage() {
   const activeListIsFetching = dashboardView === "request-logs"
     ? logsQuery.isFetching
     : conversationsQuery.isFetching;
-  const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || activeListIsFetching;
+  const isRefreshing = dashboardQuery.isFetching || projectionsQuery.isFetching || quotaLbShareQuery.isFetching || activeListIsFetching;
 
   const handleRefresh = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -529,13 +536,14 @@ export function DashboardPage() {
             {accountViewMode === "list" ? (
               <AccountList
                 accounts={overview?.accounts ?? []}
+                quotaLbShares={quotaLbShares}
                 readOnly={!canWriteAccounts}
                 sort={accountListSort}
                 onSortChange={setAccountListSort}
                 onAction={handleAccountAction}
               />
             ) : (
-              <AccountCards accounts={overview?.accounts ?? []} readOnly={!canWriteAccounts} onAction={handleAccountAction} />
+              <AccountCards accounts={overview?.accounts ?? []} quotaLbShares={quotaLbShares} readOnly={!canWriteAccounts} onAction={handleAccountAction} />
             )}
           </section>
 
