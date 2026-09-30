@@ -728,7 +728,7 @@ class _HTTPBridgeRetryCircuitMixin:
                 return True
 
         cooldown_remaining = max(0.0, persisted.cooldown_until_epoch - now_epoch)
-        persisted_cooldown_until = now_monotonic + cooldown_remaining
+        persisted_cooldown_until = now_monotonic + cooldown_remaining if cooldown_remaining > 0.0 else 0.0
         arm_poison_quarantine = False
         poison_cooldown_remaining = 0.0
         async with self._http_bridge_retry_circuit_lock:
@@ -762,6 +762,20 @@ class _HTTPBridgeRetryCircuitMixin:
                 persisted.updated_at_epoch != state.persisted_updated_at_epoch
                 or persisted.consecutive_failures != state.consecutive_failures
                 or persisted.last_detail != state.last_detail
+            )
+            same_episode = not episode_replaced and not local_failure_is_newer
+            # Translate an observed active-to-expired transition to a
+            # non-zero monotonic deadline for one admission only. A row first
+            # observed after expiry still loads as zero and burns no
+            # half-open probe.
+            same_episode_cooldown_just_expired = (
+                persisted_cooldown_until <= 0.0 and state.cooldown_until > 0.0 and same_episode
+            )
+            same_episode_probe_active = (
+                persisted_cooldown_until <= 0.0 and state.half_open_until > now_monotonic and same_episode
+            )
+            same_episode_probe_expired = (
+                persisted_cooldown_until <= 0.0 and 0.0 < state.half_open_until <= now_monotonic and same_episode
             )
             if not local_failure_is_newer:
                 # No local strike is waiting on its durable write, so the row
@@ -797,7 +811,17 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.poison_anchor_cleared = False
                     state.owed_poison_detail = None
                 state.consecutive_failures = max(0, persisted.consecutive_failures)
-                state.cooldown_until = persisted_cooldown_until
+                if same_episode_cooldown_just_expired or same_episode_probe_expired:
+                    state.cooldown_until = now_monotonic
+                    state.half_open_until = 0.0
+                elif same_episode_probe_active:
+                    state.cooldown_until = 0.0
+                else:
+                    state.cooldown_until = persisted_cooldown_until
+                    if persisted_cooldown_until <= 0.0:
+                        # An already-armed probe has a zero cooldown and is
+                        # cleared by this equal-version reload.
+                        state.half_open_until = 0.0
                 state.last_detail = persisted.last_detail
                 if state.consecutive_failures == 0:
                     # A zero-failure row is a durable reset: the episode the

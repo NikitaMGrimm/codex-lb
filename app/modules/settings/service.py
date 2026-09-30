@@ -102,6 +102,7 @@ class DashboardSettingsData:
     limit_warmup_min_available_percent: float
     weekly_pace_working_days: str
     weekly_pace_smoothing_minutes: int
+    pro_weekly_capacity_multiplier: float | None
     guest_access_enabled: bool
     guest_password_configured: bool
     limit_warmup_staggered_idle_enabled: bool
@@ -215,6 +216,8 @@ class DashboardSettingsUpdateData:
     limit_warmup_min_available_percent: float
     weekly_pace_working_days: str
     weekly_pace_smoothing_minutes: int
+    pro_weekly_capacity_multiplier: float | None
+    clear_pro_weekly_capacity_multiplier: bool
     guest_access_enabled: bool
     limit_warmup_staggered_idle_enabled: bool
     # Tri-state retention overrides: value set = store, clear flag = reset to
@@ -426,6 +429,8 @@ class SettingsService:
             limit_warmup_min_available_percent=payload.limit_warmup_min_available_percent,
             weekly_pace_working_days=payload.weekly_pace_working_days,
             weekly_pace_smoothing_minutes=payload.weekly_pace_smoothing_minutes,
+            pro_weekly_capacity_multiplier=payload.pro_weekly_capacity_multiplier,
+            clear_pro_weekly_capacity_multiplier=payload.clear_pro_weekly_capacity_multiplier,
             guest_access_enabled=payload.guest_access_enabled,
             limit_warmup_staggered_idle_enabled=payload.limit_warmup_staggered_idle_enabled,
             request_log_retention_days=payload.request_log_retention_override_days,
@@ -688,6 +693,7 @@ def _settings_data(row: DashboardSettings, totp: TotpEnrollmentSummary) -> Dashb
         limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
         weekly_pace_working_days=row.weekly_pace_working_days,
         weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
+        pro_weekly_capacity_multiplier=row.pro_weekly_capacity_multiplier,
         guest_access_enabled=row.guest_access_enabled,
         guest_password_configured=row.guest_password_hash is not None,
         limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,

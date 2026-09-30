@@ -358,7 +358,10 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
+from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 
 
@@ -697,6 +700,81 @@ def _prepare_websocket_request_state_for_account_switch(
             return None
         return request_state.request_text
     return _install_verified_fresh_replay(request_state)
+
+
+def _prepare_websocket_quota_account_switch(request_state: "_WebSocketRequestState") -> str | None:
+    """Reconstruct supplied history only after a pre-acceptance quota rejection."""
+
+    def refuse(reason: str) -> None:
+        _facade().logger.info(
+            "websocket_quota_replay_refused request_id=%s reason=%s", request_state.request_id, reason
+        )
+
+    if (
+        request_state.file_required_preferred_account
+        or request_state.response_id is not None
+        or request_state.response_event_count > 0
+        or request_state.downstream_visible
+        or request_state.last_downstream_sequence_number is not None
+        or not request_state.awaiting_response_created
+        or _websocket_affinity_may_resolve_hard_owner(request_state.affinity_policy)
+    ):
+        return refuse("ownership_or_output")
+    source_text = request_state.request_text
+    if request_state.previous_response_id is not None:
+        if not (
+            request_state.proxy_injected_previous_response_id and request_state.fresh_upstream_request_is_retry_safe
+        ):
+            return refuse("client_owned_continuation")
+        source_text = request_state.fresh_upstream_request_text
+    if source_text is None:
+        return refuse("missing_replay_body")
+    try:
+        candidate = json.loads(source_text)
+    except json.JSONDecodeError:
+        return refuse("invalid_json")
+    if not isinstance(candidate, dict) or candidate.get("previous_response_id") is not None:
+        return refuse("stored_response_reference")
+    candidate.pop("type", None)
+    projected = False
+    if not responses_payload_is_account_neutral_fresh_replay(candidate):
+        input_items = candidate.get("input")
+        if not isinstance(input_items, list) or not input_items:
+            return refuse("missing_history")
+        projection = project_responses_input_for_account_neutral_fresh_replay(
+            input_items, stored_count=len(input_items)
+        )
+        if projection is None:
+            return refuse("nonportable_history")
+        candidate["input"] = projection.input_items
+        if not responses_payload_is_account_neutral_fresh_replay(candidate):
+            return refuse("nonportable_request")
+        projected = True
+        candidate["input"].append(
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Account switched after a quota rejection. Supplied conversation and tool results "
+                        "were retained; account-owned response IDs and internal reasoning were omitted. "
+                        "Continue with the current tools and workspace, without repeating completed actions.",
+                    }
+                ],
+            }
+        )
+    candidate["type"] = "response.create"
+    replay_text = json.dumps(candidate, ensure_ascii=True, separators=(",", ":"))
+    if request_state.previous_response_id is None:
+        request_state.fresh_upstream_request_responses_lite_model = request_state.responses_lite_model
+    result = _install_fresh_replay_body(request_state, replay_text, account_neutral=True)
+    _facade().logger.info(
+        "websocket_quota_replay_prepared request_id=%s projected_history=%s",
+        request_state.request_id,
+        projected,
+    )
+    return result
 
 
 def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:

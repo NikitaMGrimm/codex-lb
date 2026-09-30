@@ -191,6 +191,22 @@ export const DashboardProjectionsSchema = z.object({
   weeklyCreditPace: WeeklyCreditPaceSchema.nullable().optional(),
 });
 
+export const QuotaLbShareResponseSchema = z.object({
+  estimates: z.array(z.object({
+    accountId: z.string(),
+    since: z.iso.datetime({ offset: true }),
+    asOf: z.iso.datetime({ offset: true }),
+    windowMinutes: z.number().int().positive(),
+    observedUsedPercent: z.number().nonnegative(),
+    observedUsedCredits: z.number().nonnegative(),
+    estimatedLbUsedCredits: z.number().nonnegative(),
+    estimatedLbUsedPercent: z.number().nonnegative(),
+    estimatedLbSharePercent: z.number().min(0).max(100),
+    referenceAccountCount: z.number().int().nonnegative(),
+  })),
+});
+export type QuotaLbShareEstimate = z.infer<typeof QuotaLbShareResponseSchema>["estimates"][number];
+
 const RequestLogCostBreakdownSchema = z.object({
   inputUsd: z.number().nullable().optional().default(null),
   cachedInputUsd: z.number().nullable().optional().default(null),

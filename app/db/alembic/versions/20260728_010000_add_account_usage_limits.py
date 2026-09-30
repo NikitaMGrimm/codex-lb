@@ -1,7 +1,7 @@
 """add per-account usage limits
 
 Revision ID: 20260728_010000_add_account_usage_limits
-Revises: 20260918_000000_merge_scim_and_overflow_heads
+Revises: 20260812_120000_add_sticky_abandonment_scope
 Create Date: 2026-07-28
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260728_010000_add_account_usage_limits"
-down_revision = "20260918_000000_merge_scim_and_overflow_heads"
+down_revision = "20260812_120000_add_sticky_abandonment_scope"
 branch_labels = None
 depends_on = None
 

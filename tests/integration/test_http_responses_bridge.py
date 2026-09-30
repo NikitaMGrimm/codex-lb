@@ -8725,7 +8725,10 @@ async def test_v1_responses_http_bridge_reports_unavailable_required_owner_when_
             json={
                 "model": "gpt-5.1",
                 "instructions": "Return exactly OK.",
-                "input": "hello",
+                "input": [
+                    {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                    {"role": "user", "content": "hello"},
+                ],
                 "prompt_cache_key": "http-bridge-required-owner",
             },
         ),
@@ -8739,7 +8742,10 @@ async def test_v1_responses_http_bridge_reports_unavailable_required_owner_when_
             json={
                 "model": "gpt-5.1",
                 "instructions": "Return exactly OK.",
-                "input": "continue",
+                "input": [
+                    {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                    {"role": "user", "content": "continue"},
+                ],
                 "prompt_cache_key": "http-bridge-required-owner",
                 "previous_response_id": first.json()["id"],
             },
@@ -8761,18 +8767,13 @@ async def test_v1_responses_http_bridge_reports_unavailable_required_owner_when_
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_attributes_and_logs_unavailable_required_owner(
+async def test_v1_responses_http_bridge_replays_safe_current_input_when_owner_unavailable(
     async_client,
     app_instance,
     monkeypatch,
     caplog,
 ):
-    """An unroutable continuity owner must name the refusing proof and leave a row.
-
-    Before this, the bridge surface raised this 502 out of session creation with
-    no request-log write and no reason, so the only evidence was a rotating
-    container log.
-    """
+    """A plain current message may continue after its stale owner anchor is removed."""
     _install_bridge_settings(monkeypatch, enabled=True)
     owner_account_id = await _import_account(
         async_client,
@@ -8850,41 +8851,28 @@ async def test_v1_responses_http_bridge_attributes_and_logs_unavailable_required
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
 
-    # The client contract is unchanged; only the evidence trail is new.
-    assert second.status_code == 502
-    assert second.json()["error"]["code"] == "previous_response_owner_unavailable"
-
-    rejections = [
-        record.getMessage() for record in caplog.records if "owner_unavailable_replay_rejected" in record.getMessage()
+    assert second.status_code == 200
+    recoveries = [
+        record.getMessage()
+        for record in caplog.records
+        if "owner_unavailable_best_effort_replay" in record.getMessage()
     ]
-    assert len(rejections) == 1
-    assert any(
-        f"detail=reason={reason}" in rejections[0]
-        for reason in http_bridge_streaming_module.ACCOUNT_NEUTRAL_REPLAY_REJECTIONS
-    )
-    assert "detail=reason=payload_not_full_resend" in rejections[0]
+    assert len(recoveries) == 1
+    assert "outcome=current_input_without_owner_anchor" in recoveries[0]
 
     service = get_proxy_service_for_app(app_instance)
-    rows: list[RequestLog] = []
-    deadline = time.monotonic() + _TEST_SYNC_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        assert await service.drain_persistence_tasks(timeout_seconds=10)
-        async with SessionLocal() as session:
-            rows = list(
-                (
-                    await session.execute(
-                        select(RequestLog).where(RequestLog.error_code == "previous_response_owner_unavailable")
-                    )
+    assert await service.drain_persistence_tasks(timeout_seconds=10)
+    async with SessionLocal() as session:
+        rejected_rows = list(
+            (
+                await session.execute(
+                    select(RequestLog).where(RequestLog.error_code == "previous_response_owner_unavailable")
                 )
-                .scalars()
-                .all()
             )
-        if rows:
-            break
-        await asyncio.sleep(0.05)
-    assert len(rows) == 1
-    assert rows[0].status == "error"
-    assert rows[0].model == "gpt-5.1"
+            .scalars()
+            .all()
+        )
+    assert rejected_rows == []
 
 
 @pytest.mark.asyncio
@@ -9093,7 +9081,7 @@ async def test_v1_responses_http_bridge_resumes_a_thread_whose_owner_was_retired
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_cannot_return(
+async def test_v1_responses_http_bridge_continues_immediately_when_the_owner_cannot_return(
     async_client,
     app_instance,
     monkeypatch,
@@ -9102,8 +9090,7 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
     """#1707 without the wait: the first resume after the owner dies must serve.
 
     The scheduled sweep frees a dormant thread six hours after its last turn.
-    That is too late for the turn a user is actually waiting on, so the connect
-    failure retires the owner in place and rebinds within the same request.
+    A portable current message can continue immediately on another account.
     """
     _install_bridge_settings(monkeypatch, enabled=True)
     owner_account_id = await _import_account(
@@ -9212,15 +9199,19 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
 
     assert second.status_code == 200
     assert served_account_ids[-1] == healthy_account.id
-    retired = [record.getMessage() for record in caplog.records if "owner_retired_on_request" in record.getMessage()]
-    assert len(retired) == 1
-    assert "outcome=rebind_without_anchor" in retired[0]
+    recoveries = [
+        record.getMessage()
+        for record in caplog.records
+        if "owner_unavailable_best_effort_replay" in record.getMessage()
+    ]
+    assert len(recoveries) == 1
+    assert "outcome=current_input_without_owner_anchor" in recoveries[0]
 
     async with SessionLocal() as session:
         rows = list((await session.execute(select(HttpBridgeSessionRecord))).scalars().all())
-    # The rebind claimed the row for the replacement, and that claim clears the
-    # marker the retirement wrote — retirement is a step, not a resting state.
-    assert [row.account_id for row in rows if row.account_id == owner_account.id] == []
+    # The old row is not locally owned after the test clears its in-memory lane.
+    # The recovery uses a separate lane and leaves that row for normal cleanup.
+    assert any(row.account_id == owner_account.id for row in rows)
     assert any(row.account_id == healthy_account.id for row in rows)
     assert all(row.continuity_abandoned_at is None for row in rows)
     assert all(row.continuity_abandonment_scope is None for row in rows)
@@ -13770,7 +13761,10 @@ async def test_v1_responses_http_bridge_upstream_failure_attributes_api_key_in_r
         json={
             "model": "gpt-5.1",
             "instructions": "Return exactly OK.",
-            "input": "hello",
+            "input": [
+                {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                {"role": "user", "content": "hello"},
+            ],
             "prompt_cache_key": "bridge-key-attribution",
         },
     )
@@ -13792,7 +13786,10 @@ async def test_v1_responses_http_bridge_upstream_failure_attributes_api_key_in_r
         json={
             "model": "gpt-5.1",
             "instructions": "Return exactly OK.",
-            "input": "hello-again",
+            "input": [
+                {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                {"role": "user", "content": "hello-again"},
+            ],
             "prompt_cache_key": "bridge-key-attribution",
             "previous_response_id": first_body["id"],
         },
@@ -14780,7 +14777,10 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
         json={
             "model": "gpt-5.1",
             "instructions": "Return exactly OK.",
-            "input": "hello",
+            "input": [
+                {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                {"role": "user", "content": "hello"},
+            ],
             "prompt_cache_key": "send-failure-previous-response",
         },
     )
@@ -14801,7 +14801,10 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
         json={
             "model": "gpt-5.1",
             "instructions": "Return exactly OK.",
-            "input": "hello-again",
+            "input": [
+                {"type": "reasoning", "encrypted_content": "owner-scoped-state"},
+                {"role": "user", "content": "hello-again"},
+            ],
             "prompt_cache_key": "send-failure-previous-response",
             "previous_response_id": first_body["id"],
         },

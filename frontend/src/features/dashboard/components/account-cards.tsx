@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { AccountCard, type AccountCardProps } from "@/features/dashboard/components/account-card";
 import type { AccountSummary } from "@/features/dashboard/schemas";
+import type { QuotaLbShareEstimate } from "@/features/dashboard/schemas";
 
 const ACCOUNT_CARD_VISIBLE_ROWS = 2;
 // Account cards can grow when the optional email row is rendered.
@@ -14,11 +15,12 @@ const ACCOUNT_CARD_ROW_GAP_REM = 1;
 
 export type AccountCardsProps = {
   accounts: AccountSummary[];
+  quotaLbShares?: ReadonlyMap<string, QuotaLbShareEstimate>;
   readOnly?: boolean;
   onAction?: AccountCardProps["onAction"];
 };
 
-export function AccountCards({ accounts, readOnly = false, onAction }: AccountCardsProps) {
+export function AccountCards({ accounts, quotaLbShares, readOnly = false, onAction }: AccountCardsProps) {
   const { t } = useTranslation();
 
   if (accounts.length === 0) {
@@ -48,6 +50,8 @@ export function AccountCards({ accounts, readOnly = false, onAction }: AccountCa
         <div key={account.accountId} className="animate-fade-in-up" style={{ animationDelay: `${index * 75}ms` }}>
           <AccountCard
             account={account}
+            quotaLbShare={quotaLbShares?.get(account.accountId)}
+            showQuotaLbShare={quotaLbShares !== undefined}
             showAccountId={account.isEmailDuplicate === true}
             readOnly={readOnly}
             onAction={onAction}

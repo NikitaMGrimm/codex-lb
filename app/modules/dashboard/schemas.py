@@ -146,3 +146,20 @@ class DashboardProjectionsResponse(DashboardModel):
     depletion_primary: DepletionResponse | None = None
     depletion_secondary: DepletionResponse | None = None
     weekly_credit_pace: WeeklyCreditPaceResponse | None = None
+
+
+class QuotaLbShareEstimate(DashboardModel):
+    account_id: str
+    since: datetime
+    as_of: datetime
+    window_minutes: int
+    observed_used_percent: float
+    observed_used_credits: float
+    estimated_lb_used_credits: float
+    estimated_lb_used_percent: float
+    estimated_lb_share_percent: float
+    reference_account_count: int
+
+
+class QuotaLbShareResponse(DashboardModel):
+    estimates: list[QuotaLbShareEstimate] = Field(default_factory=list)

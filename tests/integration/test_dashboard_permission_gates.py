@@ -207,11 +207,26 @@ async def test_account_window_projections_require_accounts_read(
 ) -> None:
     _use_principal(app_instance, monkeypatch, _principal_with_only(dashboard__read=Scope.ALL))
 
-    for path in ("/api/dashboard/overview", "/api/dashboard/projections", "/api/usage/summary", "/api/usage/window"):
+    for path in (
+        "/api/dashboard/overview",
+        "/api/dashboard/projections",
+        "/api/dashboard/quota-lb-share",
+        "/api/usage/summary",
+        "/api/usage/window",
+    ):
         _assert_permission_required(await async_client.get(path), Permission.ACCOUNTS_READ)
 
     response = await async_client.get("/api/models")
     assert response.status_code == 200, response.text
+
+    _use_principal(
+        app_instance,
+        monkeypatch,
+        _principal_with_only(dashboard__read=Scope.ALL, accounts__read=Scope.ALL),
+    )
+    response = await async_client.get("/api/dashboard/quota-lb-share")
+    assert response.status_code == 200, response.text
+    assert "estimates" in response.json()
 
 
 @pytest.mark.asyncio
@@ -222,6 +237,7 @@ async def test_admin_preset_is_unaffected(
 
     assert (await async_client.get("/api/audit-logs")).status_code == 200
     assert (await async_client.get("/api/dashboard/overview")).status_code == 200
+    assert (await async_client.get("/api/dashboard/quota-lb-share")).status_code == 200
     assert (await async_client.put("/api/settings", json={"stickyThreadsEnabled": True})).status_code == 200
     assert (await async_client.post("/api/accounts/missing/export/auth")).status_code == 404
 

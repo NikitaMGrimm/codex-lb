@@ -3,7 +3,9 @@
 ## Purpose
 
 Define Responses API compatibility contracts so Codex, OpenCode, and OpenAI-style clients preserve expected behavior.
+
 ## Requirements
+
 ### Requirement: Use prompt_cache_key as OpenAI cache affinity
 For OpenAI-style `/v1/responses`, `/v1/responses/compact`, and chat-completions requests mapped onto Responses, the service MUST treat a non-empty `prompt_cache_key` as the bounded upstream account affinity key for prompt-cache correctness even when a `session_id` header is present. OpenAI-style route wiring MUST NOT upgrade those requests to durable `CODEX_SESSION` affinity by default. This affinity MUST apply even when dashboard `sticky_threads_enabled` is disabled, the service MUST continue forwarding the same `prompt_cache_key` upstream unchanged, and the stored affinity MUST expire after the configured freshness window so older keys can rebalance. The freshness window MUST come from dashboard settings so operators can adjust it without restart.
 
@@ -10896,3 +10898,26 @@ SDK parser failure.
 - **WHEN** the bridge settles the turn
 - **THEN** it emits one terminal `response.failed` event
 - **AND** that terminal event includes a stable `response.id`
+
+### Requirement: Portable Codex WebSocket quota recovery
+The proxy SHALL distinguish account-independent Codex request metadata from references to stored account-owned state. On a quota rejection before response acceptance or downstream output, a request proven self-contained SHALL be retried on an eligible different account with the rejected account excluded from that retry series.
+
+#### Scenario: Known Codex metadata does not create account ownership
+- **GIVEN** a self-contained request includes supported session/thread/turn diagnostic metadata and `reasoning.context=all_turns`
+- **WHEN** the selected account rejects it for quota before acceptance
+- **THEN** the proxy retries a different eligible account without emitting the intermediate quota terminal
+- **AND** the portable conversation and tool definitions remain available
+
+#### Scenario: Missing stored state prevents cross-account replay
+- **GIVEN** a continuation depends on an account-owned upload, hosted-tool state, or prior response that cannot be reconstructed
+- **WHEN** that owner rejects the request for quota
+- **THEN** the proxy does not send an incomplete or owner-dependent request to a different account
+
+#### Scenario: Output and side effects are not replayed blindly
+- **GIVEN** response output or a tool invocation has already been exposed
+- **WHEN** a later quota error arrives
+- **THEN** the pre-acceptance replay path is not used
+
+#### Scenario: Replay refusal is diagnosable without content disclosure
+- **WHEN** a replay-safety check refuses account switching
+- **THEN** diagnostics identify a bounded reason code without logging prompts, tool arguments, credential values, or conversation text

@@ -4,7 +4,7 @@ import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it } from "vitest";
 
-import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
+import { useDashboard, useDashboardProjections, useDashboardQuotaLbShare } from "@/features/dashboard/hooks/use-dashboard";
 import { server } from "@/test/mocks/server";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 
@@ -26,6 +26,28 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useDashboard", () => {
+  it("loads the separate weekly LB share endpoint at a one-minute cadence", async () => {
+    server.use(http.get("/api/dashboard/quota-lb-share", () => HttpResponse.json({ estimates: [{
+      accountId: "pro-1",
+      since: "2026-09-22T09:08:40Z",
+      asOf: "2026-09-30T16:31:06Z",
+      windowMinutes: 10080,
+      observedUsedPercent: 160,
+      observedUsedCredits: 241920,
+      estimatedLbUsedCredits: 140616,
+      estimatedLbUsedPercent: 93,
+      estimatedLbSharePercent: 58,
+      referenceAccountCount: 3,
+    }] })));
+    const queryClient = createTestQueryClient();
+    const { result } = renderHook(() => useDashboardQuotaLbShare(), { wrapper: createWrapper(queryClient) });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.estimates[0]?.estimatedLbSharePercent).toBe(58);
+    const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "quota-lb-share"] });
+    expect((query?.options as { refetchInterval?: unknown })?.refetchInterval).toBe(60_000);
+  });
+
   it("loads dashboard overview via MSW and configures the selected refetch cadence", async () => {
     useDashboardPreferencesStore.setState({ refreshSeconds: 15 });
     const queryClient = createTestQueryClient();

@@ -1,0 +1,31 @@
+# Allow best-effort dispatch-owner failover
+
+## Summary
+
+Let an unpinned client-supplied Responses history move to another account when
+the selected account fails before any output becomes visible.
+
+## What Changes
+
+- Release ownership created only by the failed dispatch before selecting the
+  next account.
+- Reuse verified HTTP-bridge full-history replay when a durable owner reaches
+  its configured account usage limit.
+- As a final best-effort resume, discard an unavailable owner's stale response
+  anchor when the remaining current input is independently account-neutral,
+  including after its bridge disconnects without producing a response event.
+- For Codex threads, preserve the greatest account-neutral projection of the
+  supplied history and fall back to an honest task deeplink plus the newest
+  portable user message when that projection is still unsafe.
+- Preserve portable Desktop tool declarations from a mixed Responses-Lite tool
+  bundle and rebind the durable task row to the replacement account.
+- Apply that prepared projection once when an already-running bridge owner
+  returns a terminal quota error before visible output.
+- Keep previous-response, turn-state, uploaded-file, and single-account
+  ownership fail-closed.
+- Reuse the original client payload without adding configuration or storage.
+
+## Impact
+
+This personal-fork behavior favors task continuity over strict replay proof for
+one pre-visible failure case. It adds no setting, schema, UI, or operator step.

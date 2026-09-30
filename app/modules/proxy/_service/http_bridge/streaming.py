@@ -7,6 +7,7 @@ import logging
 import math
 from collections.abc import AsyncGenerator, Callable
 from typing import Any, AsyncIterator, Literal, Mapping, TypeVar, cast, get_args
+from urllib.parse import quote
 from uuid import uuid4
 
 import anyio
@@ -86,6 +87,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_abandonment_may_settle_circuit,
     _http_bridge_continuity_bound_without_safe_replay,
+    _http_bridge_denied_anchor_fence_advanced,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_eventless_budget_seconds,
     _http_bridge_eventless_max_keepalive_count,
@@ -590,6 +592,13 @@ def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str 
     code = error.get("code")
     message = error.get("message")
     return (str(code) if code is not None else None, str(message) if message is not None else None)
+
+
+def _http_bridge_owner_error_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
+    if _http_bridge_is_previous_response_owner_unavailable(exc):
+        return True
+    code, _message = _proxy_error_code_message(exc)
+    return exc.status_code == 503 and code == "account_usage_limit_reached"
 
 
 _HTTP_BRIDGE_AMBIGUOUS_RECOVERY_ERROR_CODES = frozenset(
@@ -2087,6 +2096,12 @@ class _HTTPBridgeStreamingMixin:
             else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
+        best_effort_owner_replay = False
+        best_effort_replay_stage: str | None = None
+        best_effort_replay_rejections: set[tuple[str, str]] = set()
+        best_effort_origin_key: _HTTPBridgeSessionKey | None = None
+        best_effort_origin_lookup: DurableBridgeLookup | None = None
+        best_effort_origin_rebound = False
         model_transition_owner_conflict_fork_attempted = False
         unanchored_fork_spill_attempted = False
         owner_retirement_attempted = False
@@ -2320,22 +2335,183 @@ class _HTTPBridgeStreamingMixin:
             return True
 
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
-            if not _http_bridge_is_previous_response_owner_unavailable(exc):
+            if not _http_bridge_owner_error_allows_account_neutral_replay(exc):
                 return False
-            rejection = classify_account_neutral_replay_rejection()
-            if rejection is None:
+            return current_input_allows_account_neutral_replay()
+
+        def current_input_allows_account_neutral_replay() -> bool:
+            nonlocal best_effort_owner_replay
+            nonlocal best_effort_replay_stage
+            nonlocal durable_full_resend_fresh_payload
+            nonlocal durable_full_resend_is_account_neutral
+
+            def record_rejection(stage: str, reason: str) -> None:
+                rejection = (stage, reason)
+                if rejection in best_effort_replay_rejections:
+                    return
+                best_effort_replay_rejections.add(rejection)
+                _log_http_bridge_event(
+                    "best_effort_replay_rejected",
+                    bridge_session_key,
+                    account_id=request_state.preferred_account_id,
+                    model=payload.model,
+                    detail=f"replay_stage={stage}, reason={reason}",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                    owner_check_applied=True,
+                )
+
+            if classify_account_neutral_replay_rejection() is None:
+                best_effort_replay_stage = "verified_full_resend"
                 return True
-            record_account_neutral_replay_rejection(rejection)
+            if rewritten_file_account_id is None:
+                fresh_payload = _http_bridge_payload_without_previous_response_id(payload)
+                if _http_bridge_payload_is_account_neutral_fresh_replay(fresh_payload):
+                    durable_full_resend_fresh_payload = fresh_payload
+                    durable_full_resend_is_account_neutral = True
+                    best_effort_owner_replay = True
+                    best_effort_replay_stage = "current_input"
+                    return True
+                record_rejection("current_input", "account_neutral_validation_failed")
+            else:
+                record_rejection("current_input", "account_scoped_file")
+
+            thread_id = _codex_backend_identity(headers).thread_id
+            if thread_id is None:
+                record_rejection("task_history", "task_identity_missing")
+                return False
+
+            task_link = f"codex://threads/{quote(thread_id, safe='')}"
+
+            def with_continuity_notice(
+                replay_input: list[JsonValue],
+                *,
+                retained_history: bool,
+            ) -> ResponsesRequest:
+                if retained_history:
+                    notice = (
+                        "Best-effort account switch: the earlier conversation was reconstructed from "
+                        "client-supplied history, but account-owned internal state may have been omitted. "
+                        "Continue normally with the tools and workspace declared by this current request; "
+                        "inspect the current workspace when verification is needed instead of assuming it is "
+                        "unavailable. "
+                        f"Original Codex task: {task_link}."
+                    )
+                else:
+                    notice = (
+                        "Best-effort account switch: the earlier conversation could not be transferred. "
+                        "Only the newest portable user message is available. "
+                        f"Original Codex task: {task_link}. If Codex task-reading tools are available, "
+                        "inspect that task before continuing; otherwise ask the user for missing context."
+                    )
+                # This is the deliberately lossy last-resort path. Build a
+                # genuinely fresh request instead of copying the original
+                # envelope: current Codex clients can carry account-owned or
+                # newly introduced top-level fields that must not prevent the
+                # portable input from moving to another account.
+                replay_data: dict[str, JsonValue] = {
+                    "model": payload.model,
+                    "instructions": f"{payload.instructions}\n\n{notice}",
+                    "input": replay_input,
+                }
+                forwarded_payload = payload.model_dump_for_forwarding()
+                for field in ("parallel_tool_calls", "tool_choice", "tools"):
+                    if field in forwarded_payload:
+                        replay_data[field] = forwarded_payload[field]
+                return ResponsesRequest.model_validate(replay_data)
+
+            portable_lite_prefixes: list[list[JsonValue]] = []
+            if isinstance(payload.input, list) and payload.input:
+                lossy_projection = project_responses_input_for_account_neutral_fresh_replay(
+                    cast(list[JsonValue], payload.input),
+                    stored_count=len(payload.input),
+                    project_nonportable_additional_tools=True,
+                )
+                if lossy_projection is not None:
+                    projected_input = lossy_projection.input_items
+                    if (
+                        projected_input
+                        and isinstance(projected_input[0], dict)
+                        and projected_input[0].get("type") == "additional_tools"
+                    ):
+                        if (
+                            len(projected_input) > 1
+                            and isinstance(projected_input[1], dict)
+                            and projected_input[1].get("role") == "developer"
+                            and projected_input[1].get("type") != "additional_tools"
+                        ):
+                            portable_lite_prefixes.append(projected_input[:2])
+                        portable_lite_prefixes.append(projected_input[:1])
+                    lossy_payload = with_continuity_notice(
+                        projected_input,
+                        retained_history=True,
+                    )
+                    if _http_bridge_payload_is_account_neutral_fresh_replay(lossy_payload):
+                        durable_full_resend_fresh_payload = lossy_payload
+                        durable_full_resend_is_account_neutral = True
+                        best_effort_owner_replay = True
+                        best_effort_replay_stage = "sanitized_history"
+                        return True
+                    record_rejection("sanitized_history", "account_neutral_validation_failed")
+                else:
+                    record_rejection("sanitized_history", "projection_failed")
+            else:
+                record_rejection("sanitized_history", "history_missing")
+
+            latest_user_input: list[JsonValue] | None = None
+            input_items = payload.input if isinstance(payload.input, list) else []
+            for item in reversed(input_items):
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item.get("role") != "user" or item_type not in (None, "message"):
+                    continue
+                content = item.get("content")
+                if isinstance(content, str) and content.strip():
+                    latest_user_input = [{"role": "user", "content": content}]
+                    break
+                if not isinstance(content, list):
+                    continue
+                text_parts: list[JsonValue] = []
+                for part in content:
+                    if not isinstance(part, dict) or part.get("type") not in {"input_text", "text"}:
+                        continue
+                    text = part.get("text")
+                    if isinstance(text, str) and text.strip():
+                        text_parts.append({"type": "input_text", "text": text})
+                if text_parts:
+                    latest_user_input = [{"role": "user", "content": text_parts}]
+                    break
+            if latest_user_input is None:
+                record_rejection("latest_message", "portable_user_message_missing")
+                return False
+
+            for portable_prefix in [*portable_lite_prefixes, []]:
+                latest_only_payload = with_continuity_notice(
+                    [*portable_prefix, *latest_user_input],
+                    retained_history=False,
+                )
+                if not _http_bridge_payload_is_account_neutral_fresh_replay(latest_only_payload):
+                    continue
+                durable_full_resend_fresh_payload = latest_only_payload
+                durable_full_resend_is_account_neutral = True
+                best_effort_owner_replay = True
+                best_effort_replay_stage = "latest_message_with_lite_tools" if portable_prefix else "latest_message"
+                return True
+            record_rejection("latest_message", "account_neutral_validation_failed")
             return False
 
         def switch_to_account_neutral_replay(
             *,
-            event: str = "owner_unavailable_fresh_resend",
-            detail: str = "outcome=projected_plaintext_full_resend_without_anchor",
+            event: str | None = None,
+            detail: str | None = None,
             preserve_operation: bool = False,
+            failed_account_id: str | None = None,
         ) -> None:
             nonlocal account_neutral_recovery
             nonlocal affinity
+            nonlocal best_effort_origin_key
+            nonlocal best_effort_origin_lookup
             nonlocal bridge_session_key
             nonlocal dead_owner_anchor
             nonlocal dead_owner_process_epoch_mismatch
@@ -2373,7 +2549,20 @@ class _HTTPBridgeStreamingMixin:
             prior_operation_persisted_response_id = (
                 request_state.operation_persisted_response_id if preserve_operation_identity else None
             )
-            failed_owner_id = request_state.preferred_account_id
+            failed_owner_id = failed_account_id or request_state.preferred_account_id
+            if event is None:
+                event = (
+                    "owner_unavailable_best_effort_replay"
+                    if best_effort_owner_replay
+                    else "owner_unavailable_fresh_resend"
+                )
+            if detail is None:
+                detail = (
+                    "outcome=current_input_without_owner_anchor"
+                    if best_effort_owner_replay
+                    else "outcome=projected_plaintext_full_resend_without_anchor"
+                )
+            detail = f"{detail}, replay_stage={best_effort_replay_stage or 'unknown'}"
             _log_http_bridge_event(
                 event,
                 bridge_session_key,
@@ -2385,6 +2574,9 @@ class _HTTPBridgeStreamingMixin:
             )
             if failed_owner_id is not None:
                 fresh_replay_excluded_account_ids.add(failed_owner_id)
+            if best_effort_origin_lookup is None and durable_lookup is not None:
+                best_effort_origin_key = bridge_session_key
+                best_effort_origin_lookup = durable_lookup
             session_creation_headers = without_http_bridge_session_affinity_headers(session_creation_headers)
             incoming_turn_state_header = None
             session_header_fallback_key = None
@@ -2436,6 +2628,73 @@ class _HTTPBridgeStreamingMixin:
             dead_owner_anchor = False
             dead_owner_process_epoch_mismatch = False
             file_required_preferred_account = False
+
+        async def persist_best_effort_origin_account(replacement_session: _HTTPBridgeSession) -> None:
+            nonlocal best_effort_origin_rebound
+            if best_effort_origin_rebound:
+                return
+            if best_effort_origin_lookup is None or best_effort_origin_key is None:
+                return
+            current_instance = _service_get_settings().http_responses_session_bridge_instance_id
+            if best_effort_origin_lookup.owner_instance_id != current_instance:
+                _log_http_bridge_event(
+                    "best_effort_rebind_skipped",
+                    best_effort_origin_key,
+                    account_id=replacement_session.account.id,
+                    model=payload.model,
+                    detail="reason=origin_not_locally_owned",
+                    cache_key_family=best_effort_origin_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                    owner_check_applied=True,
+                )
+                return
+            try:
+                rebound = await self._durable_bridge.rebind_session_account(
+                    session_id=best_effort_origin_lookup.session_id,
+                    api_key_id=best_effort_origin_key.api_key_id,
+                    instance_id=current_instance,
+                    owner_epoch=best_effort_origin_lookup.owner_epoch,
+                    account_id=replacement_session.account.id,
+                    clear_continuity=True,
+                    expected_latest_response_id=best_effort_origin_lookup.latest_response_id,
+                    expected_latest_turn_state=best_effort_origin_lookup.latest_turn_state,
+                )
+            except Exception:
+                logger.warning("Failed to persist best-effort HTTP bridge account rebind", exc_info=True)
+                rebound = False
+            rebind_path = "live"
+            if not rebound:
+                try:
+                    current_continuity = await self._durable_bridge.session_latest_continuity(
+                        session_id=best_effort_origin_lookup.session_id
+                    )
+                    if current_continuity is None:
+                        raise RuntimeError("best-effort origin session disappeared before released rebind")
+                    current_response_id, current_turn_state = current_continuity
+                    rebound = await self._durable_bridge.rebind_closed_session_account(
+                        session_id=best_effort_origin_lookup.session_id,
+                        api_key_id=best_effort_origin_key.api_key_id,
+                        owner_epoch=best_effort_origin_lookup.owner_epoch,
+                        expected_account_id=best_effort_origin_lookup.account_id,
+                        account_id=replacement_session.account.id,
+                        expected_latest_response_id=current_response_id,
+                        expected_latest_turn_state=current_turn_state,
+                    )
+                except Exception:
+                    logger.warning("Failed to persist released best-effort HTTP bridge account rebind", exc_info=True)
+                    rebound = False
+                rebind_path = "closed"
+            best_effort_origin_rebound = rebound
+            _log_http_bridge_event(
+                "best_effort_rebind",
+                best_effort_origin_key,
+                account_id=replacement_session.account.id,
+                model=payload.model,
+                detail=f"outcome={'success' if rebound else 'fenced'}, path={rebind_path}",
+                cache_key_family=best_effort_origin_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
 
         if (
             dead_owner_anchor
@@ -2598,15 +2857,6 @@ class _HTTPBridgeStreamingMixin:
                             raise
                         continue
                     raise
-                _log_http_bridge_event(
-                    "owner_unavailable_fresh_resend",
-                    bridge_session_key,
-                    account_id=request_state.preferred_account_id,
-                    model=payload.model,
-                    detail="outcome=fresh_full_resend_without_anchor",
-                    cache_key_family=bridge_session_key.affinity_kind,
-                    model_class=_extract_model_class(payload.model) if payload.model else None,
-                )
                 switch_to_account_neutral_replay()
                 continue
             break
@@ -2863,6 +3113,7 @@ class _HTTPBridgeStreamingMixin:
                             raise
                         continue
                     break
+                await persist_best_effort_origin_account(session)
                 _record_bridge_reattach(
                     path=(
                         "owner_forward_fresh_replay"
@@ -3048,6 +3299,7 @@ class _HTTPBridgeStreamingMixin:
                         request_deadline=request_deadline,
                     ):
                         yield event_block
+                    await persist_best_effort_origin_account(session)
                 finally:
                     if owner_recovery_scope_id is not None:
                         _release_http_bridge_unanchored_handoff(
@@ -3060,6 +3312,7 @@ class _HTTPBridgeStreamingMixin:
                             session.last_used_at = clock.monotonic()
                 return
         session = session_or_forward
+        await persist_best_effort_origin_account(session)
         if (
             # A quarantine-suppressed anchor (#1534) must not be rehydrated
             # into the session either: doing so would let the session-level
@@ -3374,6 +3627,28 @@ class _HTTPBridgeStreamingMixin:
                 initial_handoff_session,
                 request_scope_id=initial_handoff_scope_id,
             )
+        request_state.file_required_preferred_account = file_required_preferred_account
+        if (
+            request_state.previous_response_id is not None
+            and request_state.preferred_account_id is not None
+            and not file_required_preferred_account
+            and current_input_allows_account_neutral_replay()
+        ):
+            best_effort_payload = durable_full_resend_fresh_payload
+            if best_effort_payload is not None:
+                prepared_replay_state, prepared_replay_text = self._prepare_http_bridge_request(
+                    best_effort_payload,
+                    headers,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    request_id=request_id,
+                    client_ip=client_ip,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    preserve_responses_lite_client_metadata=bridge_uses_responses_lite,
+                )
+                request_state.best_effort_quota_replay_text = prepared_replay_text
+                request_state.best_effort_quota_replay_stage = best_effort_replay_stage
+                request_state.fresh_upstream_request_responses_lite_model = prepared_replay_state.responses_lite_model
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
             request_state=request_state,
@@ -3383,7 +3658,6 @@ class _HTTPBridgeStreamingMixin:
             downstream_turn_state=downstream_turn_state,
             request_deadline=request_deadline,
         )
-        request_state.file_required_preferred_account = file_required_preferred_account
         request_state.bridge_soft_capacity_reroute_allowed = (
             bridge_session_key.strength == "soft"
             and request_state.previous_response_id is None
@@ -3511,6 +3785,7 @@ class _HTTPBridgeStreamingMixin:
             async for event_block in session_events:
                 yield event_block
                 yielded_any = True
+            await persist_best_effort_origin_account(session)
         except ProxyResponseError as exc:
             if yielded_any:
                 yield _partial_output_proxy_error_event_block(
@@ -3644,6 +3919,7 @@ class _HTTPBridgeStreamingMixin:
                 try:
                     async for event_block in replacement_events:
                         yield event_block
+                    await persist_best_effort_origin_account(replacement_session)
                 finally:
                     try:
                         await replacement_events.aclose()
@@ -3746,6 +4022,7 @@ class _HTTPBridgeStreamingMixin:
                 try:
                     async for event_block in retry_events:
                         yield event_block
+                    await persist_best_effort_origin_account(reroute_session)
                 finally:
                     try:
                         await retry_events.aclose()
@@ -3755,6 +4032,21 @@ class _HTTPBridgeStreamingMixin:
             explicit_previous_response_rejection = (
                 effective_payload.previous_response_id is not None
                 and _http_bridge_is_explicit_previous_response_rejection(exc)
+            )
+            error_code, _error_message = _proxy_error_code_message(exc)
+            denied_injected_anchor = request_state.proxy_injected_previous_response_id and (
+                request_state.previous_response_id in session.denied_proxy_injected_anchor_ids
+                or request_state.denied_proxy_injected_anchor_fence_was_already_denied
+                or _http_bridge_denied_anchor_fence_advanced(self, request_state)
+            )
+            poisoned_owner_best_effort_replay = bool(
+                not denied_injected_anchor
+                and error_code == "stream_incomplete"
+                and effective_payload.previous_response_id is not None
+                and request_state.response_event_count == 0
+                and not request_state.downstream_visible
+                and request_state.replay_count == 0
+                and current_input_allows_account_neutral_replay()
             )
             if explicit_previous_response_rejection and (
                 request_state.replay_count > 0
@@ -3810,6 +4102,7 @@ class _HTTPBridgeStreamingMixin:
                 not should_attempt_previous_response_recovery
                 and not should_rollover_after_context_overflow
                 and not should_attempt_context_overflow_fresh_turn_recovery
+                and not poisoned_owner_best_effort_replay
             ):
                 if is_context_overflow:
                     _log_http_bridge_event(
@@ -3832,7 +4125,25 @@ class _HTTPBridgeStreamingMixin:
                         "HTTP response recovery operation fence is unavailable; retry the request.",
                     ),
                 ) from exc
-            if should_attempt_context_overflow_fresh_turn_recovery:
+            if poisoned_owner_best_effort_replay:
+                failed_account_id = session.account.id
+                await self._reset_http_bridge_session_after_local_terminal_error(
+                    session,
+                    error_code="stream_incomplete",
+                    error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
+                )
+                switch_to_account_neutral_replay(
+                    event="poisoned_owner_best_effort_replay",
+                    detail="outcome=current_input_without_owner_anchor_after_eventless_disconnect",
+                    failed_account_id=failed_account_id,
+                )
+                recovery_path = "poisoned_owner_best_effort_replay"
+                retry_payload = effective_payload
+                retry_previous_response_id = None
+                retry_request_stage = "poisoned_owner_recover"
+                retry_preferred_account_id = None
+                allow_previous_response_recovery_rebind = False
+            elif should_attempt_context_overflow_fresh_turn_recovery:
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     bridge_durable_recover_total.labels(path="context_overflow_fresh_turn").inc()
                 _log_http_bridge_event(
@@ -4103,6 +4414,7 @@ class _HTTPBridgeStreamingMixin:
                     break
             except BaseException:
                 raise
+            await persist_best_effort_origin_account(session)
             _record_bridge_reattach(path=recovery_path, outcome="success")
 
             local_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None
@@ -4136,6 +4448,7 @@ class _HTTPBridgeStreamingMixin:
                     "local_previous_response_error",
                     "local_previous_response_fresh_replay",
                     "local_previous_response_same_owner_fresh_replay",
+                    "poisoned_owner_best_effort_replay",
                 }
                 # A recovery request is the one bounded server-side replay;
                 # prevent a second cooldown bypass if this fresh socket also
@@ -4238,6 +4551,7 @@ class _HTTPBridgeStreamingMixin:
                 try:
                     async for event_block in retry_events:
                         yield event_block
+                    await persist_best_effort_origin_account(session)
                 finally:
                     try:
                         await retry_events.aclose()

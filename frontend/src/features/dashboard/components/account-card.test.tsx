@@ -13,6 +13,29 @@ afterEach(() => {
 });
 
 describe("AccountCard", () => {
+  it("shows an approximate LB share only beside the weekly quota", () => {
+    const account = createAccountSummary({ accountId: "pro-1", planType: "pro" });
+    const estimate = {
+      accountId: "pro-1",
+      since: "2026-09-22T09:08:40Z",
+      asOf: "2026-09-30T16:31:06Z",
+      windowMinutes: 10080,
+      observedUsedPercent: 160,
+      observedUsedCredits: 241920,
+      estimatedLbUsedCredits: 140616,
+      estimatedLbUsedPercent: 93,
+      estimatedLbSharePercent: 58,
+      referenceAccountCount: 3,
+    };
+    const { rerender } = render(<AccountCard account={account} quotaLbShare={estimate} />);
+    expect(screen.getByTestId("quota-lb-share")).toHaveTextContent("≈58% via LB");
+    rerender(<AccountCard account={account} />);
+    expect(screen.queryByTestId("quota-lb-share")).not.toBeInTheDocument();
+    rerender(<AccountCard account={account} showQuotaLbShare />);
+    expect(screen.getByTestId("quota-lb-share-unavailable")).toHaveTextContent("— via LB");
+    expect(screen.getByTestId("quota-lb-share-unavailable")).toHaveAttribute("title", expect.stringContaining("previous 100% observation"));
+  });
+
   it("renders both 5h and weekly quota bars for regular accounts", () => {
     const account = createAccountSummary();
     render(<AccountCard account={account} />);
@@ -92,8 +115,20 @@ describe("AccountCard", () => {
       resetAtMonthly: "2026-01-31T00:00:00.000Z",
     });
 
-    render(<AccountCard account={account} />);
+    render(<AccountCard account={account} quotaLbShare={{
+      accountId: account.accountId,
+      since: "2026-09-22T09:08:40Z",
+      asOf: "2026-09-30T16:31:06Z",
+      windowMinutes: 43200,
+      observedUsedPercent: 50,
+      observedUsedCredits: 567,
+      estimatedLbUsedCredits: 283.5,
+      estimatedLbUsedPercent: 25,
+      estimatedLbSharePercent: 50,
+      referenceAccountCount: 2,
+    }} />);
 
+    expect(screen.getByTestId("quota-lb-share")).toHaveTextContent("≈50% via LB");
     expect(screen.getByText("Monthly")).toBeInTheDocument();
     expect(screen.queryByText("5h")).not.toBeInTheDocument();
     expect(screen.queryByText("Weekly")).not.toBeInTheDocument();

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { getDashboardOverview, getDashboardProjections } from "@/features/dashboard/api";
+import { getDashboardOverview, getDashboardProjections, getDashboardQuotaLbShare } from "@/features/dashboard/api";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
   type OverviewTimeframe,
@@ -27,5 +27,16 @@ export function useDashboardProjections(enabled = true) {
     refetchInterval: refreshSeconds * 1_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
+  });
+}
+
+export function useDashboardQuotaLbShare(enabled = true) {
+  return useQuery({
+    queryKey: ["dashboard", "quota-lb-share"],
+    queryFn: getDashboardQuotaLbShare,
+    enabled,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
   });
 }

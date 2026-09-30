@@ -285,6 +285,7 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         limit_warmup_min_available_percent=settings.limit_warmup_min_available_percent,
         weekly_pace_working_days=settings.weekly_pace_working_days,
         weekly_pace_smoothing_minutes=settings.weekly_pace_smoothing_minutes,
+        pro_weekly_capacity_multiplier=settings.pro_weekly_capacity_multiplier,
         guest_access_enabled=settings.guest_access_enabled,
         guest_password_configured=settings.guest_password_configured,
         limit_warmup_staggered_idle_enabled=settings.limit_warmup_staggered_idle_enabled,
@@ -1370,6 +1371,11 @@ async def update_settings(
                     if payload.weekly_pace_smoothing_minutes is not None
                     else current.weekly_pace_smoothing_minutes
                 ),
+                pro_weekly_capacity_multiplier=payload.pro_weekly_capacity_multiplier,
+                clear_pro_weekly_capacity_multiplier=(
+                    "pro_weekly_capacity_multiplier" in payload.model_fields_set
+                    and payload.pro_weekly_capacity_multiplier is None
+                ),
                 guest_access_enabled=(
                     payload.guest_access_enabled
                     if payload.guest_access_enabled is not None
@@ -1566,6 +1572,7 @@ async def update_settings(
             "limit_warmup_min_available_percent",
             "weekly_pace_working_days",
             "weekly_pace_smoothing_minutes",
+            "pro_weekly_capacity_multiplier",
             "guest_access_enabled",
             "limit_warmup_staggered_idle_enabled",
             "request_log_retention_override_days",

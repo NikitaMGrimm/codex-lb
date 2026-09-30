@@ -274,6 +274,172 @@ def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() 
     assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is True
 
 
+def test_account_neutral_replay_projection_normalizes_portable_desktop_history() -> None:
+    metadata: JsonValue = {
+        "turn_id": "turn_owner_a",
+        "create_time": 1788000000.0,
+        "content_item_kinds": ["custom_tool_call_output"],
+    }
+    input_items: list[JsonValue] = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "exec"}],
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "Use the supplied tools."}],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "custom_tool_call",
+            "id": "ctc_owner_a",
+            "call_id": "call_owner_a",
+            "name": "exec",
+            "input": "pwd",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "ctco_owner_a",
+            "call_id": "call_owner_a",
+            "output": [
+                {"type": "input_text", "text": "command output"},
+                {"type": "input_text", "text": ""},
+                {"type": "input_text", "text": "   "},
+            ],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "continue"}],
+            "internal_chat_message_metadata_passthrough": {
+                "turn_id": "turn_next",
+                "create_time": 1788000010.0,
+                "content_item_kinds": ["input_text"],
+            },
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        input_items,
+        stored_count=len(input_items),
+    )
+
+    assert projection is not None
+    projected_tool_output = projection.input_items[3]
+    assert isinstance(projected_tool_output, dict)
+    assert projected_tool_output["output"] == [{"type": "input_text", "text": "command output"}]
+    assert all(
+        not isinstance(item, dict)
+        or item.get("internal_chat_message_metadata_passthrough")
+        in (None, {"turn_id": "turn_owner_a"}, {"turn_id": "turn_next"})
+        for item in projection.input_items
+    )
+    assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is True
+
+
+def test_lossy_replay_projection_retains_portable_tools_from_mixed_bundle() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [
+                {"type": "mcp", "name": "codex_app__read_thread"},
+                {"type": "custom", "name": "exec", "defer_loading": True},
+                {
+                    "type": "namespace",
+                    "name": "workspace",
+                    "description": "Local workspace tools.",
+                    "tools": [
+                        {"type": "mcp", "name": "account_owned_tool"},
+                        {
+                            "type": "function",
+                            "name": "inspect",
+                            "parameters": {"type": "object"},
+                            "output_schema": {"type": "object"},
+                            "defer_loading": True,
+                        },
+                        {
+                            "type": "shell",
+                            "allowed_callers": ["direct", "code_mode"],
+                            "environment": {"type": "local"},
+                        },
+                        {"type": "apply_patch", "allowed_callers": ["direct"]},
+                    ],
+                },
+            ],
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "Use available tools when possible."}],
+        },
+        {"type": "message", "role": "user", "content": "old question"},
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "old answer"}],
+        },
+        {"type": "message", "role": "user", "content": "continue"},
+    ]
+
+    strict_projection = project_responses_input_for_account_neutral_fresh_replay(
+        input_items,
+        stored_count=len(input_items),
+    )
+    lossy_projection = project_responses_input_for_account_neutral_fresh_replay(
+        input_items,
+        stored_count=len(input_items),
+        project_nonportable_additional_tools=True,
+    )
+
+    assert strict_projection is not None
+    assert responses_payload_is_account_neutral_fresh_replay({"input": strict_projection.input_items}) is False
+    assert lossy_projection is not None
+    assert lossy_projection.input_items == [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [
+                {"type": "custom", "name": "exec"},
+                {
+                    "type": "namespace",
+                    "name": "workspace",
+                    "description": "Local workspace tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "inspect",
+                            "parameters": {"type": "object"},
+                            "output_schema": {"type": "object"},
+                            "defer_loading": True,
+                        },
+                        {
+                            "type": "shell",
+                            "allowed_callers": ["direct", "code_mode"],
+                            "environment": {"type": "local"},
+                        },
+                        {"type": "apply_patch", "allowed_callers": ["direct"]},
+                    ],
+                },
+            ],
+        },
+        *input_items[1:],
+    ]
+    assert responses_payload_is_account_neutral_fresh_replay({"input": lossy_projection.input_items}) is True
+
+
 def test_account_neutral_replay_projection_rejects_invalid_stored_boundary() -> None:
     assert (
         project_responses_input_for_account_neutral_fresh_replay(

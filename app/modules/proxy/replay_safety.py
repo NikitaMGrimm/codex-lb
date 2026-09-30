@@ -22,10 +22,27 @@ _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES = frozenset(
 )
 _INTERNAL_CHAT_MESSAGE_METADATA_FIELD = "internal_chat_message_metadata_passthrough"
 _ACCOUNT_NEUTRAL_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"turn_id"})
-_ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset({"custom", "function", "web_search", "web_search_preview"})
+_PORTABLE_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS = frozenset({"content_item_kinds", "create_time", "turn_id"})
+_ACCOUNT_NEUTRAL_TOOL_TYPES = frozenset(
+    {"apply_patch", "custom", "function", "namespace", "shell", "web_search", "web_search_preview"}
+)
 _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS = {
+    "apply_patch": frozenset({"allowed_callers", "type"}),
     "custom": frozenset({"description", "format", "name", "type"}),
-    "function": frozenset({"description", "name", "parameters", "strict", "type"}),
+    "function": frozenset(
+        {
+            "allowed_callers",
+            "defer_loading",
+            "description",
+            "name",
+            "output_schema",
+            "parameters",
+            "strict",
+            "type",
+        }
+    ),
+    "namespace": frozenset({"description", "name", "tools", "type"}),
+    "shell": frozenset({"allowed_callers", "environment", "type"}),
     "web_search": frozenset({"filters", "search_context_size", "type", "user_location"}),
     "web_search_preview": frozenset({"filters", "search_context_size", "type", "user_location"}),
 }
@@ -100,7 +117,7 @@ _ACCOUNT_NEUTRAL_APPLY_PATCH_OPERATION_FIELDS = {
     "delete_file": frozenset({"path", "type"}),
     "update_file": frozenset({"diff", "path", "type"}),
 }
-_ACCOUNT_NEUTRAL_REASONING_CONFIG_FIELDS = frozenset({"effort", "summary"})
+_ACCOUNT_NEUTRAL_REASONING_CONFIG_FIELDS = frozenset({"effort", "summary", "context"})
 _ACCOUNT_NEUTRAL_CLIENT_METADATA_FIELDS = frozenset(
     {
         "ws_request_header_x_openai_internal_codex_responses_lite",
@@ -109,6 +126,11 @@ _ACCOUNT_NEUTRAL_CLIENT_METADATA_FIELDS = frozenset(
         "x-codex-turn-metadata",
         "x-codex-window-id",
         "x-openai-subagent",
+        "session_id",
+        "thread_id",
+        "turn_id",
+        "root_turn_id",
+        "x-codex-ws-stream-request-start-ms",
     }
 )
 _ACCOUNT_SCOPED_HOSTED_INPUT_TYPES = frozenset(
@@ -166,6 +188,7 @@ def project_responses_input_for_account_neutral_fresh_replay(
     *,
     stored_count: int,
     preserve_developer_message_ids: bool = False,
+    project_nonportable_additional_tools: bool = False,
 ) -> AccountNeutralReplayProjection | None:
     """Remove known response-owned bookkeeping after durable prefix proof.
 
@@ -185,6 +208,7 @@ def project_responses_input_for_account_neutral_fresh_replay(
         projected_item = _project_account_neutral_replay_item(
             item,
             preserve_developer_message_ids=preserve_developer_message_ids,
+            project_nonportable_additional_tools=project_nonportable_additional_tools,
         )
         if projected_item is not None:
             projected_items.append(projected_item)
@@ -227,6 +251,7 @@ def _project_account_neutral_replay_item(
     item: JsonValue,
     *,
     preserve_developer_message_ids: bool,
+    project_nonportable_additional_tools: bool,
 ) -> JsonValue | None:
     if not isinstance(item, dict):
         return item
@@ -240,16 +265,85 @@ def _project_account_neutral_replay_item(
         return item
     if item_type is not None and not isinstance(item_type, str):
         return item
+    if (
+        project_nonportable_additional_tools
+        and item_type == "additional_tools"
+        and not _is_canonical_lite_tool_bundle(item)
+    ):
+        return _project_portable_lite_tool_bundle(item)
     if item_type == "reasoning" or (
         item_type in _ACCOUNT_NEUTRAL_REPLAY_OMITTED_ITEM_TYPES and item.get("status") == "completed"
     ):
         return None
 
-    if "id" not in item:
-        return item
     projected_item = dict(item)
-    projected_item.pop("id")
+    projected_item.pop("id", None)
+    metadata = projected_item.get(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD)
+    if isinstance(metadata, dict) and set(metadata) <= _PORTABLE_INTERNAL_CHAT_MESSAGE_METADATA_FIELDS:
+        turn_id = metadata.get("turn_id")
+        if _is_nonblank_string(turn_id):
+            projected_item[_INTERNAL_CHAT_MESSAGE_METADATA_FIELD] = {"turn_id": turn_id}
+        else:
+            projected_item.pop(_INTERNAL_CHAT_MESSAGE_METADATA_FIELD, None)
+
+    if item_type in _TOOL_CALL_TYPE_BY_OUTPUT_TYPE and isinstance(projected_item.get("output"), list):
+        output = cast(list[JsonValue], projected_item["output"])
+        portable_output = [
+            part
+            for part in output
+            if not (
+                isinstance(part, dict)
+                and part.get("type") in {"input_text", "text"}
+                and isinstance(part.get("text"), str)
+                and not cast(str, part["text"]).strip()
+            )
+        ]
+        if len(portable_output) != len(output):
+            projected_item["output"] = portable_output or ""
     return projected_item
+
+
+def _project_portable_lite_tool_bundle(item: Mapping[str, JsonValue]) -> JsonValue | None:
+    """Retain safe Desktop tools when one declaration makes the bundle nonportable."""
+
+    tools = item.get("tools")
+    if item.get("role") != "developer" or not isinstance(tools, list):
+        return None
+    projected_tools: list[JsonValue] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        projected_tool = _project_account_neutral_tool_declaration(tool)
+        if projected_tool is not None:
+            projected_tools.append(projected_tool)
+    if not projected_tools:
+        return None
+    return {"type": "additional_tools", "role": "developer", "tools": projected_tools}
+
+
+def _project_account_neutral_tool_declaration(
+    tool: Mapping[str, JsonValue],
+) -> dict[str, JsonValue] | None:
+    tool_type = tool.get("type")
+    if not isinstance(tool_type, str):
+        return None
+    allowed_fields = _ACCOUNT_NEUTRAL_TOOL_DECLARATION_FIELDS.get(tool_type)
+    if allowed_fields is None:
+        return None
+    projected_tool: dict[str, JsonValue] = {key: value for key, value in tool.items() if key in allowed_fields}
+    if tool_type == "namespace":
+        nested_tools = projected_tool.get("tools")
+        if not isinstance(nested_tools, list):
+            return None
+        projected_nested_tools: list[JsonValue] = [
+            projected
+            for nested in nested_tools
+            if isinstance(nested, dict) and (projected := _project_account_neutral_tool_declaration(nested)) is not None
+        ]
+        if not projected_nested_tools:
+            return None
+        projected_tool["tools"] = projected_nested_tools
+    return projected_tool if _tool_declaration_is_account_neutral(projected_tool) else None
 
 
 def responses_input_items_are_self_contained_fresh_replay(input_items: list[JsonValue]) -> bool:
@@ -762,6 +856,7 @@ def _reasoning_config_is_account_neutral(reasoning: JsonValue | None) -> bool:
         isinstance(reasoning, dict)
         and all(key in _ACCOUNT_NEUTRAL_REASONING_CONFIG_FIELDS for key in reasoning)
         and all(value is None or isinstance(value, str) for value in reasoning.values())
+        and reasoning.get("context") in (None, "all_turns")
     )
 
 
@@ -803,7 +898,10 @@ def _client_metadata_is_account_neutral(client_metadata: JsonValue | None) -> bo
     if not isinstance(client_metadata, dict) or not set(client_metadata) <= _ACCOUNT_NEUTRAL_CLIENT_METADATA_FIELDS:
         return False
     return (
-        all(_is_nonblank_string(value) for value in client_metadata.values())
+        all(
+            isinstance(value, str) and (bool(value.strip()) or key in {"turn_id", "root_turn_id"})
+            for key, value in client_metadata.items()
+        )
         and client_metadata.get(
             "ws_request_header_x_openai_internal_codex_responses_lite",
             "true",
@@ -830,9 +928,33 @@ def _tool_declaration_is_account_neutral(tool: Mapping[str, JsonValue]) -> bool:
         return False
     if tool.get("description") is not None and not isinstance(tool.get("description"), str):
         return False
+    allowed_callers = tool.get("allowed_callers")
+    if allowed_callers is not None and not (
+        isinstance(allowed_callers, list) and all(_is_nonblank_string(caller) for caller in allowed_callers)
+    ):
+        return False
+    if tool_type == "apply_patch":
+        return True
+    if tool_type == "shell":
+        environment = tool.get("environment")
+        return environment is None or isinstance(environment, dict)
+    if tool_type == "namespace":
+        nested_tools = tool.get("tools")
+        return (
+            _is_nonblank_string(tool.get("name"))
+            and isinstance(nested_tools, list)
+            and bool(nested_tools)
+            and all(
+                isinstance(nested_tool, dict) and _tool_declaration_is_account_neutral(nested_tool)
+                for nested_tool in nested_tools
+            )
+        )
     if tool_type == "function":
-        return (tool.get("parameters") is None or isinstance(tool.get("parameters"), dict)) and (
-            tool.get("strict") is None or isinstance(tool.get("strict"), bool)
+        return (
+            (tool.get("parameters") is None or isinstance(tool.get("parameters"), dict))
+            and (tool.get("output_schema") is None or isinstance(tool.get("output_schema"), dict))
+            and (tool.get("strict") is None or isinstance(tool.get("strict"), bool))
+            and (tool.get("defer_loading") is None or isinstance(tool.get("defer_loading"), bool))
         )
     if tool_type == "custom":
         return _custom_tool_format_is_account_neutral(tool.get("format"))

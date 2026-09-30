@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+import pytest_asyncio
 from anyio import to_thread
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
@@ -37,7 +38,7 @@ from app.db.migrate import (
     run_upgrade,
 )
 from app.db.models import Account, AccountStatus
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 
 try:
@@ -51,6 +52,25 @@ _DATABASE_URL = get_settings().database_url
 _HEAD_REVISION = inspect_migration_state(_DATABASE_URL).head_revision
 _STAMPED_AFTER_LEGACY_PREFIX_4 = OLD_TO_NEW_REVISION_MAP["004_add_accounts_chatgpt_account_id"]
 _STAMPED_AFTER_LEGACY_PREFIX_1 = OLD_TO_NEW_REVISION_MAP["001_normalize_account_plan_types"]
+
+
+@pytest_asyncio.fixture
+async def db_setup(_reset_db_state):
+    """Model-built schema starts at the current migration revision."""
+    del _reset_db_state
+    async with engine.begin() as connection:
+        await connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(64) NOT NULL)"))
+        await connection.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": _HEAD_REVISION},
+        )
+        await connection.execute(
+            text("INSERT INTO runtime_sentinels (name, value) VALUES (:name, :revision)"),
+            {
+                "name": "dashboard_legacy_credentials_retired",
+                "revision": "20260912_010000_drop_legacy_dashboard_credentials",
+            },
+        )
 
 
 def _is_postgresql_database_url(url: str) -> bool:
@@ -80,6 +100,17 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
         await repo.upsert(_make_account("acc_two", "two@example.com", "PRO"))
         await repo.upsert(_make_account("acc_three", "three@example.com", ""))
 
+    # This fixture builds today's complete model schema. Replay only the
+    # historical data migration, then restore its matching schema revision.
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    config = _build_alembic_config(_DATABASE_URL)
+    await to_thread.run_sync(lambda: command.stamp(config, "20260213_000000_base_schema"))
+    await to_thread.run_sync(lambda: command.upgrade(config, "20260213_000100_normalize_account_plan_types"))
+    await to_thread.run_sync(lambda: command.stamp(config, _HEAD_REVISION))
+
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.current_revision == _HEAD_REVISION
     assert result.bootstrap.stamped_revision is None
@@ -102,6 +133,9 @@ async def test_run_startup_migrations_preserves_unknown_plan_types(db_setup):
 @pytest.mark.asyncio
 async def test_run_startup_migrations_bootstraps_legacy_history(db_setup):
     async with SessionLocal() as session:
+        await session.execute(text("DROP TABLE alembic_version"))
+        await session.execute(text("DELETE FROM runtime_sentinels WHERE name = 'dashboard_legacy_credentials_retired'"))
+        await session.execute(text("ALTER TABLE dashboard_settings DROP COLUMN pro_weekly_capacity_multiplier"))
         await session.execute(
             text(
                 """
@@ -133,6 +167,8 @@ async def test_run_startup_migrations_bootstraps_legacy_history(db_setup):
 @pytest.mark.asyncio
 async def test_run_startup_migrations_skips_legacy_stamp_when_required_tables_missing(db_setup):
     async with SessionLocal() as session:
+        await session.execute(text("DROP TABLE alembic_version"))
+        await session.execute(text("DELETE FROM runtime_sentinels WHERE name = 'dashboard_legacy_credentials_retired'"))
         await session.execute(text("DROP TABLE dashboard_settings"))
         await session.execute(
             text(
@@ -164,6 +200,9 @@ async def test_run_startup_migrations_skips_legacy_stamp_when_required_tables_mi
 @pytest.mark.asyncio
 async def test_run_startup_migrations_handles_unknown_legacy_rows(db_setup):
     async with SessionLocal() as session:
+        await session.execute(text("DROP TABLE alembic_version"))
+        await session.execute(text("DELETE FROM runtime_sentinels WHERE name = 'dashboard_legacy_credentials_retired'"))
+        await session.execute(text("ALTER TABLE dashboard_settings DROP COLUMN pro_weekly_capacity_multiplier"))
         await session.execute(
             text(
                 """
@@ -199,6 +238,7 @@ async def test_run_startup_migrations_auto_remaps_legacy_alembic_revision_ids(db
     legacy_head = "013_add_dashboard_settings_routing_strategy"
     async with SessionLocal() as session:
         await session.execute(text("UPDATE alembic_version SET version_num = :legacy"), {"legacy": legacy_head})
+        await session.execute(text("ALTER TABLE dashboard_settings DROP COLUMN pro_weekly_capacity_multiplier"))
         await session.commit()
 
     result = await run_startup_migrations(_DATABASE_URL)
@@ -221,6 +261,7 @@ async def test_run_startup_migrations_auto_remaps_firewall_legacy_revision_id(db
             text("UPDATE alembic_version SET version_num = :legacy"),
             {"legacy": legacy_firewall_revision},
         )
+        await session.execute(text("ALTER TABLE dashboard_settings DROP COLUMN pro_weekly_capacity_multiplier"))
         await session.commit()
 
     result = await run_startup_migrations(_DATABASE_URL)
@@ -257,6 +298,7 @@ async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_ale
             text("UPDATE alembic_version SET version_num = :legacy"),
             {"legacy": "013_add_dashboard_settings_routing_strategy"},
         )
+        await session.execute(text("ALTER TABLE dashboard_settings DROP COLUMN pro_weekly_capacity_multiplier"))
         await session.commit()
 
     result = await run_startup_migrations(_DATABASE_URL)
@@ -311,6 +353,7 @@ async def test_postgresql_startup_migration_auto_remap_legacy_head(db_setup):
             text("UPDATE alembic_version SET version_num = :legacy"),
             {"legacy": "013_add_dashboard_settings_routing_strategy"},
         )
+        await session.execute(text("ALTER TABLE dashboard_settings DROP COLUMN pro_weekly_capacity_multiplier"))
         await session.commit()
 
     result = await run_startup_migrations(_DATABASE_URL)
@@ -3403,7 +3446,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path, db
     else:
         db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-usage-limits.sqlite'}"
     revision = "20260728_010000_add_account_usage_limits"
-    parent_revision = "20260918_000000_merge_scim_and_overflow_heads"
+    parent_revision = "20260812_120000_add_sticky_abandonment_scope"
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
 

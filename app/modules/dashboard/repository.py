@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import case, func, select, union_all
+from sqlalchemy import case, func, or_, select, tuple_, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import BucketConversationAggregate, BucketModelAggregate, RequestActivityAggregate
@@ -73,6 +73,14 @@ class ApiKeyAttributionRow:
     dominant_model: str
 
 
+@dataclass(frozen=True, slots=True)
+class QuotaObservation:
+    account_id: str
+    recorded_at: datetime
+    used_percent: float
+    reset_at: int | None
+
+
 class DashboardRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -88,6 +96,106 @@ class DashboardRepository:
 
     async def latest_usage_by_account(self, window: str) -> dict[str, UsageHistory]:
         return await self._usage_repo.latest_by_account(window=window)
+
+    async def latest_full_long_observation(
+        self,
+        account_id: str,
+        window_minutes: int,
+        since: datetime,
+        until: datetime,
+    ) -> QuotaObservation | None:
+        result = await self._session.execute(
+            select(
+                UsageHistory.account_id,
+                UsageHistory.recorded_at,
+                UsageHistory.used_percent,
+                UsageHistory.reset_at,
+            )
+            .where(
+                UsageHistory.account_id == account_id,
+                UsageHistory.recorded_at >= since,
+                UsageHistory.recorded_at <= until,
+                UsageHistory.window_minutes == window_minutes,
+                UsageHistory.used_percent >= 100,
+            )
+            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            .limit(1)
+        )
+        row = result.first()
+        return QuotaObservation(*row) if row is not None else None
+
+    async def long_quota_observations(
+        self,
+        account_windows: dict[str, int],
+        since: datetime,
+        until: datetime,
+    ) -> list[QuotaObservation]:
+        if not account_windows:
+            return []
+        # Keep both sides of each percentage change, including the last 100%
+        # row before a reset. The caller starts this scan at that indexed row.
+        ordered = (
+            select(
+                UsageHistory.id.label("id"),
+                UsageHistory.account_id.label("account_id"),
+                UsageHistory.recorded_at.label("recorded_at"),
+                UsageHistory.used_percent.label("used_percent"),
+                UsageHistory.reset_at.label("reset_at"),
+                func.lag(UsageHistory.used_percent)
+                .over(partition_by=UsageHistory.account_id, order_by=(UsageHistory.recorded_at, UsageHistory.id))
+                .label("previous_used"),
+                func.lead(UsageHistory.used_percent)
+                .over(partition_by=UsageHistory.account_id, order_by=(UsageHistory.recorded_at, UsageHistory.id))
+                .label("next_used"),
+            )
+            .where(
+                tuple_(UsageHistory.account_id, UsageHistory.window_minutes).in_(list(account_windows.items())),
+                UsageHistory.recorded_at >= since,
+                UsageHistory.recorded_at <= until,
+            )
+            .subquery()
+        )
+        result = await self._session.execute(
+            select(
+                ordered.c.account_id,
+                ordered.c.recorded_at,
+                ordered.c.used_percent,
+                ordered.c.reset_at,
+            )
+            .where(
+                or_(
+                    ordered.c.previous_used.is_(None),
+                    ordered.c.next_used.is_(None),
+                    ordered.c.used_percent != ordered.c.previous_used,
+                    ordered.c.used_percent != ordered.c.next_used,
+                )
+            )
+            .order_by(ordered.c.account_id, ordered.c.recorded_at, ordered.c.id)
+        )
+        return [QuotaObservation(*row) for row in result.all()]
+
+    async def successful_costs_by_account(
+        self,
+        account_ids: list[str],
+        since: datetime,
+        until: datetime,
+    ) -> dict[str, float]:
+        if not account_ids:
+            return {}
+        result = await self._session.execute(
+            select(RequestLog.account_id, func.sum(RequestLog.cost_usd))
+            .where(
+                RequestLog.account_id.in_(account_ids),
+                RequestLog.requested_at > since,
+                RequestLog.requested_at <= until,
+                RequestLog.status == "success",
+                RequestLog.cost_usd.is_not(None),
+            )
+            .group_by(RequestLog.account_id)
+        )
+        return {
+            account_id: float(cost) for account_id, cost in result.all() if account_id is not None and cost is not None
+        }
 
     async def bulk_usage_history_since(
         self,

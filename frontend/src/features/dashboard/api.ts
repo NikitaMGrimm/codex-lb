@@ -6,6 +6,7 @@ import {
   DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   DashboardProjectionsSchema,
+  QuotaLbShareResponseSchema,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
   type ConversationTimeframe,
@@ -63,6 +64,10 @@ export function getDashboardOverview(params: DashboardOverviewParams = {}) {
 
 export function getDashboardProjections() {
   return get(`${DASHBOARD_PATH}/projections`, DashboardProjectionsSchema);
+}
+
+export function getDashboardQuotaLbShare() {
+  return get(`${DASHBOARD_PATH}/quota-lb-share`, QuotaLbShareResponseSchema);
 }
 
 export function getRequestLogs(params: RequestLogsListFilters = {}) {

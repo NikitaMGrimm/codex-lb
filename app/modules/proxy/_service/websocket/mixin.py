@@ -418,6 +418,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_matching_websocket_request_states,
     _pop_replayable_precreated_websocket_request_state,
     _pop_terminal_websocket_request_state,
+    _prepare_websocket_quota_account_switch,
     _prepare_websocket_request_state_for_account_switch,
     _prepare_websocket_request_state_for_auth_replay,
     _record_or_defer_websocket_accepted_replay_health,
@@ -6012,6 +6013,11 @@ class _WebSocketMixin:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
+        if retry_error_code in {"usage_limit_reached", "rate_limit_exceeded", "insufficient_quota", "quota_exceeded"}:
+            if _prepare_websocket_quota_account_switch(request_state) is not None:
+                await proxy._release_request_state_account_response_create_lease(request_state)
+                request_state.excluded_account_ids.add(account.id)
+                request_state.affinity_policy = replace(request_state.affinity_policy, reallocate_sticky=True)
         # An accepted lifecycle is classified only by the output-free capacity
         # rule and never takes the pre-created anchored branches below: its
         # anchor is handled where the replay is staged, so an anchored turn the

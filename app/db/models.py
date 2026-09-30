@@ -1636,6 +1636,7 @@ class DashboardSettings(Base):
         server_default=text("30"),
         nullable=False,
     )
+    pro_weekly_capacity_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
     limit_warmup_staggered_idle_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

@@ -1401,6 +1401,44 @@ class DurableBridgeRepository:
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 
+    async def rebind_closed_session_account(
+        self,
+        *,
+        session_id: str,
+        owner_epoch: int,
+        expected_account_id: str | None,
+        account_id: str,
+        expected_latest_response_id: str | None,
+        expected_latest_turn_state: str | None,
+    ) -> bool:
+        """Move a released session to its recovery account under exact anchor fences."""
+
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id.is_(None),
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                    HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
+                    HttpBridgeSessionRecord.account_id == expected_account_id,
+                    HttpBridgeSessionRecord.latest_response_id == expected_latest_response_id,
+                    HttpBridgeSessionRecord.latest_turn_state == expected_latest_turn_state,
+                )
+                .values(
+                    account_id=account_id,
+                    latest_response_id=None,
+                    latest_turn_state=None,
+                    latest_input_item_count=None,
+                    latest_input_full_fingerprint=None,
+                    latest_pending_tool_calls_json=None,
+                )
+            )
+            if bool(getattr(result, "rowcount", 0)):
+                await self._clear_aliases_for_session(session_id)
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
     async def release_session(
         self,
         *,

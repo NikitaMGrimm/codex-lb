@@ -131,6 +131,7 @@ class DashboardSettingsResponse(DashboardModel):
     limit_warmup_min_available_percent: float = Field(gt=0.0, le=100.0)
     weekly_pace_working_days: str = _DEFAULT_WEEKLY_PACE_WORKING_DAYS
     weekly_pace_smoothing_minutes: int = Field(default=30)
+    pro_weekly_capacity_multiplier: float | None = Field(default=None, gt=0, le=1000)
     limit_warmup_staggered_idle_enabled: bool
     request_log_retention_days: int = Field(ge=0, le=3650)
     usage_history_retention_days: int = Field(ge=0, le=3650)
@@ -303,6 +304,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     limit_warmup_min_available_percent: float | None = Field(default=None, gt=0.0, le=100.0)
     weekly_pace_working_days: str | None = None
     weekly_pace_smoothing_minutes: int | None = None
+    pro_weekly_capacity_multiplier: float | None = Field(default=None, gt=0, le=1000)
     guest_access_enabled: bool | None = None
     limit_warmup_staggered_idle_enabled: bool | None = None
     # Tri-state retention overrides: absent = unchanged, present null = clear
