@@ -683,21 +683,25 @@ class UsageUpdater:
                 await self._additional_usage_repo.delete_for_account(account.id)
 
         rate_limit = payload.rate_limit
-        if rate_limit is None:
+        if rate_limit is None and not account.usage_limit_enabled:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
-        # Treat both None and empty rate_limit (both windows absent) as
-        # additional-only to avoid falling through to window processing.
         normalized_windows = usage_core.normalize_rate_limit_windows(
-            rate_limit.primary_window,
-            rate_limit.secondary_window,
+            rate_limit.primary_window if rate_limit is not None else None,
+            rate_limit.secondary_window if rate_limit is not None else None,
         )
         primary = normalized_windows.primary
         secondary = normalized_windows.secondary
         monthly = normalized_windows.monthly
         if primary is None and secondary is None and monthly is None:
-            additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
-            return AccountRefreshResult(usage_written=additional_synced)
+            if not account.usage_limit_enabled:
+                additional_synced = (
+                    self._additional_usage_repo is not None and payload.additional_rate_limits is not None
+                )
+                return AccountRefreshResult(usage_written=additional_synced)
+            # A successful poll with no standard measurements supersedes old
+            # policy evidence, including historical weekly/monthly shapes.
+            primary = secondary = monthly = UsageWindow()
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         snapshot_windows: list[UsageWindowWrite] = []
 

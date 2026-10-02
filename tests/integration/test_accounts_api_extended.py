@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
+from app.core.usage.models import RateLimitPayload, UsagePayload
 from app.core.usage.refresh_scheduler import reconcile_recoverable_account_statuses
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, RequestLog, UsageHistory
@@ -18,6 +19,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, is_account_routing_unavailable
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
+from app.modules.usage.updater import UsageUpdater
 
 pytestmark = pytest.mark.integration
 
@@ -93,6 +95,52 @@ async def test_import_invalid_json_returns_400(async_client):
     assert response.status_code == 400
     payload = response.json()
     assert payload["error"]["code"] == "invalid_auth_json"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plan_type", ["plus", "free"])
+@pytest.mark.parametrize("empty_rate_limit", [None, RateLimitPayload()], ids=["omitted", "empty"])
+async def test_empty_poll_supersedes_usage_limit_telemetry(
+    async_client,
+    db_setup,
+    monkeypatch,
+    plan_type,
+    empty_rate_limit,
+) -> None:
+    account = _make_account("acc_empty_policy_poll", "empty-policy-poll@example.com", plan_type=plan_type)
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 50.0
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        usage = UsageRepository(session)
+        for window, minutes in (("primary", 300), ("secondary", 10080), ("monthly", 43200)):
+            await usage.add_entry(
+                account.id,
+                5.0,
+                window=window,
+                window_minutes=minutes,
+                reset_at=naive_utc_to_epoch(utcnow()) + minutes * 60,
+            )
+    before = await async_client.get("/api/accounts")
+    assert before.json()["accounts"][0]["usageLimitState"] == "available"
+
+    async def empty_poll(**_kwargs):
+        return UsagePayload(plan_type=plan_type, rate_limit=empty_rate_limit)
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", empty_poll)
+    async with SessionLocal() as session:
+        result = await UsageUpdater(UsageRepository(session))._refresh_account(account, usage_account_id=None)
+    assert result.usage_written is True
+    after = await async_client.get("/api/accounts")
+    assert after.status_code == 200
+    assert after.json()["accounts"][0]["usageLimitState"] == "data_unavailable"
+    for stream in (False, True):
+        denied = await async_client.post(
+            "/v1/responses", json={"model": "gpt-5.1", "input": "blocked", "stream": stream}
+        )
+        assert denied.status_code == 503
+        assert denied.json()["error"]["code"] == "account_usage_limit_reached"
+        assert denied.json()["error"]["type"] == "server_error"
 
 
 @pytest.mark.asyncio
