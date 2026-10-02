@@ -21,6 +21,7 @@ None.
 ### Modified Capabilities
 
 - `account-routing`: Specify authorization after dispatch preparation and affinity persistence, and unavailable telemetry after an empty successful poll.
+- `database-migrations`: Accept explicit convergence of parallel published history while rejecting unmerged migration forks.
 
 ## Impact
 

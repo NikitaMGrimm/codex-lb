@@ -1,8 +1,7 @@
 # proxy-warmup Specification
 
 ## Purpose
-TBD - created by archiving change add-v1-warmup-endpoint. Update Purpose after archive.
-
+Governs `POST /v1/warmup`, which lets API-key clients warm the accounts in their pool before real traffic so first-request latency and upstream cold starts do not reach users. It defines target-pool derivation from key scope, deterministic `normal`/`strict`/`force` mode semantics, the minimal upstream request, and the rule that warmup traffic is visible in request logs but excluded from aggregate and API-key usage accounting.
 ## Requirements
 
 ### Requirement: Warmup endpoint is exposed on the v1 proxy surface
@@ -113,3 +112,18 @@ Warmup request rows SHALL be excluded from aggregate dashboard request/error/cos
 #### Scenario: API key usage summaries ignore warmup rows
 - **WHEN** API key usage summary/trend endpoints are queried for a key with warmup and normal rows
 - **THEN** warmup rows do not contribute to API key request/token/cost usage totals
+
+### Requirement: Daybreak capability intent fails closed before warmup fan-out
+
+`POST /v1/warmup` and `POST /v1/warmup/{mode}` MUST require a valid proxy API key whenever `X-Codex-LB-Required-Capability` is present, even when deployment-wide API-key authentication is disabled. After authentication they MUST return HTTP 400 with `error.code = "required_capability_transport_unsupported"` before mode validation, account-pool evaluation, or any upstream warmup submission. Headerless warmup requests MUST retain their existing behavior.
+
+#### Scenario: Authenticated carrier is denied before warmup routing
+
+- **WHEN** a valid proxy API key sends either warmup route with the Daybreak carrier
+- **THEN** the route returns HTTP 400 `required_capability_transport_unsupported`
+- **AND** no account pool is evaluated and no upstream warmup is submitted
+
+#### Scenario: Headerless warmup behavior remains unchanged
+
+- **WHEN** a warmup request omits the required-capability carrier
+- **THEN** the existing authentication, mode, account-scope, and fan-out behavior remains in effect

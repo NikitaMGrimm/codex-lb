@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -17,6 +18,7 @@ from app.modules.quota_planner.logic import (
     build_demand_forecast,
     build_routing_costs,
     candidate_start_times,
+    demand_units_by_slot_epoch,
     parse_working_days,
     plan_shadow_actions,
     simulate_pool,
@@ -41,8 +43,10 @@ async def test_deferred_warmup_cleanup_preserves_cancellation_when_cleanup_fails
         decision_id: str,
         reason: str,
         reservation_id: str | None,
+        claim_executed_at: datetime,
+        claim_lease_expires_at: datetime,
     ) -> WarmupExecutionResult:
-        del decision_id, reason, reservation_id
+        del decision_id, reason, reservation_id, claim_executed_at, claim_lease_expires_at
         cleanup_started.set()
         await allow_cleanup_to_fail.wait()
         raise RuntimeError("cleanup failed")
@@ -53,6 +57,8 @@ async def test_deferred_warmup_cleanup_preserves_cancellation_when_cleanup_fails
             decision_id="decision-cleanup-failure",
             reason="account_usage_limit_authorization_cancelled",
             reservation_id=None,
+            claim_executed_at=datetime.now(timezone.utc),
+            claim_lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         )
     )
     await cleanup_started.wait()
@@ -77,8 +83,10 @@ async def test_deferred_warmup_cleanup_propagates_failure_without_cancellation(
         decision_id: str,
         reason: str,
         reservation_id: str | None,
+        claim_executed_at: datetime,
+        claim_lease_expires_at: datetime,
     ) -> WarmupExecutionResult:
-        del decision_id, reason, reservation_id
+        del decision_id, reason, reservation_id, claim_executed_at, claim_lease_expires_at
         raise RuntimeError("cleanup failed")
 
     monkeypatch.setattr(QuotaWarmupService, "_skip_claimed_warmup", fail_cleanup)
@@ -88,6 +96,8 @@ async def test_deferred_warmup_cleanup_propagates_failure_without_cancellation(
             decision_id="decision-cleanup-failure-no-cancel",
             reason="account_usage_limit_authorization_failed",
             reservation_id=None,
+            claim_executed_at=datetime.now(timezone.utc),
+            claim_lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         )
 
 
@@ -177,6 +187,16 @@ def test_build_routing_costs_skips_accounts_without_short_windows() -> None:
 
     assert "weekly-only" not in costs
     assert costs["cold-5h"].total == 40.0
+
+
+@pytest.mark.parametrize("timezone_name", ["/Europe/Stockholm", "Europe/../Stockholm", "Unknown/Timezone"])
+def test_build_routing_costs_uses_utc_for_legacy_invalid_timezone(timezone_name: str) -> None:
+    now = datetime(2026, 5, 18, 3, 0, tzinfo=timezone.utc)
+    states = [AccountState("cold", AccountStatus.ACTIVE, used_percent=0.0, primary_window_minutes=300)]
+
+    costs = build_routing_costs(settings=PlannerSettings(timezone=timezone_name), states=states, now=now)
+
+    assert costs == build_routing_costs(settings=PlannerSettings(timezone="UTC"), states=states, now=now)
 
 
 def test_build_routing_costs_treats_live_primary_window_as_active() -> None:
@@ -499,6 +519,11 @@ async def test_quota_planner_repository_normalizes_aware_datetimes_at_session_bo
         assert len(bins) == 1
         assert bins[0].request_count == 1
         assert bins[0].cost_usd == pytest.approx(0.25)
+
+        slots = await repo.aggregate_demand_slot_units(since=aware_since)
+
+        assert [(slot.slot_epoch, slot.request_kind) for slot in slots] == [(bins[0].slot_epoch, "warmup")]
+        assert slots[0].demand_units == pytest.approx(25.0)
 
 
 def test_candidate_start_times_do_not_floor_now_into_the_past() -> None:
@@ -904,3 +929,71 @@ def test_build_demand_forecast_uses_current_proxy_history_rows() -> None:
     peak_slot = next(slot for slot in forecast.slots if slot.slot_start.hour == 10)
 
     assert peak_slot.demand_units == pytest.approx(60.6)
+
+
+def _demand_bin(slot_epoch: int, request_kind: str = "real", **measures) -> DemandBin:
+    values = {
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "request_count": 0,
+    }
+    values.update(measures)
+    return DemandBin(
+        slot_epoch=slot_epoch,
+        account_id="acc",
+        api_key_id="key",
+        model="gpt-5.4-mini",
+        reasoning_effort=None,
+        request_kind=request_kind,
+        status="success",
+        **values,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _SlotUnits:
+    slot_epoch: int
+    request_kind: str
+    demand_units: float
+
+
+def test_demand_units_by_slot_epoch_matches_between_bins_and_slot_units() -> None:
+    # Two grain rows share slot 900: one is token-dominated, one is
+    # cost-dominated. ``max()`` runs per row before the per-slot sum, so the
+    # pre-reduced shape must carry the same per-row maxima summed.
+    bins = [
+        _demand_bin(900, input_tokens=12_000, request_count=1),  # 12.0 token units > 5.0 request units
+        _demand_bin(900, cost_usd=0.5, request_count=1),  # 50.0 cost units
+        _demand_bin(1800, request_count=3),  # 15.0 request units
+        _demand_bin(1800, request_kind="warmup", cost_usd=9.0, request_count=1),  # excluded kind
+    ]
+    from_bins = demand_units_by_slot_epoch(bins)
+    assert from_bins == {900: pytest.approx(62.0), 1800: pytest.approx(15.0)}
+
+    slot_units = [
+        _SlotUnits(900, "real", 62.0),
+        _SlotUnits(1800, "real", 15.0),
+        _SlotUnits(1800, "warmup", 900.0),
+        _SlotUnits(2700, "REAL", -3.0),  # kind matching is case-insensitive, negative units clamp to zero
+    ]
+    from_slots = demand_units_by_slot_epoch(slot_units=slot_units)
+    assert from_slots == {900: pytest.approx(62.0), 1800: pytest.approx(15.0), 2700: 0.0}
+
+    combined = demand_units_by_slot_epoch(bins[:2], slot_units[1:2])
+    assert combined == {900: pytest.approx(62.0), 1800: pytest.approx(15.0)}
+
+
+def test_build_demand_forecast_accepts_pre_reduced_slot_units() -> None:
+    now = datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)
+    settings = PlannerSettings(timezone="UTC")
+    slot_epochs = [int((now - timedelta(days=7, hours=h)).timestamp()) for h in range(0, 6)]
+    bins = [_demand_bin(epoch, input_tokens=40_000 * (i + 1), request_count=4) for i, epoch in enumerate(slot_epochs)]
+    slot_units = [_SlotUnits(epoch, "real", units) for epoch, units in demand_units_by_slot_epoch(bins).items()]
+
+    from_bins = build_demand_forecast(settings=settings, bins=bins, now=now, horizon_hours=6)
+    from_slots = build_demand_forecast(settings=settings, slot_units=slot_units, now=now, horizon_hours=6)
+
+    assert from_bins.total_demand_units > 0
+    assert from_slots == from_bins

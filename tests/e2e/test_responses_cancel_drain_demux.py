@@ -14,21 +14,13 @@ import anyio
 import pytest
 
 from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.clients.proxy_websocket import UpstreamWebSocketMessage as _FakeUpstreamMessage
 from app.core.config.settings import Settings
 from app.core.usage.account_limits import AccountUsageLimitState
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
 
 pytestmark = pytest.mark.e2e
-
-
-class _FakeUpstreamMessage:
-    def __init__(self, kind: str, *, text: str | None = None, close_code: int | None = None) -> None:
-        self.kind = kind
-        self.text = text
-        self.close_code = close_code
-        self.error = None
-        self.data = None
 
 
 class _CancelThenRetryUpstreamWebSocket:
@@ -186,6 +178,7 @@ def _make_session(upstream: _CancelThenRetryUpstreamWebSocket) -> proxy_service.
 @pytest.mark.asyncio
 async def test_cancelled_http_bridge_stream_retires_before_retry_can_share_upstream(
     monkeypatch: pytest.MonkeyPatch,
+    db_setup,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     monkeypatch.setattr(
