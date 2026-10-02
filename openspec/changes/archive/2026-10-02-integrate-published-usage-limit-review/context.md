@@ -23,3 +23,13 @@ Combined bridge/WebSocket/retry/cancellation coverage passed 1,596 tests. Contra
 Evaluator/typed authorization coverage passed 87 tests. Historical upgrade coverage passed three local/upstream starting revisions and a database built from the published graph, retaining saved defaults and overrides with no schema drift. `make migration-check` reports one head, policy OK, and no schema drift. Repository lint, architecture/cancellation/timing/settings checks, backend typing, frontend lint/types/production build, 222 focused account UI tests, and 371 dashboard/mock tests passed. Strict validation passed both changes and all 67 main specs.
 
 PostgreSQL is not configured in this checkout; current SQLite checks do not substitute for PostgreSQL CI. The previous published audit's PostgreSQL evidence remains historical. No claim is made that current-head cloud CI has completed.
+
+## Cloud security scan follow-up
+
+The first integrated head passed cloud PostgreSQL migration checks, but Docker's Trivy scan rejected inherited urllib3 2.7.0 for CVE-2026-97687 and CVE-2026-97689. Both are fixed in 2.8.0. Raise the existing dependency floor and update only urllib3 in the lock; retain the security scan unchanged. This is a patch to an existing runtime dependency, with no new feature, setting, service, or dependency.
+
+Only urllib3 changed in the lock, to 2.8.0; the project version spelling and all other dependency versions remain intact. `uv lock --check` passed, the installed version is 2.8.0, package compatibility checks passed for 103 installed packages, and 36 metrics/usage-client tests passed. The broader optional telemetry check exposed three isolated lifespan fixture failures, tracked for the independent review rather than attributed to urllib3.
+
+## Delivery
+
+The integrated merge was pushed normally as `ab7794b57` and verified as PR #1528's published head before the requested independent GPT-6.1 Sol max review started. Both histories and upstream `f8ffbac20` are ancestors. The dependency scan correction follows in a focused commit on the same PR; current-head cloud checks must be evaluated again after that push.
