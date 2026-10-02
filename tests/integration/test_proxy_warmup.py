@@ -1077,6 +1077,42 @@ async def test_warmup_uses_api_key_enforced_model_over_dashboard_model(async_cli
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("policy_state", ["reached", "data_unavailable"])
+async def test_warmup_strict_rejects_policy_blocked_target_without_upstream_calls(
+    async_client, monkeypatch, policy_state
+):
+    await _enable_api_key_auth(async_client)
+    eligible_id = await _import_account(async_client, "acc-strict-eligible", "strict-a@example.com")
+    blocked_id = await _import_account(async_client, "acc-strict-blocked", "strict-b@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    await _add_primary_usage(blocked_id, used_percent=0.0, window_minutes=300)
+    if policy_state == "reached":
+        await _add_usage(blocked_id, window="secondary", used_percent=40.0, window_minutes=10080)
+    usage_limit = await async_client.put(
+        f"/api/accounts/{blocked_id}/usage-limit",
+        json={"enabled": True, "percentWeekly": 40.0},
+    )
+    assert usage_limit.status_code == 200
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    blocked_account = next(account for account in accounts.json()["accounts"] if account["accountId"] == blocked_id)
+    assert blocked_account["usageLimitState"] == policy_state
+    _, key = await _create_api_key(async_client, name="warmup-strict-policy")
+    compact = AsyncMock()
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "strict"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    compact.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_warmup_strict_rejects_mixed_eligibility_without_upstream_calls(async_client, monkeypatch):
     await _enable_api_key_auth(async_client)
     eligible_id = await _import_account(async_client, "acc-strict-eligible", "strict-a@example.com")

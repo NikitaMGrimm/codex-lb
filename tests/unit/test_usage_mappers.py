@@ -57,14 +57,6 @@ def test_maps_no_data_placeholder_to_missing_measurement(used_percent: float) ->
     assert row.used_percent is None
 
 
-def test_maps_zero_percent_no_data_placeholder_to_missing_measurement() -> None:
-    entry = _entry(used_percent=0.0, reset_at=None, window_minutes=None)
-
-    row = usage_history_to_window_row(entry)
-
-    assert row.used_percent is None
-
-
 def test_returns_distinct_rows_per_entry() -> None:
     a = _entry(account_id="acc-a", used_percent=10.0)
     b = _entry(account_id="acc-b", used_percent=20.0)

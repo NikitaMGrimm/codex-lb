@@ -383,6 +383,57 @@ class _FakeBridgeUpstreamWebSocket:
         return None
 
 
+class _OverlappingBridgeUpstream(_FakeBridgeUpstreamWebSocket):
+    def __init__(self) -> None:
+        super().__init__("resp_usage_limit_overlap")
+        self.first_request_sent = asyncio.Event()
+        self.closed_event = asyncio.Event()
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {
+                            "id": "resp_usage_limit_overlap",
+                            "object": "response",
+                            "status": "in_progress",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        self.first_request_sent.set()
+
+    async def complete_first_response(self) -> None:
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_usage_limit_overlap",
+                            "object": "response",
+                            "status": "completed",
+                            "output": [],
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+    async def close(self) -> None:
+        await super().close()
+        self.closed_event.set()
+
+
 class _InterruptedCustomToolUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     """First response completes with an unresolved ``custom_tool_call``."""
 
@@ -5051,56 +5102,6 @@ async def test_v1_responses_http_bridge_usage_limit_rejects_only_overlapping_new
         )
         await session.commit()
 
-    class _OverlappingBridgeUpstream(_FakeBridgeUpstreamWebSocket):
-        def __init__(self) -> None:
-            super().__init__("resp_usage_limit_overlap")
-            self.first_request_sent = asyncio.Event()
-            self.closed_event = asyncio.Event()
-
-        async def send_text(self, text: str) -> None:
-            self.sent_text.append(text)
-            await self._messages.put(
-                _FakeUpstreamMessage(
-                    "text",
-                    text=json.dumps(
-                        {
-                            "type": "response.created",
-                            "response": {
-                                "id": "resp_usage_limit_overlap",
-                                "object": "response",
-                                "status": "in_progress",
-                            },
-                        },
-                        separators=(",", ":"),
-                    ),
-                )
-            )
-            self.first_request_sent.set()
-
-        async def complete_first_response(self) -> None:
-            await self._messages.put(
-                _FakeUpstreamMessage(
-                    "text",
-                    text=json.dumps(
-                        {
-                            "type": "response.completed",
-                            "response": {
-                                "id": "resp_usage_limit_overlap",
-                                "object": "response",
-                                "status": "completed",
-                                "output": [],
-                                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-                            },
-                        },
-                        separators=(",", ":"),
-                    ),
-                )
-            )
-
-        async def close(self) -> None:
-            await super().close()
-            self.closed_event.set()
-
     upstream = _OverlappingBridgeUpstream()
 
     _install_bridge_account_upstream(monkeypatch, account=account, upstream=upstream)
@@ -5246,73 +5247,9 @@ async def test_http_bridge_policy_read_interruption_preserves_overlapping_turn(
         )
         await session.commit()
 
-    class _OverlappingBridgeUpstream(_FakeBridgeUpstreamWebSocket):
-        def __init__(self) -> None:
-            super().__init__("resp_usage_limit_overlap")
-            self.first_request_sent = asyncio.Event()
-            self.closed_event = asyncio.Event()
-
-        async def send_text(self, text: str) -> None:
-            self.sent_text.append(text)
-            await self._messages.put(
-                _FakeUpstreamMessage(
-                    "text",
-                    text=json.dumps(
-                        {
-                            "type": "response.created",
-                            "response": {
-                                "id": "resp_usage_limit_overlap",
-                                "object": "response",
-                                "status": "in_progress",
-                            },
-                        },
-                        separators=(",", ":"),
-                    ),
-                )
-            )
-            self.first_request_sent.set()
-
-        async def complete_first_response(self) -> None:
-            await self._messages.put(
-                _FakeUpstreamMessage(
-                    "text",
-                    text=json.dumps(
-                        {
-                            "type": "response.completed",
-                            "response": {
-                                "id": "resp_usage_limit_overlap",
-                                "object": "response",
-                                "status": "completed",
-                                "output": [],
-                                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-                            },
-                        },
-                        separators=(",", ":"),
-                    ),
-                )
-            )
-
-        async def close(self) -> None:
-            await super().close()
-            self.closed_event.set()
-
     upstream = _OverlappingBridgeUpstream()
 
-    async def fake_select_account_with_budget(self, deadline, **kwargs):
-        del self, deadline, kwargs
-        return AccountSelection(account=account, error_message=None, error_code=None)
-
-    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
-        del self, force, timeout_seconds
-        return target
-
-    async def fake_connect_responses_websocket(*args, **kwargs):
-        del args, kwargs
-        return upstream
-
-    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
-    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    _install_bridge_account_upstream(monkeypatch, account=account, upstream=upstream)
 
     prompt_cache_key = "usage-limit-overlap"
     payload = {
