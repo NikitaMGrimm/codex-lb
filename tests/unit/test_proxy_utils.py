@@ -2514,8 +2514,8 @@ async def test_warmup_persists_conversation_id_in_request_log(monkeypatch):
 @pytest.mark.asyncio
 async def test_warmup_prohibit_fast_mode_omits_alias_priority_tier(monkeypatch, caplog):
     request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_warmup_prohibit_fast")
+    service = proxy_service.ProxyService(_repo_factory(request_logs, accounts=[account]))
     snapshot = proxy_warmup_service._snapshot_warmup_account(account)
     upstream = AsyncMock(return_value=SimpleNamespace(id="warmup-prohibit-fast", usage=None))
 
