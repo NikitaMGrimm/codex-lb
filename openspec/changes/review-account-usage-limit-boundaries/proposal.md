@@ -7,8 +7,10 @@ The local per-account usage-limit branch still authorizes some work before await
 - Recheck HTTP bridge turns and prewarm after dispatch preparation, without holding the pending-response lock.
 - Fail sticky admission closed if its policy snapshot changes during affinity persistence.
 - Supersede older standard measurements when a successful poll explicitly provides no standard windows for an enabled policy.
+- Preserve the canonical HTTP 503 policy-denial contract on direct Responses requests.
 - Remove redundant work and defensive access where the branch already has typed contracts.
 - Record review findings, architectural decisions, and verified local checks.
+- Integrate the latest upstream locally and reconcile routing changes and parallel migration heads without rewriting published revisions.
 
 ## Capabilities
 
@@ -22,4 +24,4 @@ None.
 
 ## Impact
 
-HTTP bridge admission and prewarm, sticky selection, usage refresh, and their regression coverage. The policy remains optional and uses the existing evaluator, cache invalidation, error envelopes, and cleanup paths. No settings, dependencies, or schema changes are added.
+HTTP bridge admission and prewarm, sticky selection, usage refresh, and their regression coverage. The policy remains optional and uses the existing evaluator, cache invalidation, error envelopes, and cleanup paths. Upstream synchronization adds a migration merge revision; the review adds no settings, dependencies, or policy columns.

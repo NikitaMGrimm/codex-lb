@@ -4,7 +4,7 @@ See [proposal.md](proposal.md). The branch already shares a pure policy evaluato
 
 ## Goals / Non-Goals
 
-Close demonstrated authorization gaps using the current evaluator and cleanup paths. Preserve the scalar policy, upstream health semantics, existing ownership, and disabled-feature behavior. This review does not rebase or publish the divergent branch.
+Close demonstrated authorization gaps using the current evaluator and cleanup paths. Preserve the scalar policy, upstream health semantics, existing ownership, and disabled-feature behavior. Integrate the latest upstream with a local merge as requested; publishing remains outside this local task.
 
 ## Decisions
 
@@ -12,6 +12,7 @@ Close demonstrated authorization gaps using the current evaluator and cleanup pa
 - If selection data changes during sticky persistence, release the lease and return the existing retryable `selection_state_changed` error. Avoid speculative compensating affinity writes that can overwrite another request's ownership.
 - Represent an empty successful poll using existing no-data placeholders in all standard slots for enabled policies. This supersedes historical weekly and monthly shapes without adding columns. Partial valid shapes continue using the existing normalization rules.
 - Retain the shared evaluator and existing cache rather than introduce policy-specific services or more settings. Simplify redundant typed access and work only where verified behavior stays identical.
+- Merge upstream without rebasing existing branch history. Add an Alembic merge revision for parallel usage-limit and upstream heads, preserving both upgrade paths and existing account policy data.
 
 ## Risks / Trade-offs
 

@@ -44,3 +44,28 @@ When a successful usage poll provides no standard quota windows for an account w
 #### Scenario: An uncapped account has an additional-only poll
 - **WHEN** an account without an enabled usage policy receives a successful poll with no standard windows
 - **THEN** the poll retains the established standard-observation persistence behavior
+
+### Requirement: Responses policy denials retain the canonical error envelope
+
+A local usage-policy denial before upstream dispatch on an HTTP Responses request MUST use HTTP 503 with code `account_usage_limit_reached` and type `server_error`. This contract MUST apply to direct HTTP streaming and nonstreaming requests as well as bridge admission. Backend SSE requests MUST retain the same error code and type in their terminal event.
+
+#### Scenario: An HTTP Responses request has no policy-eligible account
+- **WHEN** a streaming or nonstreaming HTTP Responses request is denied solely by an enabled account usage policy
+- **THEN** it returns HTTP 503 with code `account_usage_limit_reached` and type `server_error`
+- **AND** it does not dispatch upstream
+
+### Requirement: Usage-limit migrations preserve parallel upgrade paths
+
+The migration graph MUST expose one canonical head after integrating upstream. Databases at either the existing usage-limit revision or the current upstream head MUST upgrade to that head without changing saved account usage policies. Existing revision identifiers and parentage MUST remain valid for databases that have already applied them.
+
+#### Scenario: An existing usage-limit database upgrades after upstream integration
+- **GIVEN** a database has applied the usage-limit revision and has saved enabled and disabled policies
+- **WHEN** it upgrades to the canonical migration head
+- **THEN** all upstream migrations are applied
+- **AND** saved policy values are preserved
+
+#### Scenario: A current upstream database adds usage limits
+- **GIVEN** a database is at the upstream migration head
+- **WHEN** it upgrades to the canonical migration head
+- **THEN** usage-limit fields are added with policies disabled by default
+- **AND** the graph has one canonical head
