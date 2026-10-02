@@ -32,11 +32,31 @@ invalidated during their read. Cached snapshots remain bounded by freshness;
 cross-replica visibility uses the existing account-selection invalidation signal.
 
 Shared transports authorize each new turn, including after admission waits.
-Policy reads run outside HTTP bridge response locks and within the request
+Policy reads run outside the HTTP bridge pending-response lock and within the request
 deadline, so a slow read cannot hold up older responses. A denied new turn
 leaves already-dispatched work to settle; a failed read returns a separate
 authorization error. WebSocket dispatch also checks pending ownership after
 asynchronous authorization to avoid sending or settling reader-finalized work.
+
+Dispatch authorization follows the lifecycle-lock wait and durable preparation.
+It holds send serialization while loading policy, so a newer sender cannot pass
+it; older responses can still be processed and settled through the pending lock.
+A denial after a recovery alias was persisted restores its prior owner before
+the unsent request is discarded. Sticky admission detects policy invalidation
+after affinity persistence, releases the provisional lease, and returns
+`selection_state_changed` without compensating writes to the stored affinity.
+
+For example, a second turn can pass queue admission while its account is at 5%
+against a 10% limit, then wait for dispatch. If telemetry reaches 10% during that
+wait, the turn fails before sending. Already-dispatched turns retain their
+ownership and settlement. A successful poll with no standard windows likewise
+supersedes earlier below-limit observations for capped accounts; the dashboard
+reports `data_unavailable` and direct Responses requests return HTTP 503.
+
+Usage-policy freshness follows the shared fixed refresh cadence. Synthetic
+warmup claims retain upstream's execution/lease fence during policy-denial
+cleanup so a stale worker cannot skip another worker's reclaimed decision.
+
 ## Reauthentication warning state
 
 `reauth_required` means refresh-token exchange needs operator repair; it does not

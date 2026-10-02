@@ -13,6 +13,8 @@ Close demonstrated authorization gaps using the current evaluator and cleanup pa
 - Represent an empty successful poll using existing no-data placeholders in all standard slots for enabled policies. This supersedes historical weekly and monthly shapes without adding columns. Partial valid shapes continue using the existing normalization rules.
 - Retain the shared evaluator and existing cache rather than introduce policy-specific services or more settings. Simplify redundant typed access and work only where verified behavior stays identical.
 - Merge upstream without rebasing existing branch history. Add an Alembic merge revision for parallel usage-limit and upstream heads, preserving both upgrade paths and existing account policy data.
+- Adapt policy authorization to upstream's fixed refresh cadence, injected clock/scheduler, dashboard account-write permission, usable-access-token handling for reauthentication warnings, and fenced warmup claims. Preserve upstream's settings snapshots, overload isolation, denied-anchor fences, and task ownership.
+- Move usage-snapshot authorization into a typed internal balancer module to keep the main balancer within the existing size ratchet. Reuse upstream's ORM snapshot copier; remove the duplicate empty-policy-pool selector call and the runtime-account lookup memo.
 
 ## Risks / Trade-offs
 
