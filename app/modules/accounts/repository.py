@@ -191,10 +191,6 @@ def _store_request_usage_summaries(
     _request_usage_summary_cache[key] = (summaries, time.monotonic() + ttl_seconds)
 
 
-class AccountUsageLimitNotConfiguredError(Exception):
-    """A saved percentage is required to enable a policy without replacing it."""
-
-
 class AccountIdentityConflictError(Exception):
     def __init__(self, email: str) -> None:
         self.email = email

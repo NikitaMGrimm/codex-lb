@@ -770,8 +770,11 @@ class UsageUpdater:
             snapshot_windows,
         )
         usage_written = bool(entries)
-        usage_limit_enabled = usage_written and await self._usage_limit_enabled_after_snapshot(account)
+        # Until the post-commit policy read succeeds, conservatively invalidate
+        # the committed observation even if that read is cancelled.
+        usage_limit_enabled = usage_written
         try:
+            usage_limit_enabled = usage_written and await self._usage_limit_enabled_after_snapshot(account)
             await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
         finally:
             if usage_limit_enabled:

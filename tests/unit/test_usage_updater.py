@@ -985,8 +985,10 @@ async def test_snapshot_below_enabled_usage_limit_invalidates_selection_cache(mo
 
 
 @pytest.mark.asyncio
-async def test_committed_limit_snapshot_invalidates_when_status_recovery_fails(
+@pytest.mark.parametrize("interruption", ["recovery_error", "policy_cancel"])
+async def test_committed_limit_snapshot_invalidates_when_post_commit_work_is_interrupted(
     monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
 ) -> None:
     account = _make_account("acc_limit_recovery_failure", "workspace_limit_recovery_failure")
     account.usage_limit_enabled = True
@@ -999,11 +1001,18 @@ async def test_committed_limit_snapshot_invalidates_when_status_recovery_fails(
         "invalidate",
         lambda *args, **kwargs: invalidations.append(True),
     )
-    monkeypatch.setattr(
-        updater,
-        "_recover_quota_status_from_usage",
-        AsyncMock(side_effect=RuntimeError("status recovery failed")),
-    )
+    if interruption == "recovery_error":
+        monkeypatch.setattr(
+            updater,
+            "_recover_quota_status_from_usage",
+            AsyncMock(side_effect=RuntimeError("status recovery failed")),
+        )
+    else:
+        monkeypatch.setattr(
+            updater,
+            "_usage_limit_enabled_after_snapshot",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        )
 
     async def _fetch_usage(**kwargs: object) -> UsagePayload:
         del kwargs
@@ -1020,7 +1029,8 @@ async def test_committed_limit_snapshot_invalidates_when_status_recovery_fails(
 
     monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
 
-    with pytest.raises(RuntimeError, match="status recovery failed"):
+    expected_error = RuntimeError if interruption == "recovery_error" else asyncio.CancelledError
+    with pytest.raises(expected_error):
         await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
 
     assert repo.snapshot_calls

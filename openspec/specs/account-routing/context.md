@@ -67,6 +67,18 @@ Usage-policy freshness follows the shared fixed refresh cadence. Synthetic
 warmup claims retain upstream's execution/lease fence during policy-denial
 cleanup so a stale worker cannot skip another worker's reclaimed decision.
 
+Warmup authorization projects committed policy and status onto transient account
+copies. The original session-owned account stays observational: claim, request-log,
+and completion commits cannot write those projected fields over a later operator
+edit. For example, a warmup can load 10%, authorize 20%, and then overlap an
+acknowledged 30% policy; its settlement preserves 30% while admitted work finishes.
+Quota-planner probes reuse the dashboard snapshot already resolved for their
+claim lease and stream budget, including resilience toggles, so dispatch adds no
+settings wait after final owner authorization. Once standard telemetry commits
+for a capped account, the refresh owns routing invalidation even if its subsequent
+policy read is cancelled; the committed measurement becomes visible and
+cancellation propagates.
+
 ## Reauthentication warning state
 
 `reauth_required` means refresh-token exchange needs operator repair; it does not

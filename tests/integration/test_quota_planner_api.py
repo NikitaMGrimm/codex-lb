@@ -32,10 +32,12 @@ from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyInvalidError, ApiKeyNotFoundError, ApiKeyRateLimitExceededError
 from app.modules.quota_planner import api as quota_planner_api
 from app.modules.quota_planner import scheduler as quota_planner_scheduler
+from app.modules.quota_planner import warmup as quota_planner_warmup
 from app.modules.quota_planner.logic import PlannerAction, PlannerSettings
 from app.modules.quota_planner.repository import QuotaPlannerRepository
 from app.modules.quota_planner.scheduler import QuotaPlannerScheduler
 from app.modules.quota_planner.warmup import QuotaWarmupService, WarmupUsage
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -60,6 +62,114 @@ def _warmup_test_account(account_id: str) -> Account:
         last_refresh=utcnow(),
         status=AccountStatus.ACTIVE,
     )
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warmup_settlement_preserves_newer_operator_policy(async_client, monkeypatch, db_setup):
+    account_id = "warmup-observational-authorization"
+    async with SessionLocal() as session:
+        account = _warmup_test_account(account_id)
+        account.usage_limit_enabled = True
+        account.usage_limit_percent = 10
+        session.add_all(
+            [
+                account,
+                UsageHistory(
+                    account_id=account_id, used_percent=5, window="primary", window_minutes=300, recorded_at=utcnow()
+                ),
+            ]
+        )
+        await QuotaPlannerRepository(session).upsert_settings(_AUTO_WARMUP_SETTINGS)
+
+    original_snapshot = UsageRepository.account_usage_limit_snapshot
+    authorization_reads = 0
+
+    async def save_policy(percent: float) -> None:
+        response = await async_client.put(
+            f"/api/accounts/{account_id}/usage-limit", json={"enabled": True, "percent": percent}
+        )
+        assert response.status_code == 200
+
+    async def authorize_after_edit(self, owner_id: str):
+        nonlocal authorization_reads
+        if owner_id == account_id:
+            authorization_reads += 1
+            if authorization_reads == 2:
+                # The account identity map still holds 10%; the authoritative
+                # projection now sees the newly acknowledged 20% policy.
+                await save_policy(20)
+        return await original_snapshot(self, owner_id)
+
+    async def send_probe(*args, **kwargs):
+        # A later acknowledged edit must survive the admitted probe's log and
+        # decision commits; authorization itself must not queue an UPDATE.
+        await save_policy(30)
+        yield (
+            'data: {"type":"response.completed","response":{"id":"warmup-completed",'
+            '"usage":{"input_tokens":3,"output_tokens":1}}}\n\n'
+        )
+
+    async def no_effect_refresh(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(UsageRepository, "account_usage_limit_snapshot", authorize_after_edit)
+    monkeypatch.setattr(quota_planner_warmup, "stream_responses", send_probe)
+    monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", no_effect_refresh)
+
+    response = await async_client.post(
+        "/api/quota-planner/warm-now", json={"accountId": account_id, "model": "gpt-5.4-mini", "forceProbe": True}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "executed"
+    assert authorization_reads == 2
+    async with SessionLocal() as session:
+        saved = await session.get(Account, account_id)
+        assert saved is not None and saved.usage_limit_percent == 30
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warmup_dispatch_reuses_resolved_dashboard_settings(async_client, monkeypatch, db_setup):
+    account_id = "warmup-one-settings-observation"
+    async with SessionLocal() as session:
+        session.add(_warmup_test_account(account_id))
+        await QuotaPlannerRepository(session).upsert_settings(_AUTO_WARMUP_SETTINGS)
+
+    cache = quota_planner_warmup.get_settings_cache()
+    original_get = cache.get
+    events: list[str] = []
+    original_snapshot = UsageRepository.account_usage_limit_snapshot
+
+    async def read_settings(*args, **kwargs):
+        events.append("settings")
+        return await original_get(*args, **kwargs)
+
+    async def read_authorization(self, owner_id: str):
+        if owner_id == account_id:
+            events.append("authorization")
+        return await original_snapshot(self, owner_id)
+
+    async def send_probe(*args, **kwargs):
+        events.append("dispatch")
+        yield 'data: {"type":"response.completed","response":{"id":"warmup-completed"}}\n\n'
+
+    async def no_effect_refresh(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(cache, "get", read_settings)
+    monkeypatch.setattr(UsageRepository, "account_usage_limit_snapshot", read_authorization)
+    monkeypatch.setattr(quota_planner_warmup, "stream_responses", send_probe)
+    monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", no_effect_refresh)
+
+    response = await async_client.post(
+        "/api/quota-planner/warm-now", json={"accountId": account_id, "model": "gpt-5.4-mini", "forceProbe": True}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "executed"
+    dispatch_index = events.index("dispatch")
+    final_authorization = max(i for i, event in enumerate(events[:dispatch_index]) if event == "authorization")
+    assert "settings" not in events[final_authorization + 1 : dispatch_index]
 
 
 @pytest.mark.asyncio

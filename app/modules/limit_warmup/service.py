@@ -23,6 +23,7 @@ from app.core.usage.pricing import get_pricing_for_model
 from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
+from app.db.snapshot import clone_row
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind, load_owner_authorization
@@ -388,6 +389,7 @@ class StreamingLimitWarmupSender:
         snapshot = decision.snapshot
         if snapshot is None:
             return _LimitWarmupAuthorization(account=None, decision=decision)
+        account = clone_row(account)
         account.status = snapshot.status
         account.plan_type = snapshot.plan_type
         account.usage_limit_enabled = snapshot.enabled

@@ -573,7 +573,11 @@ class _DummyScheduler:
 async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_resource_close(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    db_setup,
 ) -> None:
+    # The real HTTP routes still read dashboard settings and authorization,
+    # even though this test stubs database startup and background refresh.
+    del db_setup
     import app.core.startup as startup_module
     import app.main as main
     from app.core import shutdown as shutdown_state

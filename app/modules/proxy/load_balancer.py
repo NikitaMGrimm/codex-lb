@@ -1123,7 +1123,6 @@ class LoadBalancer:
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
-        clone_cached: bool = True,
     ) -> _SelectionInputs:
         mapped_limit_name = _gated_limit_name_for_model(model)
         effective_limit_name = additional_limit_name or mapped_limit_name
@@ -1144,7 +1143,7 @@ class LoadBalancer:
         )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
-            return _clone_selection_inputs(cached) if clone_cached else cached
+            return _clone_selection_inputs(cached)
 
         load_generation = self._selection_inputs_cache.generation
 

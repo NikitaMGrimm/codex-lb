@@ -24,6 +24,7 @@ from app.core.usage.types import UsageWindowRow
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation, _await_result_deferring_cancellation
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings, QuotaPlannerDecision
+from app.db.snapshot import clone_row
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
@@ -294,6 +295,7 @@ class QuotaWarmupService:
             # reclaim the decision. Same binding as the proxy warm-up path
             # (``proxy/_service/warmup.py``).
             with dashboard_overrides_bound(dashboard_settings):
+                bind_resilience_toggles(dashboard_settings)
                 usage = await self._send_warmup_probe(
                     account=account,
                     model=resolved_model,
@@ -685,6 +687,9 @@ class QuotaWarmupService:
         snapshot = decision.snapshot
         if snapshot is None:
             return _FreshStandardUsage(account=None, decision=decision)
+        # Authorization is observational. A subsequent claim/log/usage commit
+        # must not flush this projected policy over a newer operator edit.
+        account = clone_row(account)
         account.status = snapshot.status
         account.plan_type = snapshot.plan_type
         account.usage_limit_enabled = snapshot.enabled
@@ -751,9 +756,6 @@ class QuotaWarmupService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         upstream_account_id = account.chatgpt_account_id
         usage = WarmupUsage(input_tokens=0, output_tokens=0, cached_input_tokens=0, reasoning_tokens=None)
-        # C2-3 resilience toggles: background probe, no request snapshot to
-        # inherit; take one here so the breaker gate follows the dashboard.
-        bind_resilience_toggles(await get_settings_cache().get())
         async for event_block in stream_responses(
             payload,
             headers,
