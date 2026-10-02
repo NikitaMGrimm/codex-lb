@@ -115,6 +115,7 @@ class LimitWarmupAttemptsRepository(Protocol):
 class LimitWarmupRequestLogRepository(Protocol):
     async def add_log(
         self,
+        *,
         account_id: str | None,
         request_id: str,
         model: str,
