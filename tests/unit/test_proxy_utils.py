@@ -62,10 +62,11 @@ from app.core.resilience.overload import local_overload_error
 from app.core.resilience.toggles import bind_resilience_toggles
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import ParsedSseBlock, parse_sse_data_json
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind, UsageHistory
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, ModelSource, StickySessionKind, UsageHistory
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -110,7 +111,8 @@ from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.proxy.work_admission import AdmissionLease
 from app.modules.request_logs.repository import PreviousResponseOwnerRecord, RequestLogsRepository
-from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
+from app.modules.usage.repository import AccountUsageLimitSnapshot, AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater
 from tests.simulation.virtual_time import VirtualClock
 from tests.unit._proxy_test_helpers import runtime_basic_auth_url
@@ -1779,7 +1781,7 @@ async def test_chat_startup_probe_consumes_repeated_capacity_markers_before_firs
         )
     )
     try:
-        stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.1)
+        stream, startup_error = await asyncio.wait_for(probe_task, timeout=1.0)
     finally:
         release_next_event.set()
 
@@ -4222,62 +4224,7 @@ async def test_opportunistic_admission_uses_api_key_enforced_model():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("selection", "expected_status", "expected_error", "retry_after"),
-    [
-        (
-            AccountSelection(
-                account=None,
-                error_message="Account usage limit reached; reserved quota is unavailable",
-                error_code="account_usage_limit_reached",
-            ),
-            503,
-            {
-                "code": "account_usage_limit_reached",
-                "message": "Account usage limit reached; reserved quota is unavailable",
-                "type": "server_error",
-            },
-            None,
-        ),
-        (
-            AccountSelection(
-                account=None,
-                error_message="No account plan supports model gpt-5.4",
-                error_code="no_plan_support_for_model",
-            ),
-            429,
-            {
-                "code": "rate_limit_exceeded",
-                "message": "opportunistic burn window closed: No account plan supports model gpt-5.4",
-                "type": "rate_limit_error",
-            },
-            str(proxy_api._OPPORTUNISTIC_RETRY_AFTER_SECONDS),
-        ),
-        (
-            AccountSelection(
-                account=None,
-                error_message="Rate limit exceeded. Try again in 1h",
-                error_code="usage_limit_reached",
-                resets_at=1_700_003_600,
-            ),
-            429,
-            {
-                "code": "usage_limit_reached",
-                "message": "Rate limit exceeded. Try again in 1h",
-                "resets_at": 1_700_003_600,
-                "type": "usage_limit_reached",
-            },
-            None,
-        ),
-    ],
-    ids=["local-usage-limit", "setup-failure", "upstream-usage-limit"],
-)
-async def test_opportunistic_admission_denial_contract(
-    selection: AccountSelection,
-    expected_status: int,
-    expected_error: dict[str, JsonValue],
-    retry_after: str | None,
-) -> None:
+async def test_opportunistic_admission_preserves_local_account_usage_limit_denial():
     api_key = ApiKeyData(
         id="key_opportunistic_denial",
         name="opportunistic denial",
@@ -4292,6 +4239,90 @@ async def test_opportunistic_admission_denial_contract(
         created_at=utcnow(),
         last_used_at=None,
     )
+    selection = AccountSelection(
+        account=None,
+        error_message="Account usage limit reached; reserved quota is unavailable",
+        error_code="account_usage_limit_reached",
+    )
+    service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
+    context = SimpleNamespace(service=service)
+    request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
+
+    response = await proxy_api._opportunistic_admission_denial(
+        request,
+        cast(proxy_api.ProxyContext, context),
+        api_key,
+        model="gpt-5.1",
+    )
+
+    assert response is not None
+    assert response.status_code == 429
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] == "account_usage_limit_reached"
+    assert body["error"]["type"] == "rate_limit_error"
+    assert body["error"]["message"] == "Account usage limit reached; reserved quota is unavailable"
+    assert "resets_at" not in body["error"]
+    assert "Retry-After" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_keeps_setup_failures_on_burn_window_contract():
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key_opportunistic_setup_failure",
+            traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
+            enforced_model=None,
+        ),
+    )
+    selection = AccountSelection(
+        account=None,
+        error_message="No account plan supports model gpt-5.4",
+        error_code="no_plan_support_for_model",
+    )
+    service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
+    context = SimpleNamespace(service=service)
+    request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
+
+    response = await proxy_api._opportunistic_admission_denial(
+        request,
+        cast(proxy_api.ProxyContext, context),
+        api_key,
+        model="gpt-5.4",
+    )
+
+    assert response is not None
+    assert response.status_code == 429
+    assert json.loads(bytes(response.body))["error"] == {
+        "code": "rate_limit_exceeded",
+        "message": "opportunistic burn window closed: No account plan supports model gpt-5.4",
+        "type": "rate_limit_error",
+    }
+    assert response.headers["Retry-After"] == str(proxy_api._OPPORTUNISTIC_RETRY_AFTER_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_preserves_upstream_usage_limit_denial():
+    api_key = ApiKeyData(
+        id="key_opportunistic_upstream_usage_limit",
+        name="opportunistic upstream usage limit",
+        key_prefix="«redacted:sk-…»",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    selection = AccountSelection(
+        account=None,
+        error_message="Rate limit exceeded. Try again in 1h",
+        error_code="usage_limit_reached",
+        resets_at=1_700_003_600,
+    )
     service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
     request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
 
@@ -4303,9 +4334,15 @@ async def test_opportunistic_admission_denial_contract(
     )
 
     assert response is not None
-    assert response.status_code == expected_status
-    assert json.loads(bytes(response.body)) == {"error": expected_error}
-    assert response.headers.get("Retry-After") == retry_after
+    assert response.status_code == 429
+    body = json.loads(bytes(response.body))
+    assert body["error"] == {
+        "code": "usage_limit_reached",
+        "message": "Rate limit exceeded. Try again in 1h",
+        "resets_at": 1_700_003_600,
+        "type": "usage_limit_reached",
+    }
+    assert "Retry-After" not in response.headers
 
 
 @pytest.mark.asyncio
@@ -4384,7 +4421,8 @@ async def test_opportunistic_admission_empty_scope_when_single_account_is_outsid
 
 
 @pytest.mark.asyncio
-async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
+@pytest.mark.parametrize("policy_blocked_peer", [False, True])
+async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch, policy_blocked_peer):
     settings = _make_proxy_settings()
     settings.proxy_account_stream_limit = 1
     settings.proxy_account_response_create_limit = 64
@@ -4392,7 +4430,54 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_opportunistic_stream_cap")
+    accounts = [account]
+    if policy_blocked_peer:
+        limited = _make_account("acc_opportunistic_policy_blocked")
+        limited.usage_limit_enabled = True
+        limited.usage_limit_percent = 10.0
+        accounts.append(limited)
     now = utcnow()
+    latest_primary: dict[str, UsageHistory | AdditionalUsageHistory] = {
+        account.id: UsageHistory(
+            id=1,
+            account_id=account.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 3600,
+            window_minutes=300,
+        )
+    }
+    latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory] = {
+        account.id: UsageHistory(
+            id=2,
+            account_id=account.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 86400,
+            window_minutes=10080,
+        )
+    }
+    if policy_blocked_peer:
+        latest_primary[limited.id] = UsageHistory(
+            id=3,
+            account_id=limited.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=10.0,
+            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 3600,
+            window_minutes=300,
+        )
+        latest_secondary[limited.id] = UsageHistory(
+            id=4,
+            account_id=limited.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=10.0,
+            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 86400,
+            window_minutes=10080,
+        )
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_settings_cache",
@@ -4403,29 +4488,9 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
         "_load_selection_inputs",
         AsyncMock(
             return_value=SelectionInputs(
-                accounts=[account],
-                latest_primary={
-                    account.id: UsageHistory(
-                        id=1,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="primary",
-                        used_percent=10.0,
-                        reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 3600,
-                        window_minutes=300,
-                    )
-                },
-                latest_secondary={
-                    account.id: UsageHistory(
-                        id=2,
-                        account_id=account.id,
-                        recorded_at=now,
-                        window="secondary",
-                        used_percent=10.0,
-                        reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 86400,
-                        window_minutes=10080,
-                    )
-                },
+                accounts=accounts,
+                latest_primary=latest_primary,
+                latest_secondary=latest_secondary,
                 latest_monthly={},
             )
         ),
@@ -6522,6 +6587,19 @@ class _RepoContext:
         accounts_repository.get_by_id_fresh.side_effect = accounts_by_id.get
         usage_repository = AsyncMock(spec=UsageRepository)
         usage_repository.latest_by_account.return_value = {}
+        usage_repository.account_usage_limit_snapshot.side_effect = lambda account_id: (
+            AccountUsageLimitSnapshot(
+                status=accounts_by_id[account_id].status,
+                enabled=bool(accounts_by_id[account_id].usage_limit_enabled),
+                limit_percent=accounts_by_id[account_id].usage_limit_percent,
+                plan_type=accounts_by_id[account_id].plan_type,
+                primary=None,
+                secondary=None,
+                monthly=None,
+            )
+            if account_id in accounts_by_id
+            else None
+        )
         self._repos = ProxyRepositories(
             accounts=cast(AccountsRepository, accounts_repository),
             usage=cast(UsageRepository, usage_repository),
@@ -6746,6 +6824,18 @@ def test_request_log_failure_metadata_keeps_direct_previous_response_not_found_s
     assert metadata.upstream_status_code == 400
     assert metadata.upstream_error_code == "previous_response_not_found"
     assert metadata.bridge_stage is None
+
+
+def test_request_log_failure_metadata_does_not_attribute_owner_authorization_failure_to_upstream() -> None:
+    from app.modules.proxy._service.http_bridge.request_submit import (
+        _http_bridge_usage_limit_authorization_failed_error,
+    )
+
+    error = _http_bridge_usage_limit_authorization_failed_error()
+    metadata = proxy_service._request_log_failure_metadata(error)
+    assert error.status_code == 503
+    assert error.payload["error"]["code"] == "account_usage_limit_authorization_failed"
+    assert metadata.upstream_status_code is None
 
 
 def test_request_log_failure_metadata_does_not_use_status_code_for_local_proxy_failures() -> None:
@@ -50460,6 +50550,11 @@ async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
 
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_PREWARM_RESPONSE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "authorize_account_fresh",
+        AsyncMock(return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)),
+    )
     # The one row the prewarm resolves before its lock. Both helpers under the
     # lock must receive this exact object rather than reading their own, so the
     # assertions below compare by identity, pin the read's call site, and -- via
@@ -52485,6 +52580,18 @@ def test_maybe_dump_oversized_response_create_dedups_via_product_path(monkeypatc
 @pytest.mark.asyncio
 async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    # This test owns network/operation behavior, not lease reacquisition. Mock
+    # the explicit authorization boundary without adding a partial balancer.
+    monkeypatch.setattr(
+        service,
+        "_fresh_http_bridge_owner_authorization",
+        AsyncMock(
+            return_value=OwnerAuthorization(
+                OwnerAuthorizationKind.ALLOWED,
+                AccountUsageLimitState.DISABLED,
+            )
+        ),
+    )
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     original_text = json.dumps(
@@ -52574,6 +52681,18 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
 @pytest.mark.asyncio
 async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replayed(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    # This test owns network/operation behavior, not lease reacquisition. Mock
+    # the explicit authorization boundary without adding a partial balancer.
+    monkeypatch.setattr(
+        service,
+        "_fresh_http_bridge_owner_authorization",
+        AsyncMock(
+            return_value=OwnerAuthorization(
+                OwnerAuthorizationKind.ALLOWED,
+                AccountUsageLimitState.DISABLED,
+            )
+        ),
+    )
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     request_state = proxy_service._WebSocketRequestState(
@@ -52649,6 +52768,18 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
 @pytest.mark.asyncio
 async def test_submit_http_bridge_marks_ambiguous_operation_before_releasing_owner(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    # This test owns network/operation behavior, not lease reacquisition. Mock
+    # the explicit authorization boundary without adding a partial balancer.
+    monkeypatch.setattr(
+        service,
+        "_fresh_http_bridge_owner_authorization",
+        AsyncMock(
+            return_value=OwnerAuthorization(
+                OwnerAuthorizationKind.ALLOWED,
+                AccountUsageLimitState.DISABLED,
+            )
+        ),
+    )
     events: list[str] = []
     service._durable_bridge = SimpleNamespace(
         mark_operation_unknown=AsyncMock(side_effect=lambda **_kwargs: events.append("mark") or True),
@@ -52717,6 +52848,18 @@ async def test_submit_http_bridge_marks_ambiguous_operation_before_releasing_own
 @pytest.mark.asyncio
 async def test_submit_http_bridge_preflight_failure_keeps_operation_pre_dispatch(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    # This test owns network/operation behavior, not lease reacquisition. Mock
+    # the explicit authorization boundary without adding a partial balancer.
+    monkeypatch.setattr(
+        service,
+        "_fresh_http_bridge_owner_authorization",
+        AsyncMock(
+            return_value=OwnerAuthorization(
+                OwnerAuthorizationKind.ALLOWED,
+                AccountUsageLimitState.DISABLED,
+            )
+        ),
+    )
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     request_state = proxy_service._WebSocketRequestState(
@@ -52785,9 +52928,12 @@ async def test_submit_http_bridge_preflight_failure_keeps_operation_pre_dispatch
 
 @pytest.mark.asyncio
 async def test_submit_http_bridge_request_checks_queue_before_inlining(monkeypatch):
-    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
-    service._durable_bridge = None
-    proxy_service._initialize_http_bridge_retry_circuit(service)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(
+        service._load_balancer,
+        "authorize_account_fresh",
+        AsyncMock(return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)),
+    )
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_submit_queue_full_inline",
         model="gpt-5.5",

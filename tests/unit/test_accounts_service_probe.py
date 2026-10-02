@@ -38,14 +38,14 @@ def _make_account(status: AccountStatus = AccountStatus.ACTIVE) -> Account:
     )
 
 
-def _make_usage_row(used_percent: float, *, window: str) -> UsageHistory:
+def _make_usage_row(used_percent: float, *, window: str, account_id: str = _ACCOUNT_ID) -> UsageHistory:
     return UsageHistory(
-        used_percent=used_percent,
-        account_id=_ACCOUNT_ID,
-        window=window,
-        window_minutes=300 if window == "primary" else 10080,
-        reset_at=1_800_000_000,
+        account_id=account_id,
         recorded_at=datetime(2026, 5, 17),
+        window=window,
+        used_percent=used_percent,
+        reset_at=1_800_000_000,
+        window_minutes=300 if window == "primary" else 10_080,
     )
 
 

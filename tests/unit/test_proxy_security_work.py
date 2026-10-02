@@ -11,11 +11,13 @@ import anyio
 import pytest
 from fastapi import WebSocket
 
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.support import (
     _websocket_request_can_replay_before_visible_output,
     _websocket_should_defer_reasoning_prelude,
 )
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 from tests.unit.test_proxy_utils import (
     _make_account,
     _make_proxy_settings,
@@ -222,6 +224,9 @@ async def test_direct_websocket_security_replay_reacquires_create_admission(
             _RequestLogsRecorder(),
             accounts=[regular_account, authorized_account],
         )
+    )
+    service._load_balancer.authorize_account_fresh = AsyncMock(
+        return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
     )
     cyber_message = (
         "This chat was flagged for possible cybersecurity risk. "

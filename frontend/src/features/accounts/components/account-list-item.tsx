@@ -1,3 +1,4 @@
+import { UsageQuotaSummary } from "@/components/usage-quota-bar";
 import { Flame, Shield, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -143,21 +144,21 @@ export function AccountListItem({
         {showMonthlyRow ? (
           <MiniQuotaRow
             label={t("common.quota.monthly")}
-            percent={monthly}
+            percent={monthly} cap={account.effectiveLimitMonthly}
             resetAt={account.resetAtMonthly}
           />
         ) : null}
         {showPrimaryRow ? (
           <MiniQuotaRow
             label="5h"
-            percent={primary}
+            percent={primary} cap={account.effectiveLimitPrimary}
             resetAt={account.resetAtPrimary}
           />
         ) : null}
         {showSecondaryRow ? (
           <MiniQuotaRow
             label={t("common.quota.weekly")}
-            percent={secondary}
+            percent={secondary} cap={account.effectiveLimitSecondary}
             resetAt={account.resetAtSecondary}
           />
         ) : null}
@@ -211,10 +212,12 @@ function RoutingPolicyBadge({
 function MiniQuotaRow({
   label,
   percent,
+  cap,
   resetAt,
 }: {
   label: string;
   percent: number | null;
+  cap?: number | null;
   resetAt: string | null | undefined;
 }) {
   const { t } = useTranslation();
@@ -227,6 +230,7 @@ function MiniQuotaRow({
         </span>
       </div>
       <MiniQuotaBar
+        cap={cap}
         aria-label={t("accounts.listItem.quotaRemainingAria", { label })}
         percent={percent}
         testId={`mini-quota-track-${label.toLowerCase()}`}
@@ -234,6 +238,7 @@ function MiniQuotaRow({
       <div className="text-[10px] text-muted-foreground">
         {formatMiniQuotaResetLabel(resetAt ?? null, t)}
       </div>
+      <UsageQuotaSummary percent={percent} cap={cap} />
     </div>
   );
 }

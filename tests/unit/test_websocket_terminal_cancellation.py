@@ -23,6 +23,7 @@ from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.websocket import mixin as websocket_mixin
 from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
@@ -30,10 +31,10 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(autouse=True)
 def _usage_policy_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def check_account_usage_limit(_self: object, _account_id: str) -> AccountUsageLimitState:
-        return AccountUsageLimitState.DISABLED
+    async def authorize_account_fresh(_self: LoadBalancer, _account_id: str) -> OwnerAuthorization:
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
 
-    monkeypatch.setattr(LoadBalancer, "check_account_usage_limit", check_account_usage_limit)
+    monkeypatch.setattr(LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
 
 class _RequestLogsRecorder:

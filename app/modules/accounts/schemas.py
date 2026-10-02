@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List
 
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator
 
 from app.core.usage.account_limits import AccountUsageLimitState
 from app.modules.shared.schemas import DashboardModel
@@ -93,6 +93,11 @@ class AccountSummary(DashboardModel):
     routing_policy: str = Field(default="normal", pattern=r"^(normal|burn_first|preserve)$")
     usage_limit_enabled: bool = False
     usage_limit_percent: float | None = None
+    usage_limit_5h_percent: float | None = None
+    usage_limit_weekly_percent: float | None = None
+    effective_limit_primary: float | None = None
+    effective_limit_secondary: float | None = None
+    effective_limit_monthly: float | None = None
     usage_limit_state: AccountUsageLimitState = AccountUsageLimitState.DISABLED
     status: str
     security_work_authorized: bool = False
@@ -204,18 +209,16 @@ class AccountRoutingPolicyUpdateResponse(DashboardModel):
 class AccountUsageLimitUpdateRequest(DashboardModel):
     enabled: bool
     percent: float | None = Field(default=None, gt=0, le=100)
-
-    @model_validator(mode="after")
-    def validate_enabled_limit_has_percent(self) -> AccountUsageLimitUpdateRequest:
-        if self.enabled and "percent" in self.model_fields_set and self.percent is None:
-            raise ValueError("percent cannot be null when the usage limit is enabled")
-        return self
+    percent_5h: float | None = Field(default=None, gt=0, le=100)
+    percent_weekly: float | None = Field(default=None, gt=0, le=100)
 
 
 class AccountUsageLimitUpdateResponse(DashboardModel):
     account_id: str
     enabled: bool
     percent: float | None = None
+    percent_5h: float | None = None
+    percent_weekly: float | None = None
 
 
 class AccountDeleteResponse(DashboardModel):

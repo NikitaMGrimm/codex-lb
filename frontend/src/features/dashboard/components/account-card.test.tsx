@@ -22,6 +22,17 @@ describe("AccountCard", () => {
     expect(screen.getByText("Weekly")).toBeInTheDocument();
   });
 
+  it("colors provider remaining by usable quota when a reserve applies", () => {
+    const account = createAccountSummary({
+      usage: { primaryRemainingPercent: 75, secondaryRemainingPercent: 67 },
+      effectiveLimitPrimary: 50,
+    });
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("75%")).toHaveClass("text-red-600");
+    expect(screen.getByRole("img", { name: /5h; 75% provider remaining; 50% reserved for you · 25% available/ })).toBeInTheDocument();
+  });
+
   it("keeps the last quota visible while a refreshed value is temporarily unknown", () => {
     const account = createAccountSummary({
       usage: { primaryRemainingPercent: 64, secondaryRemainingPercent: 73 },

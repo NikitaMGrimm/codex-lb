@@ -40,6 +40,7 @@ from app.modules.proxy.load_balancer import (
     _AdditionalLimitFilterResult,
     _build_states,
     _extract_credit_status,
+    _rate_limited_freshness_entry,
     _select_account_preferring_budget_safe,
     _select_long_window_entry,
     _state_above_sticky_budget_threshold,
@@ -173,6 +174,30 @@ def test_select_account_returns_stable_error_when_all_accounts_are_usage_limited
     assert result.account is None
     assert result.error_code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
     assert result.error_message is not None
+
+
+def test_budget_safe_all_blocked_selection_preserves_usage_exhaustion_controls() -> None:
+    blocked = AccountState(
+        "locally-blocked",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        usage_limit_state=AccountUsageLimitState.REACHED,
+    )
+    wider_scope = [blocked, AccountState("usable-peer", AccountStatus.ACTIVE, used_percent=20.0)]
+
+    controls: tuple[tuple[bool, list[AccountState] | None], ...] = ((False, None), (True, wider_scope))
+    for allow_exhaustion_error, exhaustion_states in controls:
+        result = _select_account_preferring_budget_safe(
+            [blocked],
+            prefer_earlier_reset=False,
+            routing_strategy="usage_weighted",
+            budget_threshold_pct=95.0,
+            traffic_class="opportunistic",
+            allow_usage_exhaustion_error=allow_exhaustion_error,
+            usage_exhaustion_states=exhaustion_states,
+        )
+        assert result.account is None
+        assert result.error_code is None
 
 
 def test_select_account_prefers_local_policy_error_over_upstream_exhausted_peer() -> None:
@@ -2533,50 +2558,6 @@ async def test_usage_limited_account_recovers_after_fresh_post_reset_observation
 
 
 @pytest.mark.asyncio
-async def test_load_balancer_checks_pinned_policies_from_one_read_only_global_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.modules.proxy import load_balancer as load_balancer_module
-    from app.modules.proxy.account_cache import AccountSelectionCache
-
-    now = datetime.now(timezone.utc)
-    limited = _make_test_account(account_id="pinned-limited")
-    limited.usage_limit_enabled = True
-    limited.usage_limit_percent = 10.0
-    disabled = _make_test_account(account_id="pinned-disabled")
-    unavailable = _make_test_account(account_id="pinned-paused")
-    unavailable.status = AccountStatus.PAUSED
-    usage = _make_test_usage(
-        account_id=limited.id,
-        window="primary",
-        used_percent=10.0,
-        reset_at=int((now + timedelta(hours=1)).timestamp()),
-        recorded_at=now.replace(tzinfo=None),
-    )
-    repos = _usage_limit_test_repositories([limited, disabled, unavailable], {limited.id: usage})
-    balancer = load_balancer_module.LoadBalancer(repo_factory=lambda: repos)
-    balancer._selection_inputs_cache = AccountSelectionCache(ttl_seconds=60)
-
-    limited_state = await balancer.check_account_usage_limit(limited.id)
-    monkeypatch.setattr(
-        load_balancer_module,
-        "_clone_selection_inputs",
-        MagicMock(side_effect=AssertionError("policy probes must not clone the fleet snapshot")),
-    )
-    disabled_state = await balancer.check_account_usage_limit(disabled.id)
-    unavailable_state = await balancer.check_account_usage_limit(unavailable.id)
-    missing_state = await balancer.check_account_usage_limit("deleted-owner")
-
-    assert limited_state is AccountUsageLimitState.REACHED
-    assert disabled_state is AccountUsageLimitState.DISABLED
-    assert unavailable_state is None
-    assert missing_state is None
-    repos.accounts.list_accounts.assert_awaited_once()
-    assert repos.usage.latest_by_account.await_count == 3
-    assert balancer._runtime == {}
-
-
-@pytest.mark.asyncio
 async def test_load_balancer_preserves_usage_limit_error_with_paused_peer() -> None:
     from app.modules.proxy.load_balancer import LoadBalancer
 
@@ -4064,6 +4045,27 @@ def test_state_from_account_rate_limited_checks_primary_freshness(monkeypatch):
         runtime=runtime,
     )
     assert state.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.parametrize("window", ["primary", "secondary"])
+@pytest.mark.parametrize("measured", [False, True], ids=["no-data", "measured-zero"])
+def test_rate_limit_recovery_distinguishes_placeholders_from_measured_zero(window, measured):
+    now = 1_700_000_000.0
+    primary = _make_test_usage(window="primary", recorded_at=_epoch_to_naive_utc(now - 10))
+    secondary = _make_test_usage(window="secondary", recorded_at=_epoch_to_naive_utc(now - 10))
+    entry = primary if window == "primary" else secondary
+    entry.used_percent = 0.0
+    entry.window_minutes = 300 if measured else None
+    entry.reset_at = None
+
+    freshness = _rate_limited_freshness_entry(
+        account=_make_test_account(status=AccountStatus.RATE_LIMITED),
+        primary_entry=primary,
+        long_window_entry=secondary,
+        now=now,
+    )
+
+    assert freshness is (primary if measured else None)
 
 
 @pytest.mark.parametrize("primary_used", [10.0, 100.0])

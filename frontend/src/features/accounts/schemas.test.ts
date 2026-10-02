@@ -91,16 +91,14 @@ describe("AccountSummarySchema", () => {
     expect(parsed.usageLimitState).toBe("reached");
   });
 
-  it("rejects enabling an account usage limit with an explicit null percentage", () => {
-    expect(() =>
-      AccountUsageLimitUpdateRequestSchema.parse({ enabled: true, percent: null }),
-    ).toThrow();
+  it("rejects enabling with every threshold explicitly removed", () => {
+    expect(() => AccountUsageLimitUpdateRequestSchema.parse({
+      enabled: true, percent: null, percent5H: null, percentWeekly: null,
+    })).toThrow();
   });
 
   it("distinguishes an omitted retained percentage from explicit removal", () => {
-    expect(
-      AccountUsageLimitUpdateRequestSchema.parse({ enabled: true }),
-    ).toEqual({ enabled: true });
+    expect(AccountUsageLimitUpdateRequestSchema.parse({ enabled: true })).toEqual({ enabled: true });
     expect(
       AccountUsageLimitUpdateRequestSchema.parse({ enabled: false }),
     ).toEqual({ enabled: false });

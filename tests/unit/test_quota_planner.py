@@ -57,8 +57,8 @@ async def test_deferred_warmup_cleanup_preserves_cancellation_when_cleanup_fails
             decision_id="decision-cleanup-failure",
             reason="account_usage_limit_authorization_cancelled",
             reservation_id=None,
-            claim_executed_at=datetime.now(timezone.utc),
-            claim_lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            claim_executed_at=datetime(2026, 1, 1),
+            claim_lease_expires_at=datetime(2026, 1, 1, 0, 5),
         )
     )
     await cleanup_started.wait()
@@ -96,8 +96,8 @@ async def test_deferred_warmup_cleanup_propagates_failure_without_cancellation(
             decision_id="decision-cleanup-failure-no-cancel",
             reason="account_usage_limit_authorization_failed",
             reservation_id=None,
-            claim_executed_at=datetime.now(timezone.utc),
-            claim_lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            claim_executed_at=datetime(2026, 1, 1),
+            claim_lease_expires_at=datetime(2026, 1, 1, 0, 5),
         )
 
 

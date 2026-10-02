@@ -15,13 +15,14 @@ from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
+from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKeyLimit, RequestLog
+from app.db.models import Account, AccountStatus, ApiKeyLimit, RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.accounts.repository import AccountsRepository
@@ -207,6 +208,35 @@ async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(asy
 
 
 @pytest.mark.asyncio
+async def test_warmup_excludes_accounts_requiring_reauthentication(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    active_id = await _import_account(async_client, "acc-warmup-active", "warmup-active@example.com")
+    reauth_id = await _import_account(async_client, "acc-warmup-reauth", "warmup-reauth@example.com")
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Account).where(Account.id == reauth_id).values(status=AccountStatus.REAUTH_REQUIRED)
+        )
+        await session.commit()
+
+    _, key = await _create_api_key(async_client, name="warmup-active-only")
+    captured_models: list[str] = []
+    _install_successful_warmup_stub(monkeypatch, captured_models)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "force"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["total_accounts"] == 1
+    assert [entry["account_id"] for entry in response.json()["submitted"]] == [active_id]
+    assert response.json()["skipped"] == []
+    assert response.json()["failed"] == []
+    assert captured_models == ["gpt-5.4-mini"]
+
+
+@pytest.mark.asyncio
 async def test_warmup_normal_mode_skips_account_reached_on_secondary_usage_limit(async_client, monkeypatch):
     await _enable_api_key_auth(async_client)
     account_id = await _import_account(
@@ -311,7 +341,7 @@ async def test_warmup_immediately_observes_usage_refresh_transitions_for_account
 
     selection_cache = AccountSelectionCache(ttl_seconds=60)
     proxy_service = get_proxy_service_for_app(async_client._transport.app)
-    proxy_service._load_balancer._selection_inputs_cache = selection_cache
+    monkeypatch.setattr(proxy_service._load_balancer, "_selection_inputs_cache", selection_cache)
     monkeypatch.setattr(usage_updater_module, "get_account_selection_cache", lambda: selection_cache)
 
     captured_models: list[str] = []
@@ -357,7 +387,7 @@ async def test_warmup_immediately_observes_usage_refresh_transitions_for_account
     assert available.status_code == 200
     assert [item["account_id"] for item in available.json()["submitted"]] == [account_id]
     assert available.json()["skipped"] == []
-    assert captured_models == ["gpt-5.4-mini"]
+    assert captured_models == [(await get_settings_cache().get()).warmup_model]
 
     async def _fetch_unknown_usage(**kwargs: object) -> UsagePayload:
         del kwargs
@@ -389,7 +419,7 @@ async def test_warmup_immediately_observes_usage_refresh_transitions_for_account
     )
     assert unknown.status_code == 200
     assert unknown.json()["skipped"] == [{"account_id": account_id, "reason": "account_usage_limit_reached"}]
-    assert captured_models == ["gpt-5.4-mini"]
+    assert captured_models == [(await get_settings_cache().get()).warmup_model]
 
     accounts_response = await async_client.get("/api/accounts")
     assert accounts_response.status_code == 200
@@ -1225,6 +1255,7 @@ async def test_warmup_runs_parallel_with_max_five_accounts(async_client, monkeyp
 
     in_flight_compact_calls = 0
     peak_compact_calls = 0
+    all_slots_busy = asyncio.Event()
 
     async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
         del self, force, timeout_seconds
@@ -1236,8 +1267,10 @@ async def test_warmup_runs_parallel_with_max_five_accounts(async_client, monkeyp
 
         in_flight_compact_calls += 1
         peak_compact_calls = max(peak_compact_calls, in_flight_compact_calls)
+        if in_flight_compact_calls == 5:
+            all_slots_busy.set()
         try:
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(all_slots_busy.wait(), timeout=5)
             return CompactResponsePayload.model_validate(
                 {
                     "object": "response.compact",

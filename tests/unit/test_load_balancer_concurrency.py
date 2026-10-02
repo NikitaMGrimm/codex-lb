@@ -1824,7 +1824,9 @@ async def test_unbound_recovery_probe_selects_when_no_healthy_peer() -> None:
     assert selected.lease is not None
     probing_runtime = balancer._runtime[probing.id]
     assert probing_runtime.inflight_streams == 1
-    assert probing_runtime.version == 23
+    # The provisional lease no longer records a selection before admission;
+    # only the committed probe reservation advances the runtime generation.
+    assert probing_runtime.version == 22
     assert probing_runtime.health_version == 7
 
     await balancer.release_account_lease(selected.lease)

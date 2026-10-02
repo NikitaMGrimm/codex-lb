@@ -20,16 +20,24 @@ and work already sent upstream can overshoot the threshold. Missing or stale
 observations also block an enabled policy until current data becomes available.
 Disabling the policy restores ordinary advisory usage behavior.
 
+The saved policy has a default threshold and optional duration-matched 5-hour
+and weekly overrides. Overrides replace the default only for their matching
+window; monthly and nonstandard windows use the default. Without a default,
+unmatched windows remain unrestricted. The editor asks for reserve percentages
+and stores maximum-used percentages. At 54% used and an 80% cap, provider
+remaining is 46%, reserved capacity is 20%, and usable capacity is 26%.
+
 Both toggle directions retain the latest saved percentage in the database.
 A tab showing a disabled 10% limit therefore enables a newer saved 20% value
 without overwriting it. If another client removed the value, the API returns a
-configuration conflict so the operator can reload or explicitly set a new limit.
+validation error so the operator can reload or explicitly set a new limit.
 
 Selection invalidation keeps committed telemetry and policy edits visible.
 Capped live observations invalidate selection immediately; uncapped observations
-retain the existing throttled refresh. Owner authorization retries snapshots
-invalidated during their read. Cached snapshots remain bounded by freshness;
-cross-replica visibility uses the existing account-selection invalidation signal.
+retain the existing throttled refresh. Fresh owner authorization reads committed policy, status, and standard telemetry
+in one database snapshot, independently of selection caching. Peer selection
+retains the existing invalidation and TTL fallback; acknowledging a mutation
+does not synchronously invalidate every replica.
 
 Shared transports authorize each new turn, including after admission waits.
 Policy reads run outside the HTTP bridge pending-response lock and within the request
@@ -51,7 +59,9 @@ against a 10% limit, then wait for dispatch. If telemetry reaches 10% during tha
 wait, the turn fails before sending. Already-dispatched turns retain their
 ownership and settlement. A successful poll with no standard windows likewise
 supersedes earlier below-limit observations for capped accounts; the dashboard
-reports `data_unavailable` and direct Responses requests return HTTP 503.
+reports `data_unavailable` and direct Responses requests return HTTP 429 with
+`rate_limit_error`, without an upstream reset deadline. Authorization
+infrastructure failures instead return HTTP 503 and retain a healthy transport.
 
 Usage-policy freshness follows the shared fixed refresh cadence. Synthetic
 warmup claims retain upstream's execution/lease fence during policy-denial

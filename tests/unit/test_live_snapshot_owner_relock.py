@@ -44,7 +44,7 @@ async def _settle(session: MagicMock) -> LiveSnapshotSettlement | None:
         account_id="acc-selected",
         chatgpt_account_id="workspace-x",
         windows=[UsageWindowWrite(window="primary", used_percent=25.0)],
-        should_skip=lambda _account_id: False,
+        should_skip=lambda _account_id, _usage_limit_enabled: False,
     )
 
 

@@ -21,7 +21,7 @@ from app.core.clients.proxy_websocket import (
     UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
     UpstreamWebSocket,
 )
-from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
+from app.core.clock import REAL_CLOCK, Clock, Scheduler
 from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, OpenAIErrorParam, openai_error
 from app.core.openai.model_registry import get_model_registry
@@ -32,7 +32,6 @@ from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_COD
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
-from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.locks import fast_lock
 from app.core.utils.sse import sse_event_type_from_block
 from app.db.models import Account, StickySessionKind
@@ -48,37 +47,11 @@ from app.modules.proxy.load_balancer import (
     AccountLease,
     AccountSelection,
     CatalogOmissionQuotaAdmission,
-    LoadBalancer,
 )
 from app.modules.proxy.tool_call_dedupe import ToolCallDedupeKey
 from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
-
-
-async def _check_account_usage_limit(
-    load_balancer: LoadBalancer,
-    account_id: str,
-    *,
-    deadline: float,
-    clock: Clock = REAL_CLOCK,
-    scheduler: Scheduler = REAL_SCHEDULER,
-) -> AccountUsageLimitState | None:
-    try:
-        remaining = deadline - clock.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("Account usage authorization deadline elapsed")
-        return await scheduler.wait_for(load_balancer.check_account_usage_limit(account_id), timeout=remaining)
-    except Exception:
-        logger.warning("Account usage authorization failed account_id=%s", account_id, exc_info=True)
-        raise ProxyResponseError(
-            503,
-            openai_error(
-                "account_usage_limit_authorization_failed",
-                "Unable to verify account usage limit; retry later.",
-                error_type="server_error",
-            ),
-        ) from None
 
 
 _REQUEST_TRANSPORT_HTTP = "http"

@@ -26,8 +26,8 @@ describe("AccountActions", () => {
         onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
-        onUsageLimitChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 
@@ -114,8 +114,8 @@ describe("AccountActions", () => {
         onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
-        onUsageLimitChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 
@@ -143,8 +143,8 @@ describe("AccountActions", () => {
         onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
-        onUsageLimitChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
+        onUsageLimitChange={vi.fn()}
       />,
     );
 

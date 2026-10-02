@@ -5,7 +5,7 @@ import inspect
 import json
 import logging
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable
 from uuid import uuid4
@@ -59,10 +59,8 @@ from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.resilience.toggles import resolve_resilience_toggles
-from app.core.usage import refresh_policy
-from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.usage.quota import apply_usage_quota
-from app.core.usage.refresh_policy import usage_freshness_horizon_seconds
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS, usage_freshness_horizon_seconds
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.db.snapshot import clone_row
@@ -95,12 +93,13 @@ from app.modules.proxy._load_balancer.model_eligibility import (
     _mapped_model_has_registry_entry as _mapped_model_has_registry_entry_impl,
 )
 from app.modules.proxy._load_balancer.opportunistic_admission import (
-    OPPORTUNISTIC_BURN_WINDOW_CLOSED,
     OpportunisticAdmissionRequest,
     apply_lease_release,
     detached_runtime_snapshot,
     run_opportunistic_admission,
 )
+from app.modules.proxy._load_balancer.owner_authorization import load_fresh_owner_authorization
+from app.modules.proxy._load_balancer.selection_inputs import SelectionInputs as _SelectionInputs
 from app.modules.proxy._load_balancer.sticky_selection import (
     _STICKY_EXISTING_UNSET,
     SelectionInputsProtocol,
@@ -142,7 +141,6 @@ from app.modules.proxy._load_balancer.tunables import (
     resolve_routing_tunables,
 )
 from app.modules.proxy._load_balancer.types import (
-    MAX_SELECTION_ATTEMPTS,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
@@ -152,13 +150,6 @@ from app.modules.proxy._load_balancer.types import (
 from app.modules.proxy._load_balancer.unbound_selection import (
     UnboundSelectionRequest,
     run_unbound_selection_path,
-)
-from app.modules.proxy._load_balancer.usage_limits import (
-    check_account_usage_limit,
-    standard_usage_entry,
-)
-from app.modules.proxy._load_balancer.usage_limits import (
-    select_long_window_entry as _select_long_window_entry,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.account_eligibility import (
@@ -178,12 +169,14 @@ from app.modules.proxy.fair_share import (
     evaluate_stream_fair_share,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
+from app.modules.proxy.selection_errors import OPPORTUNISTIC_BURN_WINDOW_CLOSED
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
     get_additional_quota_routing_policy,
     normalize_additional_quota_key,
 )
+from app.modules.usage.authorization import OwnerAuthorization
 from app.modules.usage.mappers import evaluate_account_usage_limit, usage_history_to_window_row
 
 if TYPE_CHECKING:
@@ -244,50 +237,6 @@ class _AdditionalLimitFilterResult:
     latest_secondary: dict[str, AdditionalUsageHistory]
     error_code: str | None = None
     error_message: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _SelectionInputs(SelectionInputsProtocol):
-    accounts: list[Account]
-    latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
-    latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
-    latest_monthly: dict[str, UsageHistory]
-    # Resolve ownership before transient routing filters; keep that stronger
-    # candidate pool alongside the effective routing pool.
-    continuity_owner_candidates: list[Account] | None = None
-    # Sticky mutation authority precedes model/service-tier eligibility; keep
-    # it separate because a model-ineligible account can still own the raw row
-    # this authenticated request may retire.
-    sticky_mutation_authority_account_ids: frozenset[str] | None = None
-    standard_latest_primary: dict[str, UsageHistory] = field(default_factory=dict)
-    standard_latest_secondary: dict[str, UsageHistory] = field(default_factory=dict)
-    quota_planner_settings: PlannerSettings = PlannerSettings()
-    runtime_accounts: list[Account] | None = None
-    error_message: str | None = None
-    error_code: str | None = None
-    ignore_standard_quota_account_ids: frozenset[str] = frozenset()
-    ignore_standard_quota_status: bool = False
-    persist_standard_quota_status: bool = True
-    routing_policy_override: str | None = None
-    quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
-    selection_cache_generation: int = 0
-    soft_drain_enabled: bool | None = None
-
-    def runtime_account(self, account_id: str) -> Account | None:
-        accounts = self.accounts if self.runtime_accounts is None else self.runtime_accounts
-        return next((account for account in accounts if account.id == account_id), None)
-
-    @property
-    def effective_continuity_owner_candidates(self) -> list[Account]:
-        if self.continuity_owner_candidates is None:
-            return self.accounts
-        return self.continuity_owner_candidates
-
-    @property
-    def effective_sticky_mutation_authority_account_ids(self) -> frozenset[str]:
-        if self.sticky_mutation_authority_account_ids is None:
-            return frozenset(account.id for account in self.effective_continuity_owner_candidates)
-        return self.sticky_mutation_authority_account_ids
 
 
 def _required_continuity_owner_failure(
@@ -409,8 +358,13 @@ class LoadBalancer:
                 return 0, 0, 0.0
             return runtime.inflight_response_creates, runtime.inflight_streams, runtime.leased_tokens
 
-    async def check_account_usage_limit(self, account_id: str) -> AccountUsageLimitState | None:
-        return await check_account_usage_limit(self, account_id, max_attempts=MAX_SELECTION_ATTEMPTS)
+    async def authorize_account_fresh(self, account_id: str) -> OwnerAuthorization:
+        return await load_fresh_owner_authorization(
+            self._repo_factory,
+            account_id,
+            refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
+            now=self._clock.now(),
+        )
 
     def _acquire_account_lease_locked(
         self,
@@ -448,6 +402,11 @@ class LoadBalancer:
         _record_account_lease_acquired(kind)
         _record_account_inflight_leases(account_id, runtime)
         return lease
+
+    def _record_account_selection_locked(self, account_id: str) -> None:
+        runtime = self._runtime.setdefault(account_id, RuntimeState())
+        runtime.last_selected_at = self._clock.time()
+        runtime.version += 1
 
     def _account_lease_allowed_locked(
         self,
@@ -643,18 +602,17 @@ class LoadBalancer:
         # (the same one that produced ``concurrency_caps``), never re-read here.
         resilience = resolve_resilience_toggles(dashboard_settings)
 
-        async def load_unresolved_selection_inputs() -> _SelectionInputs:
-            selection_cache_generation = self._selection_inputs_cache.generation
+        async def load_selection_inputs() -> tuple[_SelectionInputs, int]:
+            # Stamp the snapshot before loading so any invalidation during the
+            # load or later selection work remains visible to the final gate.
+            selection_inputs_generation = self._selection_inputs_cache.generation
             selection_inputs = await self._load_selection_inputs(
                 model=model,
                 service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
             )
-            selection_inputs = replace(
-                selection_inputs,
-                selection_cache_generation=selection_cache_generation,
-            )
+            selection_inputs = replace(selection_inputs, soft_drain_enabled=resilience.soft_drain_enabled)
             if require_security_work_authorized:
                 # Ownership scope and routing availability are separate. Even
                 # an already-empty routing pool must have its owner candidates
@@ -682,7 +640,7 @@ class LoadBalancer:
                     account for account in selection_inputs.accounts if bool(account.security_work_authorized)
                 ]
                 if selection_inputs.accounts and not authorized_accounts:
-                    return replace(
+                    selection_inputs = replace(
                         selection_inputs,
                         accounts=[],
                         latest_primary={},
@@ -692,6 +650,7 @@ class LoadBalancer:
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
                     )
+                    return selection_inputs, selection_inputs_generation
                 selection_inputs = replace(
                     selection_inputs,
                     accounts=authorized_accounts,
@@ -701,7 +660,7 @@ class LoadBalancer:
             if excluded_ids and selection_inputs.accounts:
                 filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
                 if require_security_work_authorized and not filtered_accounts:
-                    return replace(
+                    selection_inputs = replace(
                         selection_inputs,
                         accounts=[],
                         latest_primary={},
@@ -713,6 +672,7 @@ class LoadBalancer:
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
                     )
+                    return selection_inputs, selection_inputs_generation
                 selection_inputs = replace(
                     selection_inputs,
                     accounts=filtered_accounts,
@@ -729,7 +689,7 @@ class LoadBalancer:
                 )
                 if failure is not None:
                     error_code, error_message = failure
-                    return replace(
+                    selection_inputs = replace(
                         selection_inputs,
                         accounts=[],
                         latest_primary={},
@@ -737,14 +697,10 @@ class LoadBalancer:
                         error_message=error_message,
                         error_code=error_code,
                     )
-            return selection_inputs
+                    return selection_inputs, selection_inputs_generation
+            return selection_inputs, selection_inputs_generation
 
-        async def load_selection_inputs() -> _SelectionInputs:
-            # Applied after exclusion/security filtering and on every reload,
-            # so retries and filtered pools keep the dashboard soft-drain value.
-            return replace(await load_unresolved_selection_inputs(), soft_drain_enabled=resilience.soft_drain_enabled)
-
-        selection_inputs = await load_selection_inputs()
+        selection_inputs, selection_inputs_generation = await load_selection_inputs()
         caps = concurrency_caps or effective_account_concurrency_caps()
         circuit_breaker_open = _is_upstream_circuit_breaker_open(resilience.circuit_breaker_enabled)
         if circuit_breaker_open:
@@ -892,6 +848,7 @@ class LoadBalancer:
                     api_key_stream_fair_share_threshold_pct=api_key_stream_fair_share_threshold_pct,
                     model=model,
                     selection_inputs=selection_inputs,
+                    selection_inputs_generation=selection_inputs_generation,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
                     allow_usage_exhaustion_error=allow_usage_exhaustion_error,
@@ -969,6 +926,7 @@ class LoadBalancer:
                     exclude_account_ids=frozenset(excluded_ids),
                     model=model,
                     selection_inputs=selection_inputs,
+                    selection_inputs_generation=selection_inputs_generation,
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
                     allow_usage_exhaustion_error=allow_usage_exhaustion_error,
@@ -2094,6 +2052,17 @@ class LoadBalancer:
         await self._persist_state(accounts_repo, account, state)
 
 
+def _standard_usage_entry(
+    request_priority: Mapping[str, UsageHistory | AdditionalUsageHistory],
+    retained_standard: Mapping[str, UsageHistory] | None,
+    account_id: str,
+) -> UsageHistory | None:
+    priority_entry = request_priority.get(account_id)
+    if isinstance(priority_entry, UsageHistory):
+        return priority_entry
+    return retained_standard.get(account_id) if retained_standard is not None else None
+
+
 def _build_states(
     *,
     accounts: Iterable[Account],
@@ -2142,10 +2111,10 @@ def _build_states(
         )
         state.usage_limit_state = evaluate_account_usage_limit(
             account,
-            primary=standard_usage_entry(latest_primary, standard_latest_primary, account.id),
-            secondary=standard_usage_entry(latest_secondary, standard_latest_secondary, account.id),
+            primary=_standard_usage_entry(latest_primary, standard_latest_primary, account.id),
+            secondary=_standard_usage_entry(latest_secondary, standard_latest_secondary, account.id),
             monthly=latest_monthly.get(account.id),
-            refresh_interval_seconds=refresh_policy.USAGE_REFRESH_INTERVAL_SECONDS,
+            refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
             now=datetime.fromtimestamp(now, timezone.utc),
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
@@ -2810,6 +2779,17 @@ def background_recovery_state_from_account(
     return state
 
 
+def _select_long_window_entry(
+    *,
+    account: Account,
+    monthly_entry: UsageHistory | None,
+    secondary_entry: UsageHistory | AdditionalUsageHistory | None,
+) -> UsageHistory | AdditionalUsageHistory | None:
+    if monthly_entry is not None and usage_core.capacity_for_plan(account.plan_type, "monthly") is not None:
+        return monthly_entry
+    return secondary_entry
+
+
 def _rate_limited_freshness_entry(
     *,
     account: Account,
@@ -2831,10 +2811,10 @@ def _rate_limited_freshness_entry(
         long_window_entry = None
     # Freshness cannot prove recovery while an applicable long window is
     # still exhausted, even if the primary sample reports available quota.
-    if long_window_entry is not None and not (
-        long_window_entry.used_percent is not None and float(long_window_entry.used_percent) < 100.0
-    ):
-        return None
+    if long_window_entry is not None:
+        long_window_used = usage_history_to_window_row(long_window_entry).used_percent
+        if not (long_window_used is not None and float(long_window_used) < 100.0):
+            return None
     if long_window_entry is not None and long_window_entry.window == "monthly":
         return long_window_entry
     if primary_entry is None:
@@ -2849,17 +2829,19 @@ def _rate_limited_freshness_entry(
         and long_window_entry.recorded_at > primary_entry.recorded_at
     ):
         return long_window_entry
-    if primary_entry.used_percent is not None and float(primary_entry.used_percent) < 100.0:
+    primary_used = usage_history_to_window_row(primary_entry).used_percent
+    if primary_used is not None and float(primary_used) < 100.0:
         return primary_entry
     return None
 
 
 def _usage_entry_is_recent_available(entry: _UsageWindowEntry | None, *, now: float) -> bool:
+    used_percent = usage_history_to_window_row(entry).used_percent if entry is not None else None
     return (
         entry is not None
         and _usage_entry_is_recent_enough(entry.recorded_at, now=now)
-        and entry.used_percent is not None
-        and float(entry.used_percent) < 100.0
+        and used_percent is not None
+        and float(used_percent) < 100.0
     )
 
 
@@ -2996,8 +2978,6 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         quota_admitted_catalog_omission_account_ids=frozenset(
             selection_inputs.quota_admitted_catalog_omission_account_ids
         ),
-        selection_cache_generation=selection_inputs.selection_cache_generation,
-        soft_drain_enabled=selection_inputs.soft_drain_enabled,
     )
 
 

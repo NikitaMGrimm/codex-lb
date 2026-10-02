@@ -19,11 +19,11 @@ from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.resilience.toggles import bind_resilience_toggles
-from app.core.usage import refresh_policy
-from app.core.usage.account_limits import AccountUsageLimitState
-from app.core.utils.shared_future import _await_cleanup_deferring_cancellation, _await_task_deferring_cancellation
+from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
+from app.core.usage.types import UsageWindowRow
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation, _await_result_deferring_cancellation
 from app.core.utils.time import naive_utc_to_epoch, utcnow
-from app.db.models import Account, AccountStatus, DashboardSettings, QuotaPlannerDecision, UsageHistory
+from app.db.models import Account, AccountStatus, DashboardSettings, QuotaPlannerDecision
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
@@ -34,7 +34,7 @@ from app.modules.api_keys.service import (
     ApiKeysService,
 )
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.usage.mappers import evaluate_account_usage_limit
+from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind, load_owner_authorization
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
@@ -92,10 +92,10 @@ class WarmupUsage:
 @dataclass(frozen=True, slots=True)
 class _FreshStandardUsage:
     account: Account | None
-    primary: UsageHistory | None = None
-    secondary: UsageHistory | None = None
-    monthly: UsageHistory | None = None
-    limit_state: AccountUsageLimitState = AccountUsageLimitState.DISABLED
+    decision: OwnerAuthorization
+    primary: UsageWindowRow | None = None
+    secondary: UsageWindowRow | None = None
+    monthly: UsageWindowRow | None = None
 
 
 class QuotaWarmupService:
@@ -165,15 +165,6 @@ class QuotaWarmupService:
                     reason=reason,
                     expected_status="planned",
                 )
-            if row is None:
-                current = await self._planner.get_decision(decision.id)
-                if current is not None:
-                    return WarmupExecutionResult(
-                        decision_id=current.id,
-                        status=current.status,
-                        reason=current.reason or f"decision_{current.status}",
-                        executed_at=current.executed_at,
-                    )
             return await self._result_from_update_or_current(
                 decision_id=decision.id,
                 row=row,
@@ -275,11 +266,13 @@ class QuotaWarmupService:
                 claim_lease_expires_at=claim_lease_expires_at,
             )
         authorization_reason: str | None = None
-        if authorization.account is None:
+        if authorization.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+            authorization_reason = ACCOUNT_USAGE_LIMIT_AUTHORIZATION_FAILED_REASON
+        elif authorization.account is None:
             authorization_reason = "account_not_found"
-        elif authorization.account.status != AccountStatus.ACTIVE:
+        elif authorization.decision.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
             authorization_reason = f"account_status_{authorization.account.status.value}"
-        elif authorization.limit_state.blocks_account_use:
+        elif authorization.decision.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
             authorization_reason = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
         if authorization_reason is not None:
             return await self._skip_claimed_warmup_deferring_cancellation(
@@ -291,8 +284,6 @@ class QuotaWarmupService:
             )
         assert authorization.account is not None
         account = authorization.account
-
-        request_id = f"quota-warmup-{uuid4().hex}"
         started = time.monotonic()
         reservation_finalized = False
         try:
@@ -500,68 +491,6 @@ class QuotaWarmupService:
             executed_at=row.executed_at,
         )
 
-    async def _skip_claimed_warmup(
-        self,
-        *,
-        decision_id: str,
-        reason: str,
-        reservation_id: str | None,
-        claim_executed_at: datetime,
-        claim_lease_expires_at: datetime,
-    ) -> WarmupExecutionResult:
-        row: QuotaPlannerDecision | None = None
-        try:
-            if reservation_id is not None:
-                await self._api_keys.release_usage_reservation(reservation_id)
-        finally:
-            row = await self._planner.update_decision_status(
-                decision_id,
-                status="skipped",
-                reason=reason,
-                expected_status="executing",
-                expected_executed_at=claim_executed_at,
-                expected_lease_expires_at=claim_lease_expires_at,
-            )
-        return await self._result_from_update_or_current(
-            decision_id=decision_id,
-            row=row,
-            fallback_status="skipped",
-            fallback_reason=reason,
-        )
-
-    async def _skip_claimed_warmup_deferring_cancellation(
-        self,
-        *,
-        decision_id: str,
-        reason: str,
-        reservation_id: str | None,
-        claim_executed_at: datetime,
-        claim_lease_expires_at: datetime,
-    ) -> WarmupExecutionResult:
-        async def finish_cleanup() -> tuple[WarmupExecutionResult | None, BaseException | None]:
-            # Return failures through the shared waiter so deferred cancellation
-            # still wins if reservation release or the fenced status write fails.
-            try:
-                result = await self._skip_claimed_warmup(
-                    decision_id=decision_id,
-                    reason=reason,
-                    reservation_id=reservation_id,
-                    claim_executed_at=claim_executed_at,
-                    claim_lease_expires_at=claim_lease_expires_at,
-                )
-                return result, None
-            except BaseException as error:
-                return None, error
-
-        cleanup = asyncio.create_task(finish_cleanup())
-        (result, error), cancellation = await _await_task_deferring_cancellation(cleanup)
-        if cancellation is not None:
-            raise cancellation from error
-        if error is not None:
-            raise error
-        assert result is not None
-        return result
-
     async def _reconcile_existing_warmup_request(
         self,
         *,
@@ -592,6 +521,73 @@ class QuotaWarmupService:
                 request_id=request_id,
             )
         return None
+
+    async def _skip_claimed_warmup(
+        self,
+        *,
+        decision_id: str,
+        reason: str,
+        reservation_id: str | None,
+        claim_executed_at: datetime,
+        claim_lease_expires_at: datetime,
+    ) -> WarmupExecutionResult:
+        # Claim and reservation writes have committed before authorization.
+        # A cancelled driver call or a PostgreSQL statement error leaves the
+        # read transaction unusable. End it before releasing durable resources.
+        await self._session.rollback()
+        row: QuotaPlannerDecision | None = None
+        try:
+            if reservation_id is not None:
+                await self._api_keys.release_usage_reservation(reservation_id)
+        finally:
+            row = await self._planner.update_decision_status(
+                decision_id,
+                status="skipped",
+                reason=reason,
+                executed_at=utcnow(),
+                expected_status="executing",
+                expected_executed_at=claim_executed_at,
+                expected_lease_expires_at=claim_lease_expires_at,
+            )
+        return await self._result_from_update_or_current(
+            decision_id=decision_id,
+            row=row,
+            fallback_status="skipped",
+            fallback_reason=reason,
+        )
+
+    async def _skip_claimed_warmup_deferring_cancellation(
+        self,
+        *,
+        decision_id: str,
+        reason: str,
+        reservation_id: str | None,
+        claim_executed_at: datetime,
+        claim_lease_expires_at: datetime,
+    ) -> WarmupExecutionResult:
+        async def settle() -> WarmupExecutionResult | Exception:
+            # Return a cleanup error as data until the shared waiter returns its
+            # cancellation marker. Otherwise a failed cleanup could replace the
+            # caller's original cancellation before that marker is delivered.
+            try:
+                return await self._skip_claimed_warmup(
+                    decision_id=decision_id,
+                    reason=reason,
+                    reservation_id=reservation_id,
+                    claim_executed_at=claim_executed_at,
+                    claim_lease_expires_at=claim_lease_expires_at,
+                )
+            except Exception as exc:
+                return exc
+
+        result, cancellation = await _await_result_deferring_cancellation(settle())
+        if cancellation is not None:
+            if isinstance(result, Exception):
+                logger.warning("Warmup cleanup failed during cancellation", exc_info=result)
+            raise cancellation
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     async def cancel_decision(self, decision_id: str) -> WarmupExecutionResult | None:
         row = await self._planner.get_decision(decision_id)
@@ -632,13 +628,15 @@ class QuotaWarmupService:
             return False, "dry_run_enabled"
 
         standard_usage = await self._load_fresh_standard_usage(account.id)
+        if standard_usage.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+            return False, ACCOUNT_USAGE_LIMIT_AUTHORIZATION_FAILED_REASON
         account = standard_usage.account
         if account is None:
             return False, "account_not_found"
         if account.status != AccountStatus.ACTIVE:
             return False, f"account_status_{account.status.value}"
 
-        if standard_usage.limit_state.blocks_account_use:
+        if standard_usage.decision.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
             return False, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
         latest = standard_usage.primary
         if _sample_blocks_short_window_planning(latest):
@@ -670,34 +668,44 @@ class QuotaWarmupService:
 
     async def _load_fresh_standard_usage(self, account_id: str) -> _FreshStandardUsage:
         account = await self._accounts.get_by_id_fresh(account_id)
-        if account is None:
-            return _FreshStandardUsage(account=None)
-        account_ids = [account_id]
-        primary = (await self._usage.latest_by_account(account_ids=account_ids)).get(account_id)
-        secondary = (await self._usage.latest_by_account(window="secondary", account_ids=account_ids)).get(account_id)
-        monthly = (await self._usage.latest_by_account(window="monthly", account_ids=account_ids)).get(account_id)
-        limit_state = evaluate_account_usage_limit(
-            account,
-            primary=primary,
-            secondary=secondary,
-            monthly=monthly,
-            refresh_interval_seconds=refresh_policy.USAGE_REFRESH_INTERVAL_SECONDS,
+        if account is None or account.status != AccountStatus.ACTIVE:
+            return _FreshStandardUsage(
+                account=account,
+                decision=OwnerAuthorization(
+                    OwnerAuthorizationKind.OWNER_UNAVAILABLE,
+                    owner_status=account.status if account is not None else None,
+                ),
+            )
+        decision = await load_owner_authorization(
+            self._usage,
+            account_id,
+            refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
+            require_active=True,
         )
+        snapshot = decision.snapshot
+        if snapshot is None:
+            return _FreshStandardUsage(account=None, decision=decision)
+        account.status = snapshot.status
+        account.plan_type = snapshot.plan_type
+        account.usage_limit_enabled = snapshot.enabled
+        account.usage_limit_percent = snapshot.limit_percent
+        account.usage_limit_weekly_percent = snapshot.limit_weekly_percent
+        account.usage_limit_5h_percent = snapshot.limit_5h_percent
         return _FreshStandardUsage(
             account=account,
-            primary=primary,
-            secondary=secondary,
-            monthly=monthly,
-            limit_state=limit_state,
+            decision=decision,
+            primary=snapshot.primary,
+            secondary=snapshot.secondary,
+            monthly=snapshot.monthly,
         )
 
     @staticmethod
     def _short_window_superseded(
         account: Account,
-        latest: UsageHistory | None,
+        latest: UsageWindowRow | None,
         *,
-        secondary: UsageHistory | None,
-        monthly: UsageHistory | None,
+        secondary: UsageWindowRow | None,
+        monthly: UsageWindowRow | None,
     ) -> bool:
         # A strictly newer long-window row proves a later refresh no longer
         # reported the short window: the stale short primary sample is not
@@ -707,13 +715,13 @@ class QuotaWarmupService:
         # capacity — lingering rows from a former plan are not applicable.
         if latest is None:
             return False
-        latest_window_minutes = latest.window_minutes
+        latest_window_minutes = getattr(latest, "window_minutes", None)
         if latest_window_minutes is None or int(latest_window_minutes) > SHORT_WINDOW_MAX_MINUTES:
             # Only samples that positively report a short duration are
             # eligible for supersession rejection; metadata-less samples
             # keep the legacy bootstrap behavior.
             return False
-        latest_recorded_at = latest.recorded_at
+        latest_recorded_at = getattr(latest, "recorded_at", None)
         if latest_recorded_at is None:
             return False
         siblings = (

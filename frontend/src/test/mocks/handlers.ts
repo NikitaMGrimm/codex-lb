@@ -480,9 +480,9 @@ type MockState = {
   }>;
 };
 
-function createInitialState(): MockState {
+function createInitialState(accounts: AccountSummary[] = createDefaultAccounts()): MockState {
   return {
-    accounts: createDefaultAccounts(),
+    accounts,
     requestLogs: createDefaultRequestLogs(),
     conversations: createDefaultConversations(),
     conversationDetails: [
@@ -527,8 +527,8 @@ function createInitialState(): MockState {
 
 let state: MockState = createInitialState();
 
-export function resetMockState(): void {
-  state = createInitialState();
+export function resetMockState(accounts?: AccountSummary[]): void {
+  state = createInitialState(accounts);
 }
 
 function parseDateValue(value: string | null): number | null {
@@ -697,6 +697,50 @@ function requestLogOptionsFromEntries(
 
 function findAccount(accountId: string): AccountSummary | undefined {
   return state.accounts.find((account) => account.accountId === accountId);
+}
+
+function effectiveMockUsageLimit(account: AccountSummary, windowMinutes: number | null | undefined): number | null {
+  if (!account.usageLimitEnabled) return null;
+  if (windowMinutes === 300) return account.usageLimit5HPercent ?? account.usageLimitPercent ?? null;
+  if (windowMinutes === 10_080) return account.usageLimitWeeklyPercent ?? account.usageLimitPercent ?? null;
+  return account.usageLimitPercent ?? null;
+}
+
+function refreshMockUsageLimitSnapshot(account: AccountSummary): void {
+  account.effectiveLimitPrimary = effectiveMockUsageLimit(account, account.windowMinutesPrimary);
+  account.effectiveLimitSecondary = effectiveMockUsageLimit(account, account.windowMinutesSecondary);
+  account.effectiveLimitMonthly = effectiveMockUsageLimit(account, account.windowMinutesMonthly);
+  if (!account.usageLimitEnabled) {
+    account.usageLimitState = "disabled";
+    return;
+  }
+
+  const hasMonthly = account.windowMinutesMonthly != null || account.usage?.monthlyRemainingPercent != null;
+  const windows = hasMonthly
+    ? [{ minutes: account.windowMinutesMonthly, remaining: account.usage?.monthlyRemainingPercent,
+      limit: account.effectiveLimitMonthly }]
+    : [
+      { minutes: account.windowMinutesPrimary, remaining: account.usage?.primaryRemainingPercent,
+        limit: account.effectiveLimitPrimary },
+      { minutes: account.windowMinutesSecondary, remaining: account.usage?.secondaryRemainingPercent,
+        limit: account.effectiveLimitSecondary },
+    ];
+  const missingOverrideWindow = !hasMonthly && [
+    { limit: account.usageLimit5HPercent, capacity: account.capacityCreditsPrimary, minutes: 300 },
+    { limit: account.usageLimitWeeklyPercent, capacity: account.capacityCreditsSecondary, minutes: 10_080 },
+  ].some(({ limit, capacity, minutes }) => limit != null && (capacity == null || capacity > 0) &&
+    !windows.some((window) => window.minutes === minutes));
+  const observed = windows.filter(({ minutes, remaining }) => minutes != null || remaining != null);
+  const limited = observed.filter(({ limit }) => limit != null);
+  const missingLimitedMeasurement = limited.some(({ remaining }) =>
+    remaining == null || !Number.isFinite(remaining) || remaining < 0 || remaining > 100);
+  if (observed.length === 0 || missingOverrideWindow || missingLimitedMeasurement) {
+    account.usageLimitState = "data_unavailable";
+  } else if (limited.some(({ remaining, limit }) => remaining != null && limit != null && 100 - remaining >= limit)) {
+    account.usageLimitState = "reached";
+  } else {
+    account.usageLimitState = "available";
+  }
 }
 
 function findApiKey(keyId: string): ApiKey | undefined {
@@ -1151,7 +1195,12 @@ export const handlers = [
         );
       }
       const payload = await parseJsonBody(request, AccountUsageLimitUpdateRequestSchema);
-      if (!payload) {
+      const percentages = payload && [
+        payload.percent === undefined ? account.usageLimitPercent : payload.percent,
+        payload.percent5H === undefined ? account.usageLimit5HPercent : payload.percent5H,
+        payload.percentWeekly === undefined ? account.usageLimitWeeklyPercent : payload.percentWeekly,
+      ];
+      if (!payload || (payload.enabled && !percentages?.some((value) => value != null))) {
         return HttpResponse.json(
           {
             error: {
@@ -1162,40 +1211,23 @@ export const handlers = [
           { status: 422 },
         );
       }
-      const percent = payload.percent === undefined ? account.usageLimitPercent : payload.percent;
-      if (payload.enabled && percent == null) {
-        return HttpResponse.json(
-          { error: {
-            code: "account_usage_limit_not_configured",
-            message: "Configure a percentage before enabling the usage limit",
-          } },
-          { status: 409 },
-        );
-      }
       account.usageLimitEnabled = payload.enabled;
       if (payload.percent !== undefined) {
         account.usageLimitPercent = payload.percent;
       }
-      // Summary usage is already normalized; these fixtures have no telemetry
-      // timestamps with which to reproduce backend freshness checks.
-      const remainingPercents = (
-        account.usage?.monthlyRemainingPercent != null
-          ? [account.usage.monthlyRemainingPercent]
-          : [account.usage?.primaryRemainingPercent, account.usage?.secondaryRemainingPercent]
-      ).filter((remaining): remaining is number => remaining != null);
-      if (!payload.enabled) {
-        account.usageLimitState = "disabled";
-      } else if (percent == null || remainingPercents.length === 0) {
-        account.usageLimitState = "data_unavailable";
-      } else {
-        account.usageLimitState = remainingPercents.some((remaining) => 100 - remaining >= percent)
-          ? "reached"
-          : "available";
+      if (payload.percent5H !== undefined) {
+        account.usageLimit5HPercent = payload.percent5H;
       }
+      if (payload.percentWeekly !== undefined) {
+        account.usageLimitWeeklyPercent = payload.percentWeekly;
+      }
+      refreshMockUsageLimitSnapshot(account);
       return HttpResponse.json({
         accountId,
         enabled: account.usageLimitEnabled,
         percent: account.usageLimitPercent ?? null,
+        percent5H: account.usageLimit5HPercent ?? null,
+        percentWeekly: account.usageLimitWeeklyPercent ?? null,
       });
     },
   ),

@@ -28,6 +28,76 @@ import type {
   AccountUsageLimitUpdateRequest,
   AccountUsageResetConsumeResponse,
 } from "@/features/accounts/schemas";
+import type { DashboardOverview } from "@/features/dashboard/schemas";
+
+type UsageLimitCacheUpdate = {
+  accountId: string;
+  enabled: boolean;
+  percent: number | null;
+  percent5H?: number | null;
+  percentWeekly?: number | null;
+};
+
+function applyUsageLimitCacheUpdate(
+  account: AccountSummary,
+  update: UsageLimitCacheUpdate,
+): AccountSummary {
+  if (account.accountId !== update.accountId) {
+    return account;
+  }
+  return {
+    ...account,
+    usageLimitEnabled: update.enabled,
+    usageLimitPercent: update.percent,
+    usageLimit5HPercent: update.percent5H ?? null,
+    usageLimitWeeklyPercent: update.percentWeekly ?? null,
+    effectiveLimitPrimary: undefined,
+    effectiveLimitSecondary: undefined,
+    effectiveLimitMonthly: undefined,
+    usageLimitState: update.enabled ? "data_unavailable" : "disabled",
+  };
+}
+
+function reconcileUsageLimitCaches(
+  queryClient: ReturnType<typeof useQueryClient>,
+  update: UsageLimitCacheUpdate,
+) {
+  queryClient.setQueryData<{ accounts: AccountSummary[] }>(
+    ["accounts", "list"],
+    (current) =>
+      current
+        ? {
+            ...current,
+            accounts: current.accounts.map((account) =>
+              applyUsageLimitCacheUpdate(account, update),
+            ),
+          }
+        : current,
+  );
+  queryClient.setQueriesData<DashboardOverview>(
+    { queryKey: ["dashboard", "overview"] },
+    (current) =>
+      current
+        ? {
+            ...current,
+            accounts: current.accounts.map((account) =>
+              applyUsageLimitCacheUpdate(account, update),
+            ),
+          }
+        : current,
+  );
+}
+
+async function invalidateUsageLimitQueries(
+  queryClient: ReturnType<typeof useQueryClient>,
+) {
+  const accountsListInvalidation = queryClient.invalidateQueries({
+    queryKey: ["accounts", "list"],
+  });
+  void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
+  void queryClient.invalidateQueries({ queryKey: ["dashboard", "projections"] });
+  await accountsListInvalidation;
+}
 
 async function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>, accountId?: string) {
   const invalidations = [
@@ -205,6 +275,9 @@ export function useAccountMutations() {
   });
 
   const usageLimitMutation = useMutation({
+    // Controls share these caches. Serialize policy writes through reconciliation
+    // so a delayed earlier save/refetch cannot race a later acknowledged edit.
+    scope: { id: "account-usage-limit" },
     mutationFn: ({
       accountId,
       update,
@@ -213,28 +286,14 @@ export function useAccountMutations() {
       update: AccountUsageLimitUpdateRequest;
     }) => updateAccountUsageLimit(accountId, update),
     onSuccess: async (data) => {
-      queryClient.setQueryData<{ accounts: AccountSummary[] }>(
-        ["accounts", "list"],
-        (current) =>
-          current
-            ? {
-                ...current,
-                accounts: current.accounts.map((account) =>
-                  account.accountId === data.accountId
-                    ? {
-                        ...account,
-                        usageLimitEnabled: data.enabled,
-                        usageLimitPercent: data.percent,
-                        usageLimitState: data.enabled
-                          ? account.usageLimitState
-                          : "disabled",
-                      }
-                    : account,
-                ),
-              }
-            : current,
-      );
-      if (data.percent === null) {
+      // Inactive reads are not refetched by invalidation. Cancel their retries
+      // before publishing the acknowledgement, even if the fetch ignores abort.
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: ["accounts", "list"] }),
+        queryClient.cancelQueries({ queryKey: ["dashboard", "overview"] }),
+      ]);
+      reconcileUsageLimitCaches(queryClient, data);
+      if (data.percent === null && data.percent5H == null && data.percentWeekly == null) {
         toast.success(t("accounts.toasts.usageLimitRemoved"));
       } else {
         toast.success(
@@ -243,7 +302,7 @@ export function useAccountMutations() {
             : t("accounts.toasts.usageLimitDisabled"),
         );
       }
-      await invalidateAccountRelatedQueries(queryClient);
+      await invalidateUsageLimitQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || t("accounts.toasts.usageLimitUpdateFailed"));

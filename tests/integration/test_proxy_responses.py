@@ -1122,7 +1122,7 @@ async def test_proxy_responses_spark_additional_quota_does_not_bypass_account_us
     assert event["type"] == "response.failed"
     assert event["response"]["error"] == {
         "message": "All otherwise available accounts have reached their usage limit or lack current usage data",
-        "type": "server_error",
+        "type": "rate_limit_error",
         "code": "account_usage_limit_reached",
     }
 

@@ -425,6 +425,20 @@ def _filter_opportunistic_candidates(
     return [], "no expendable account has emergency foreground reserve"
 
 
+def _usage_limit_blocks_opportunistic_candidate(
+    available: list[AccountState],
+    usage_limit_blocked: list[AccountState],
+    current: float,
+) -> bool:
+    if not usage_limit_blocked:
+        return False
+    hypothetical, _reason = _filter_opportunistic_candidates(
+        [*available, *usage_limit_blocked],
+        current,
+    )
+    return bool(hypothetical)
+
+
 def _reset_preference_bucket(state: AccountState, current: float, window: ResetPreferenceWindow) -> int:
     if window == "primary":
         reset_at = state.primary_reset_at
@@ -460,6 +474,15 @@ def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
     )
 
 
+def _known_expired_reauth(state: AccountState, current: float) -> bool:
+    """Return whether a warning-state account has crossed known token expiry."""
+    return (
+        state.status == AccountStatus.REAUTH_REQUIRED
+        and state.access_token_expires_at is not None
+        and state.access_token_expires_at <= current
+    )
+
+
 def _prepare_routing_candidates(
     states: Iterable[AccountState],
     *,
@@ -467,10 +490,10 @@ def _prepare_routing_candidates(
     ignore_standard_quota: bool,
     bypass_quota_exceeded: bool,
     bypass_account_ids: Collection[str] | None,
-) -> tuple[list[AccountState], list[AccountState], bool]:
+) -> tuple[list[AccountState], list[AccountState], list[AccountState]]:
     available: list[AccountState] = []
     in_error_backoff: list[AccountState] = []
-    has_usage_limit_blocked = False
+    usage_limit_blocked: list[AccountState] = []
     bypass_ids = set(bypass_account_ids or ())
 
     for state in states:
@@ -480,9 +503,11 @@ def _prepare_routing_candidates(
             or bypass_quota_exceeded
             or state.account_id in bypass_ids
         )
-        if state.status == AccountStatus.DEACTIVATED or _known_expired_reauth(state, current):
+        if state.status == AccountStatus.DEACTIVATED:
             continue
         if state.status == AccountStatus.PAUSED:
+            continue
+        if _known_expired_reauth(state, current):
             continue
         if state.status == AccountStatus.RATE_LIMITED:
             if state.reset_at and current >= state.reset_at:
@@ -507,7 +532,7 @@ def _prepare_routing_candidates(
         if state.cooldown_until and current < state.cooldown_until:
             continue
         if state.usage_limit_state.blocks_account_use:
-            has_usage_limit_blocked = True
+            usage_limit_blocked.append(state)
             continue
         if state.error_count >= ERROR_BACKOFF_THRESHOLD:
             backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))
@@ -524,7 +549,56 @@ def _prepare_routing_candidates(
             state.last_error_at = None
         available.append(state)
 
-    return available, in_error_backoff, has_usage_limit_blocked
+    return available, in_error_backoff, usage_limit_blocked
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingPoolEvaluation:
+    """Capacity projections and canonical evidence from one eligibility pass.
+
+    Members refer to the original states; normalization is evaluated on clones
+    so reading capacity never mutates routing/recovery state. A capacity filter
+    may remove candidates, but must retain the rest of all_states as context.
+    """
+
+    all_states: tuple[AccountState, ...]
+    normal_candidates: tuple[AccountState, ...]
+    capacity_candidates: tuple[AccountState, ...]
+    routable_candidates: tuple[AccountState, ...]
+
+
+def evaluate_routing_pool(
+    states: Iterable[AccountState],
+    *,
+    now: float | None = None,
+    traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+) -> RoutingPoolEvaluation:
+    current = time.time() if now is None else now
+    originals = tuple(states)
+    evaluated = [replace(state) for state in originals]
+    available, in_error_backoff, _ = _prepare_routing_candidates(
+        evaluated,
+        current=current,
+        ignore_standard_quota=False,
+        bypass_quota_exceeded=False,
+        bypass_account_ids=None,
+    )
+    routable = [*available, *in_error_backoff]
+    normal = available
+    capacity = routable
+    if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:
+        if normal:
+            normal, _ = _filter_opportunistic_candidates(normal, current)
+        if capacity:
+            capacity, _ = _filter_opportunistic_candidates(capacity, current)
+
+    def project(candidates: list[AccountState]) -> tuple[AccountState, ...]:
+        identities = {id(state) for state in candidates}
+        return tuple(
+            original for original, evaluation in zip(originals, evaluated, strict=True) if id(evaluation) in identities
+        )
+
+    return RoutingPoolEvaluation(originals, project(normal), project(capacity), project(routable))
 
 
 def routing_eligible_states(
@@ -535,34 +609,8 @@ def routing_eligible_states(
     include_error_backoff: bool = False,
 ) -> list[AccountState]:
     """Return the pool-wide states eligible for the requested traffic class."""
-    current = time.time() if now is None else now
-    state_list = list(states)
-    evaluated_states = [replace(state) for state in state_list]
-    available, in_error_backoff, _ = _prepare_routing_candidates(
-        evaluated_states,
-        current=current,
-        ignore_standard_quota=False,
-        bypass_quota_exceeded=False,
-        bypass_account_ids=None,
-    )
-    eligible = [*available, *in_error_backoff] if include_error_backoff else available
-    if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and eligible:
-        eligible, _ = _filter_opportunistic_candidates(eligible, current)
-    eligible_evaluations = {id(state) for state in eligible}
-    return [
-        state
-        for state, evaluated in zip(state_list, evaluated_states, strict=True)
-        if id(evaluated) in eligible_evaluations
-    ]
-
-
-def _known_expired_reauth(state: AccountState, current: float) -> bool:
-    """Return whether a warning-state account has crossed known token expiry."""
-    return (
-        state.status == AccountStatus.REAUTH_REQUIRED
-        and state.access_token_expires_at is not None
-        and state.access_token_expires_at <= current
-    )
+    pool = evaluate_routing_pool(states, now=now, traffic_class=traffic_class)
+    return list(pool.capacity_candidates if include_error_backoff else pool.normal_candidates)
 
 
 def select_account(
@@ -660,19 +708,24 @@ def select_account(
     current = now or time.time()
     bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
     all_states = list(states)
-    available, in_error_backoff, routing_limit_blocked = _prepare_routing_candidates(
+    available, in_error_backoff, routing_limit_blocked_states = _prepare_routing_candidates(
         all_states,
         current=current,
         ignore_standard_quota=ignore_standard_quota,
         bypass_quota_exceeded=bypass_quota_exceeded,
         bypass_account_ids=bypass_account_ids,
     )
+    routing_limit_blocked = bool(routing_limit_blocked_states)
     usage_exhaustion_state_list = list(usage_exhaustion_states) if usage_exhaustion_states is not None else all_states
 
     if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and available:
         opportunistic_available, reason = _filter_opportunistic_candidates(available, current)
         if not opportunistic_available:
-            if routing_limit_blocked:
+            if _usage_limit_blocks_opportunistic_candidate(
+                available,
+                routing_limit_blocked_states,
+                current,
+            ):
                 return SelectionResult(
                     None,
                     ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
@@ -707,7 +760,11 @@ def select_account(
             if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC:
                 opportunistic_available, reason = _filter_opportunistic_candidates(available, current)
                 if not opportunistic_available:
-                    if routing_limit_blocked:
+                    if _usage_limit_blocks_opportunistic_candidate(
+                        available,
+                        routing_limit_blocked_states,
+                        current,
+                    ):
                         return SelectionResult(
                             None,
                             ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
@@ -716,7 +773,14 @@ def select_account(
                     return SelectionResult(None, f"opportunistic burn window closed: {reason}")
                 available = opportunistic_available
         else:
-            if routing_limit_blocked:
+            if routing_limit_blocked and (
+                traffic_class != TRAFFIC_CLASS_OPPORTUNISTIC
+                or _usage_limit_blocks_opportunistic_candidate(
+                    available,
+                    routing_limit_blocked_states,
+                    current,
+                )
+            ):
                 return SelectionResult(
                     None,
                     ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
