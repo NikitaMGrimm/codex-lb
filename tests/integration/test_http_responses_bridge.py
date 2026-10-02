@@ -57,7 +57,7 @@ from app.modules.proxy.load_balancer import (
     CatalogOmissionQuotaAdmission,
 )
 from app.modules.proxy.sticky_repository import StickySessionsRepository
-from app.modules.usage.repository import AdditionalUsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.integration
 _TEST_SYNC_TIMEOUT_SECONDS = 5.0
@@ -4607,6 +4607,70 @@ async def test_v1_responses_http_bridge_revalidates_usage_limit_before_second_tu
     assert bridge_session.closed is True
     assert upstream.closed is True
     assert bridge_session.account_lease is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_policy_change_during_dispatch_wait_rejects_unsent_turn(
+    async_client,
+    app_instance,
+    monkeypatch,
+) -> None:
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(async_client, "acc_dispatch_policy", "dispatch-policy@example.com")
+    account = await _get_account(account_id)
+    async with SessionLocal() as session:
+        await UsageRepository(session).add_entry(account_id, 10.0, window="primary", window_minutes=300)
+    upstream = _FakeBridgeUpstreamWebSocket("resp_dispatch_policy")
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_account_with_budget",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", AsyncMock(return_value=upstream))
+    payload = {"model": "gpt-5.1", "input": "first", "prompt_cache_key": "dispatch-policy"}
+    first = await async_client.post("/v1/responses", json=payload)
+    assert first.status_code == 200
+    service = get_proxy_service_for_app(app_instance)
+    bridge = service._http_bridge_sessions[proxy_module._HTTPBridgeSessionKey("prompt_cache", "dispatch-policy", None)]
+    dispatch_lock = bridge.lifecycle_lock
+    dispatch_waiting = asyncio.Event()
+
+    class ObservedDispatchLock:
+        async def __aenter__(self):
+            dispatch_waiting.set()
+            await dispatch_lock.acquire()
+
+        async def __aexit__(self, *_args):
+            dispatch_lock.release()
+
+    bridge.lifecycle_lock = ObservedDispatchLock()
+    await dispatch_lock.acquire()
+    lock_held = True
+    second_task = asyncio.create_task(async_client.post("/v1/responses", json={**payload, "input": "second"}))
+    try:
+        await _wait_for_event(dispatch_waiting)
+        changed = await async_client.put(
+            f"/api/accounts/{account_id}/usage-limit", json={"enabled": True, "percent": 10.0}
+        )
+        assert changed.status_code == 200
+        dispatch_lock.release()
+        lock_held = False
+        second = await asyncio.wait_for(second_task, timeout=5.0)
+
+        assert second.status_code == 503
+        assert second.json()["error"]["code"] == "account_usage_limit_reached"
+        assert len(upstream.sent_text) == 1
+        assert bridge.queued_request_count == 0
+        assert bridge.admission_waiter_count == 0
+        assert bridge.account_lease is None
+        assert await service._load_balancer.account_pressure_snapshot(account_id) == (0, 0, 0.0)
+    finally:
+        if lock_held:
+            dispatch_lock.release()
+        if not second_task.done():
+            second_task.cancel()
+        await asyncio.gather(second_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

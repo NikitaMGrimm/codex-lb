@@ -21974,7 +21974,11 @@ async def test_recovery_submit_owner_fence_rejection_retires_before_send() -> No
 
 
 @pytest.mark.asyncio
-async def test_recovery_submit_cancellation_after_alias_commit_restores_previous_owner() -> None:
+@pytest.mark.parametrize("interruption", ["cancel", "policy_denied", "policy_read_failed"])
+async def test_recovery_submit_interruption_after_alias_commit_restores_previous_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
+) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     key = _make_account_neutral_replay_session_key("alias-commit-cancel")
     send_text = AsyncMock()
@@ -21990,6 +21994,16 @@ async def test_recovery_submit_cancellation_after_alias_commit_restores_previous
     alias_owner = {"http_turn_commit_cancel": "durable-predecessor"}
     alias_committed = asyncio.Event()
     release_registration = asyncio.Event()
+
+    async def check_account_usage_limit(_self: object, _account_id: str) -> AccountUsageLimitState:
+        assert not session.pending_lock.locked()
+        if alias_committed.is_set() and interruption != "cancel":
+            if interruption == "policy_read_failed":
+                raise RuntimeError("Usage database unavailable")
+            return AccountUsageLimitState.REACHED
+        return AccountUsageLimitState.DISABLED
+
+    monkeypatch.setattr(LoadBalancer, "check_account_usage_limit", check_account_usage_limit)
 
     async def register_recovery_turn_state(**_kwargs: Any) -> DurableBridgeAliasRegistrationReceipt:
         alias_owner["http_turn_commit_cancel"] = "durable-recovery"
@@ -22047,12 +22061,23 @@ async def test_recovery_submit_cancellation_after_alias_commit_restores_previous
     )
     try:
         await asyncio.wait_for(alias_committed.wait(), timeout=1.0)
-        submit.cancel()
-        await asyncio.sleep(0)
-        assert not submit.done()
+        if interruption == "cancel":
+            submit.cancel()
+            await asyncio.sleep(0)
+            assert not submit.done()
         release_registration.set()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(submit, timeout=1.0)
+        if interruption == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(submit, timeout=1.0)
+        else:
+            with pytest.raises(ProxyResponseError) as exc_info:
+                await asyncio.wait_for(submit, timeout=1.0)
+            expected_code = (
+                "account_usage_limit_reached"
+                if interruption == "policy_denied"
+                else "account_usage_limit_authorization_failed"
+            )
+            assert exc_info.value.payload["error"]["code"] == expected_code
     finally:
         release_registration.set()
         if not submit.done():
@@ -22065,6 +22090,8 @@ async def test_recovery_submit_cancellation_after_alias_commit_restores_previous
     release_live_session.assert_awaited_once()
     assert session.closed is True
     assert session.queued_request_count == 0
+    assert session.admission_waiter_count == 0
+    assert session.response_create_gate.locked() is False
     assert session.pending_requests == deque()
 
 
@@ -29209,6 +29236,74 @@ async def test_http_bridge_reader_retirement_skips_concurrent_prewarm_waiter(
             prewarm_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await prewarm_task
+
+
+@pytest.mark.asyncio
+async def test_prewarm_policy_change_during_dispatch_wait_rejects_unsent_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="prewarm-policy-dispatch")
+    session.codex_session = True
+    session.prewarm_lock = anyio.Lock()
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-policy-dispatch",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"new"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True),
+    )
+    dispatch_lock = session.lifecycle_lock
+    dispatch_waiting = asyncio.Event()
+
+    class ObservedDispatchLock:
+        async def __aenter__(self):
+            dispatch_waiting.set()
+            await dispatch_lock.acquire()
+
+        async def __aexit__(self, *_args):
+            dispatch_lock.release()
+
+    session.lifecycle_lock = ObservedDispatchLock()
+    await dispatch_lock.acquire()
+    lock_held = True
+    prewarm_task = asyncio.create_task(
+        service._maybe_prewarm_http_bridge_session(
+            session, request_state=request_state, text_data=request_state.request_text or "{}"
+        )
+    )
+    try:
+        await asyncio.wait_for(dispatch_waiting.wait(), timeout=1.0)
+        monkeypatch.setattr(
+            LoadBalancer, "check_account_usage_limit", AsyncMock(return_value=AccountUsageLimitState.REACHED)
+        )
+        dispatch_lock.release()
+        lock_held = False
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await asyncio.wait_for(prewarm_task, timeout=1.0)
+        assert exc_info.value.payload["error"]["code"] == "account_usage_limit_reached"
+        send_text.assert_not_awaited()
+        assert session.prewarmed is False
+        assert session.pending_requests == deque()
+        assert session.response_create_gate.locked() is False
+    finally:
+        if lock_held:
+            dispatch_lock.release()
+        if not prewarm_task.done():
+            prewarm_task.cancel()
+        await asyncio.gather(prewarm_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

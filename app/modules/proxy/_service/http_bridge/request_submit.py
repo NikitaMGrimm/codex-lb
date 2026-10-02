@@ -1654,7 +1654,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.latency_bridge_queue_wait_ms = int(
                     max(0.0, _service_time().monotonic() - request_state.bridge_queue_wait_started_at) * 1000
                 )
-            await self._authorize_http_bridge_account_usage(session, request_state=request_state)
             async with session.lifecycle_lock:
                 current_session = session
                 http_bridge_sessions = getattr(self, "_http_bridge_sessions", None)
@@ -1887,6 +1886,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                     "The recovery checkpoint was consumed before dispatch; retry the request.",
                                 ),
                             )
+                    await self._authorize_http_bridge_account_usage(session, request_state=request_state)
                     async with session.pending_lock:
                         session.pending_requests.append(request_state)
                         session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
@@ -1932,7 +1932,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.recovery_attempt_dispatched = True
                     request_state.operation_dispatched = request_state.operation_id is not None
                     session.last_used_at = _service_time().monotonic()
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, ProxyResponseError):
                     if recovery_receipt is not None and not upstream_send_started:
                         session.closed = True
                         session.upstream_control.reconnect_requested = True
@@ -1949,7 +1949,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             except Exception:
                                 rolled_back = False
                                 logger.warning(
-                                    "Failed to roll back cancelled HTTP bridge recovery alias",
+                                    "Failed to roll back unsent HTTP bridge recovery alias",
                                     exc_info=True,
                                 )
                             if not rolled_back:
@@ -2177,7 +2177,6 @@ class _HTTPBridgeRequestSubmitMixin:
                     bridge_session=session,
                 )
                 gate_acquired = True
-                await self._authorize_http_bridge_account_usage(session, request_state=warmup_state)
                 async with session.lifecycle_lock:
                     current_session = session
                     http_bridge_sessions = getattr(self, "_http_bridge_sessions", None)
@@ -2213,6 +2212,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         )
                         gate_acquired = False
                         return
+                    await self._authorize_http_bridge_account_usage(session, request_state=warmup_state)
                     async with session.pending_lock:
                         session.pending_requests.append(warmup_state)
                     request_enqueued = True
@@ -2476,7 +2476,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
     ) -> None:
-        """Check the pinned owner without holding response lifecycle locks."""
+        """Check the pinned owner without holding the pending-response lock."""
         load_balancer = getattr(self, "_load_balancer", None)
         if load_balancer is None:
             return
