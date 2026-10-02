@@ -1498,3 +1498,34 @@ async def test_public_selection_bounds_continuous_input_generation_changes(
     assert release_spy.await_count == 4
     assert sticky_repo.account_id is None
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_sticky_persistence_policy_change_releases_admission(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account("contract-sticky-persistence-policy")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 10.0
+    balancer, _, usage_repo, sticky_repo = _balancer(
+        [account],
+        selection_cache,
+        primary={account.id: _usage_row(90, account.id, window="primary", used_percent=5.0)},
+    )
+    original_upsert = sticky_repo.upsert
+
+    async def persist_after_cap_changes(*args: Any, **kwargs: Any) -> StickySession:
+        usage_repo.rows["primary"][account.id] = _usage_row(91, account.id, window="primary", used_percent=10.0)
+        selection_cache.invalidate()
+        return await original_upsert(*args, **kwargs)
+
+    monkeypatch.setattr(sticky_repo, "upsert", persist_after_cap_changes)
+
+    selection = await _select_with_lease(balancer, sticky=True)
+
+    assert selection.account is None
+    assert selection.lease is None
+    assert selection.error_code == "selection_state_changed"
+    assert sticky_repo.account_id == account.id
+    assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)

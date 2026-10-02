@@ -1196,6 +1196,20 @@ async def run_sticky_selection_path(
                     await owner.release_account_lease(selected_lease)
                     selected_lease = None
                     raise
+        if (
+            selected_snapshot is not None
+            and owner._selection_inputs_cache.generation != selection_inputs.selection_cache_generation
+        ):
+            # Affinity persistence and probe commit may await after the first
+            # generation fence. Keep the persisted owner, but do not publish a
+            # stale authorization or its concurrency lease to the caller.
+            await owner.release_account_lease(selected_lease)
+            selected_lease = None
+            return _direct_error(
+                account=None,
+                error_message=SELECTION_STATE_CHANGED_MESSAGE,
+                error_code=SELECTION_STATE_CHANGED,
+            )
         break
 
     return StickySelectionOutcome(
