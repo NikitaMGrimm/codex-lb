@@ -1,0 +1,3 @@
+- [x] Implement the two quota-only compatibility routes.
+- [x] Verify authentication, account scoping, quota mapping, and rejected operations.
+- [x] Sync the fleet specification and document the private T3 setup.

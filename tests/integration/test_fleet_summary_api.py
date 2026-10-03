@@ -26,6 +26,8 @@ pytestmark = pytest.mark.integration
 
 _PRIMARY_WINDOW_MINUTES = 300
 _SECONDARY_WINDOW_MINUTES = 10080
+_T3_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+_T3_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 
 _FORBIDDEN_KEYS = {
     "auth",
@@ -228,6 +230,112 @@ def _assert_no_forbidden_keys(node: object) -> None:
 
 def _window(payload: dict, key: str) -> dict:
     return next(window for window in payload["pressure"]["windows"] if window["key"] == key)
+
+
+@pytest.mark.asyncio
+async def test_t3_compat_reads_only_visible_account_quota(async_client, db_setup):
+    reset = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 300
+    await _seed_account_with_windows(
+        "acc_t3_visible",
+        "visible@example.com",
+        primary_used_percent=38,
+        secondary_used_percent=20,
+        primary_reset_at=reset,
+        secondary_reset_at=reset + 86400,
+    )
+    key = await _create_api_key("t3-compat")
+    headers = {"Authorization": f"Bearer {key}"}
+    files = await async_client.get("/v0/management/auth-files", headers=headers)
+    assert files.status_code == 200
+    assert files.json() == {
+        "files": [
+            {
+                "id": "acc_t3_visible",
+                "auth_index": "acc_t3_visible",
+                "provider": "codex",
+                "email": "visible@example.com",
+                "disabled": False,
+                "id_token": {"chatgpt_plan_type": "plus"},
+            }
+        ]
+    }
+    usage = await async_client.post(
+        "/v0/management/api-call",
+        headers=headers,
+        json={
+            "auth_index": "acc_t3_visible",
+            "method": "GET",
+            "url": _T3_USAGE_URL,
+            "header": {"Authorization": "Bearer $TOKEN$"},
+        },
+    )
+    assert usage.status_code == 200
+    assert usage.json()["status_code"] == 200
+    body = json.loads(usage.json()["body"])
+    assert body["plan_type"] == "plus"
+    assert body["rate_limit"]["primary_window"] == {
+        "used_percent": 38,
+        "reset_at": reset,
+        "limit_window_seconds": 18000,
+    }
+    assert body["rate_limit"]["secondary_window"] == {
+        "used_percent": 20,
+        "reset_at": reset + 86400,
+        "limit_window_seconds": 604800,
+    }
+
+    credits = await async_client.post(
+        "/v0/management/api-call",
+        headers=headers,
+        json={
+            "auth_index": "acc_t3_visible",
+            "method": "GET",
+            "url": _T3_CREDITS_URL,
+        },
+    )
+    assert credits.status_code == 200
+    assert json.loads(credits.json()["body"]) == {"credits": []}
+
+
+@pytest.mark.asyncio
+async def test_t3_compat_rejects_unauthorized_or_unsupported_calls(async_client, db_setup):
+    reset = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 3600
+    await _seed_account_with_windows(
+        "acc_t3",
+        "t3@example.com",
+        primary_used_percent=10,
+        secondary_used_percent=10,
+        primary_reset_at=reset,
+        secondary_reset_at=reset,
+    )
+    await _seed_account_with_windows(
+        "acc_t3_hidden",
+        "hidden@example.com",
+        primary_used_percent=20,
+        secondary_used_percent=20,
+        primary_reset_at=reset,
+        secondary_reset_at=reset,
+    )
+    assert (await async_client.get("/v0/management/auth-files")).status_code == 401
+    key = await _create_api_key("t3-denied", usage_sections="")
+    assert (
+        await async_client.get(
+            "/v0/management/auth-files",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+    ).status_code == 403
+    key = await _create_api_key("t3-allowed", assigned_account_ids=["acc_t3"])
+    headers = {"Authorization": f"Bearer {key}"}
+    files = await async_client.get("/v0/management/auth-files", headers=headers)
+    assert [item["id"] for item in files.json()["files"]] == ["acc_t3"]
+    for payload in (
+        {"auth_index": "acc_t3", "method": "POST", "url": _T3_USAGE_URL},
+        {"auth_index": "acc_t3", "method": "GET", "url": "https://example.com/"},
+        {"auth_index": "other", "method": "GET", "url": _T3_USAGE_URL},
+        {"auth_index": "acc_t3", "method": "GET", "url": f"{_T3_CREDITS_URL}/consume"},
+    ):
+        response = await async_client.post("/v0/management/api-call", headers=headers, json=payload)
+        assert response.status_code in {400, 422}
 
 
 @pytest.mark.asyncio

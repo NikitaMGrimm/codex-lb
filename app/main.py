@@ -105,6 +105,7 @@ from app.modules.dashboard_users import api as dashboard_users_api
 from app.modules.dashboard_users.identity_resolver import get_identity_resolution_cache
 from app.modules.firewall import api as firewall_api
 from app.modules.fleet import api as fleet_api
+from app.modules.fleet import t3_compat as fleet_t3_compat
 from app.modules.health import api as health_api
 from app.modules.model_sources import api as model_sources_api
 from app.modules.oauth import api as oauth_api
@@ -1062,6 +1063,7 @@ def create_app() -> FastAPI:
     app.include_router(telemetry_api.router)
     app.include_router(firewall_api.router)
     app.include_router(fleet_api.router)
+    app.include_router(fleet_t3_compat.router)
     app.include_router(sticky_sessions_api.router)
     app.include_router(cache_isolation_probe_api.router)
     app.include_router(automations_api.router)
