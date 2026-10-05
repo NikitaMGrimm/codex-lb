@@ -1,35 +1,126 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
 
+from app.core.utils.time import naive_utc_to_epoch
 from app.modules.dashboard.repository import QuotaObservation
 from app.modules.dashboard.schemas import QuotaLbShareEstimate
 
-MIN_REFERENCE_USED_POINTS = 20.0
 RESET_DEADLINE_ADVANCE_SECONDS = 86400
+RESET_DEADLINE_JITTER_SECONDS = 5
+
+
+def _deadline(value: int) -> datetime:
+    return datetime.fromtimestamp(value, timezone.utc).replace(tzinfo=None)
+
+
+def _expired(row: QuotaObservation) -> bool:
+    return row.reset_at is not None and row.reset_at <= naive_utc_to_epoch(row.recorded_at)
+
+
+def _regressed(previous: QuotaObservation, row: QuotaObservation, cycle_deadline: int | None = None) -> bool:
+    return (
+        previous.reset_at is not None
+        and row.reset_at is not None
+        and (
+            previous.reset_at > row.reset_at + RESET_DEADLINE_ADVANCE_SECONDS
+            or (cycle_deadline is not None and row.reset_at < cycle_deadline - RESET_DEADLINE_JITTER_SECONDS)
+        )
+    )
+
+
+def _is_reset(previous: QuotaObservation, row: QuotaObservation, window_minutes: int | None = None) -> bool:
+    if row.used_percent == 0 and (previous.used_percent > 1 or (previous.used_percent > 0 and row.reset_at is None)):
+        return True
+    if row.reset_at is not None and previous.reset_at is not None:
+        return (
+            row.reset_at >= previous.reset_at + RESET_DEADLINE_ADVANCE_SECONDS
+            or (previous.reset_at <= naive_utc_to_epoch(row.recorded_at) < row.reset_at)
+            or (
+                row.reset_at > previous.reset_at
+                and previous.recorded_at
+                <= _deadline(row.reset_at) - timedelta(minutes=window_minutes or row.window_minutes)
+                <= row.recorded_at
+            )
+        )
+    return False
+
+
+def current_quota_cycle_start(rows: Sequence[QuotaObservation], window_minutes: int) -> datetime | None:
+    """Locate the current cycle without requiring a full or zero usage sample."""
+    if not rows or _expired(rows[-1]):
+        return None
+    previous: QuotaObservation | None = None
+    since: datetime | None = None
+    cycle_deadline: int | None = None
+    duration = timedelta(minutes=window_minutes)
+    for row in rows:
+        if previous is not None and _regressed(previous, row, cycle_deadline):
+            if row is rows[-1]:
+                return None
+            continue
+        if _expired(row):
+            # Expired observations can bracket the next natural reset, but
+            # cannot establish a fresh current cycle themselves.
+            previous = row
+            continue
+        inferred = _deadline(row.reset_at) - duration if row.reset_at is not None else row.recorded_at
+        if since is None:
+            since = min(inferred, row.recorded_at) if row.reset_at is not None or row.used_percent == 0 else None
+            cycle_deadline = row.reset_at
+        if previous is not None and _is_reset(previous, row, window_minutes):
+            if previous.used_percent == 0 and since is not None and since - timedelta(minutes=5) <= inferred <= since:
+                # A zero reading may precede its renewed deadline by a poll.
+                # Keep that reset's boundary instead of starting it twice.
+                since = min(since, inferred)
+            elif (
+                previous.reset_at is not None
+                and previous.recorded_at <= _deadline(previous.reset_at) <= row.recorded_at
+            ):
+                since = _deadline(previous.reset_at)
+            elif previous.recorded_at <= inferred <= row.recorded_at:
+                since = inferred
+            elif (
+                row.reset_at is not None
+                and previous.reset_at is not None
+                and row.reset_at >= previous.reset_at + RESET_DEADLINE_ADVANCE_SECONDS
+                and inferred <= row.recorded_at
+            ):
+                # Renewed metadata can arrive after a stale old-deadline poll.
+                # Its window start still belongs to the fresh cycle.
+                since = inferred
+            else:
+                since = row.recorded_at
+            cycle_deadline = row.reset_at
+        previous = row
+    if cycle_deadline is not None and cycle_deadline <= naive_utc_to_epoch(rows[-1].recorded_at):
+        return None
+    return since
 
 
 def observed_quota_growth(rows: Sequence[QuotaObservation]) -> float:
-    """Count new high-water usage within each weekly cycle, including resets."""
-    if not rows:
-        return 0.0
-    high_water = rows[0].used_percent
-    previous_reset_at = rows[0].reset_at
-    growth = 0.0
-    for row in rows[1:]:
-        is_reset = (
-            row.used_percent < high_water
-            and row.reset_at is not None
-            and previous_reset_at is not None
-            and row.reset_at > previous_reset_at + RESET_DEADLINE_ADVANCE_SECONDS
-        )
-        if is_reset:
+    """Calibrate growth, counting the entire first reading after each reset."""
+    previous: QuotaObservation | None = None
+    high_water = growth = 0.0
+    cycle_deadline: int | None = None
+    for row in rows:
+        if previous is not None and _regressed(previous, row, cycle_deadline):
+            continue
+        if _expired(row):
+            previous = row
+            continue
+        if previous is None:
             high_water = row.used_percent
+            cycle_deadline = row.reset_at
+        elif _is_reset(previous, row):
+            growth += row.used_percent
+            high_water = row.used_percent
+            cycle_deadline = row.reset_at
         elif row.used_percent > high_water:
             growth += row.used_percent - high_water
             high_water = row.used_percent
-        if row.reset_at is not None:
-            previous_reset_at = row.reset_at
+        previous = row
     return growth
 
 
@@ -43,49 +134,40 @@ def estimate_quota_lb_share(
     reference_capacities: dict[str, float],
     costs_by_account: dict[str, float],
 ) -> QuotaLbShareEstimate | None:
-    last_full_index = next(
-        (index for index in range(len(target_rows) - 1, -1, -1) if target_rows[index].used_percent >= 100),
-        None,
-    )
-    if last_full_index is None:
+    since = current_quota_cycle_start(target_rows, window_minutes)
+    if since is None:
         return None
-    since = target_rows[last_full_index].recorded_at
-    target_segment = target_rows[last_full_index:]
-    observed_points = observed_quota_growth(target_segment)
-    if observed_points <= 0:
+    observed_points = target_rows[-1].used_percent
+    target_cost = costs_by_account.get(account_id, 0.0)
+    if observed_points == 0 and target_cost > 0:
         return None
 
-    reference_credits = 0.0
-    reference_cost = 0.0
+    reference_credits = reference_cost = 0.0
     reference_count = 0
     for reference_id, rows in reference_rows.items():
-        segment = [row for row in rows if since <= row.recorded_at <= target_segment[-1].recorded_at]
-        points = observed_quota_growth(segment)
+        points = observed_quota_growth(rows)
         cost = costs_by_account.get(reference_id, 0.0)
-        if points < MIN_REFERENCE_USED_POINTS or cost <= 0:
+        if points <= 0 or cost <= 0:
             continue
         reference_credits += points * reference_capacities[reference_id] / 100
         reference_cost += cost
         reference_count += 1
-    if reference_count < 2 or reference_credits <= 0:
+    if reference_credits <= 0 and observed_points > 0:
         return None
 
-    target_cost = costs_by_account.get(account_id, 0.0)
     observed_credits = observed_points * target_capacity_credits / 100
-    cost_per_credit = reference_cost / reference_credits
-    lb_credits = target_cost / cost_per_credit
+    lb_credits = target_cost * reference_credits / reference_cost if reference_cost > 0 else 0.0
     lb_points = 100 * lb_credits / target_capacity_credits
-    if lb_credits > observed_credits:
-        return None
     return QuotaLbShareEstimate(
         account_id=account_id,
         since=since,
-        as_of=target_segment[-1].recorded_at,
+        as_of=target_rows[-1].recorded_at,
+        reset_at=_deadline(target_rows[-1].reset_at) if target_rows[-1].reset_at is not None else None,
         window_minutes=window_minutes,
         observed_used_percent=observed_points,
         observed_used_credits=observed_credits,
         estimated_lb_used_credits=lb_credits,
         estimated_lb_used_percent=lb_points,
-        estimated_lb_share_percent=100 * lb_points / observed_points,
+        estimated_lb_share_percent=100 * lb_points / observed_points if observed_points > 0 else 0.0,
         reference_account_count=reference_count,
     )

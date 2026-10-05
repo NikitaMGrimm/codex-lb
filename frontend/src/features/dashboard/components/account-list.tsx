@@ -80,6 +80,7 @@ function quotaLabel(label: string, percent: number | null, resetAt: string | nul
     percent,
     percentLabel: formatPercentNullable(percent, 1),
     resetLabel: formatQuotaResetLabel(resetAt ?? null),
+    resetAt,
   };
 }
 
@@ -271,7 +272,7 @@ function AccountQuotaCells({ account, quotaLbShare, showQuotaLbShare }: { accoun
               <span className="truncate">{quota.resetLabel}</span>
             </span>
             {(quota.label === "Weekly" || quota.label === "Monthly") && (showQuotaLbShare || quotaLbShare) ? (
-              <QuotaLbShareIndicator estimate={quotaLbShare?.windowMinutes === (quota.label === "Weekly" ? 10080 : 43200) ? quotaLbShare : undefined} />
+              <QuotaLbShareIndicator estimate={quotaLbShare?.windowMinutes === (quota.label === "Weekly" ? 10080 : 43200) ? quotaLbShare : undefined} resetAt={quota.resetAt} remainingPercent={quota.percent} />
             ) : null}
           </span>
         </div>

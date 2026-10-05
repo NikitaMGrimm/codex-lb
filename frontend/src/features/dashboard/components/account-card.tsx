@@ -50,6 +50,7 @@ function QuotaBar({
   percent,
   cap,
   resetLabel,
+  resetAt,
   quotaLbShare,
   showQuotaLbShare = false,
 }: {
@@ -57,6 +58,7 @@ function QuotaBar({
   percent: number | null;
   cap?: number | null;
   resetLabel: string;
+  resetAt?: string | null;
   quotaLbShare?: QuotaLbShareEstimate;
   showQuotaLbShare?: boolean;
 }) {
@@ -88,7 +90,7 @@ function QuotaBar({
         <span>{resetLabel}</span>
       </div>
       <UsageQuotaSummary percent={percent} cap={cap} />
-      {showQuotaLbShare || quotaLbShare ? <QuotaLbShareIndicator estimate={quotaLbShare} /> : null}
+      {showQuotaLbShare || quotaLbShare ? <QuotaLbShareIndicator estimate={quotaLbShare} resetAt={resetAt} remainingPercent={percent} /> : null}
     </div>
   );
 }
@@ -178,11 +180,11 @@ export function AccountCard({ account, quotaLbShare, showQuotaLbShare = false, s
       {/* Quota bars */}
       <div className={cn("mt-3.5 grid gap-3", weeklyOnly || monthlyOnly ? "grid-cols-1" : "grid-cols-2")}>
         {monthlyOnly ? (
-          <QuotaBar label={t("common.time.monthly")} percent={monthlyRemaining} cap={account.effectiveLimitMonthly} resetLabel={monthlyReset} quotaLbShare={quotaLbShare?.windowMinutes === 43200 ? quotaLbShare : undefined} showQuotaLbShare={showQuotaLbShare} />
+          <QuotaBar label={t("common.time.monthly")} percent={monthlyRemaining} cap={account.effectiveLimitMonthly} resetLabel={monthlyReset} resetAt={account.resetAtMonthly} quotaLbShare={quotaLbShare?.windowMinutes === 43200 ? quotaLbShare : undefined} showQuotaLbShare={showQuotaLbShare} />
         ) : (
           <>
             {!weeklyOnly && <QuotaBar label="5h" percent={primaryRemaining} cap={account.effectiveLimitPrimary} resetLabel={primaryReset} />}
-            <QuotaBar label={t("common.time.weekly")} percent={secondaryRemaining} cap={account.effectiveLimitSecondary} resetLabel={secondaryReset} quotaLbShare={quotaLbShare?.windowMinutes === 10080 ? quotaLbShare : undefined} showQuotaLbShare={showQuotaLbShare} />
+            <QuotaBar label={t("common.time.weekly")} percent={secondaryRemaining} cap={account.effectiveLimitSecondary} resetLabel={secondaryReset} resetAt={account.resetAtSecondary} quotaLbShare={quotaLbShare?.windowMinutes === 10080 ? quotaLbShare : undefined} showQuotaLbShare={showQuotaLbShare} />
           </>
         )}
       </div>

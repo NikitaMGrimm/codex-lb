@@ -1,15 +1,21 @@
 ## Purpose
 
-The long-window quota bar combines requests routed through Codex LB with requests made directly to OpenAI. The “via LB” indicator estimates the share associated with successful requests logged by Codex LB. It cannot identify an individual unless the account's LB use belongs to that person alone.
+The quota bar includes use through Codex LB and external/direct use. The approximate indicator estimates the LB share of the current weekly or monthly cycle; it does not identify a person or directly measure subscription-credit charges.
 
-## Calculation and controls
+## Accounting and calibration
 
-The API counts quota growth since the latest observed 100% point, including growth after resets. It converts percentage growth to Codex LB subscription credits for each plan and window, then calibrates successful LB request USD cost against observed credits on other accounts. For example, a Pro account with 160 percentage points of observed weekly growth at a configured 20:1 ratio to a 7,560-credit Plus weekly quota has 241,920 effective observed credits. A $1,200 LB cost with a calibrated $0.01 per credit would imply 120,000 LB credits, or about 50% via LB.
+Target costs begin at the current reset boundary, and the denominator is the latest upstream used percentage converted with the maintained plan capacity or configured Pro ratio. A first reading of 5% counts all 5%, even without a retained zero or 100%-used observation. A fresh unused cycle with no logged cost reports zero.
 
-The Pro ratio setting is optional and affects this estimate alone. When absent, the estimate uses the maintained Pro weekly credit capacity. A ratio of 20 uses 20 times the maintained Plus/Team weekly capacity. The endpoint is fetched separately once per minute; indexed baseline lookups and change-edge reads keep history work bounded.
+Peer calibration is separate: up to 30 days of other accounts' quota growth and matching successful request USD costs supplies a cost-per-credit conversion. One positive peer sample suffices. A new cycle need not wait for new calibration data if recent peer evidence exists. Initial peer usage is the calibration baseline; usage first observed after a subsequent reset counts in full. This enables early estimates while retaining uncertainty from small samples.
 
-## Limits and failure modes
+## Reset boundaries
 
-Subscription credits are derived locally from the upstream usage percentage; LB request logs have USD cost but no measured subscription-credit amount. The estimator assumes the logged USD-to-credit relationship is comparable across reference and target traffic. Direct use on reference accounts, request-mix differences, missing costs, quota rounding, and usage polling delays can bias it. The API omits estimates that exceed observed use instead of presenting them as 100%. The setting does not reveal the true OpenAI plan limit or measure direct use.
+A deadline advancing by at least one day recognizes a new cycle even when usage is equal or higher. A renewed deadline after expiry also confirms a reset. Expired latest deadlines and old-deadline regressions withhold estimates. Minute-scale deadline drift and small percentage corrections do not reset accounting. A meaningful drop to zero can mark a reset before metadata refreshes; a one-point same-deadline correction to zero waits for deadline confirmation.
 
-An unavailable indicator can mean the account has no recent long-window quota reading, no observed 100% starting point, too little peer growth for calibration, or an estimate that would exceed observed use. For example, a Pro account with an unset operator ratio can imply more than 100% LB share under the maintained capacity; the dashboard shows “— via LB” until evidence or the configured ratio supports a valid estimate.
+Natural resets use the previous deadline when it lies between observations. Early resets use the new deadline minus the window duration if that fits between observations or a full-day deadline advance confirms renewal despite stale polls; otherwise the first fresh reset observation is the boundary. With no retained transition, a fresh deadline minus the duration identifies the initial cycle. Exact early-reset timing cannot be recovered when upstream metadata and observation spacing do not locate it.
+
+## Limits and diagnostic values
+
+Logged USD cost is an estimate from token prices, not a bill or measured subscription quota. Different model mixes, caching, direct use on peers, rounding, incomplete logs, and capacity-ratio assumptions bias calibration. Values above 100% deliberately remain visible to expose this mismatch. They must not be interpreted as proof of negative external use. If quota remains at zero while logged costs are positive, a percentage is undefined until upstream reports positive use. Calibration without any usable peer is also unavailable.
+
+The Pro ratio affects attribution only. Polling remains separate from dashboard overview; the UI hides an expired cached estimate while new-cycle data refreshes.

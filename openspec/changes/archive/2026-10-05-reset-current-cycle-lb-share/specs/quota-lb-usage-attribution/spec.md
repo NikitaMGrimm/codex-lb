@@ -1,8 +1,4 @@
-## Purpose
-
-Define the dashboard's estimate of current-cycle long-window quota use routed through Codex LB.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Credit-scaled LB share estimate
 The dashboard API SHALL estimate Codex LB's share of an eligible account's current weekly or monthly quota cycle. It MUST use only successful LB request costs assigned to that account since the current cycle boundary and the latest observed used percentage, including a nonzero first observation. A previous 100%-used observation MUST NOT be required. It SHALL support positive maintained long-window subscription-credit capacities and the configured Pro ratio. At zero observed use and zero logged cost it SHALL report zero immediately. If observed use is zero but logged cost is positive, it SHALL wait for a positive quota observation instead of inventing a percentage.
@@ -12,6 +8,29 @@ The dashboard API SHALL estimate Codex LB's share of an eligible account's curre
 - **WHEN** the dashboard requests attribution
 - **THEN** all 5% contributes to observed use and only current-cycle LB costs contribute
 - **AND** prior-cycle usage and LB costs do not carry forward
+
+### Requirement: Operator Pro ratio
+Dashboard settings SHALL allow an optional positive Pro weekly capacity ratio relative to Plus/Team weekly capacity. When unset, attribution SHALL use the maintained Pro weekly subscription-credit capacity. When set, attribution SHALL use the configured ratio for Pro weekly observations, including calibration references. The setting MUST NOT change routing or displayed Subscription credits.
+
+#### Scenario: Pro weekly ratio is twenty
+- **WHEN** Plus weekly capacity is 7,560 credits and the Pro ratio is 20
+- **THEN** attribution uses 151,200 credits without changing routing or displayed Subscription capacity
+
+### Requirement: Dashboard displays the estimate beside its quota
+The dashboard SHALL show available estimates beside the matching weekly/monthly quota in card and list views, with the cycle's date range available in the explanation. It MUST NOT imply attribution to an individual. Missing estimates SHALL show an unavailable state explaining fresh cycle data, positive quota use, and peer calibration requirements. An API error MUST NOT be presented as an account-specific unavailable estimate. Expired estimates MUST NOT remain visible beside a renewed quota while attribution refresh is pending.
+
+#### Scenario: Cached estimate belongs to an expired or replaced cycle
+- **WHEN** fresh quota data confirms a renewal before the attribution query returns
+- **THEN** the previous-cycle badge is hidden and the unavailable state is displayed
+
+### Requirement: Attribution access and query bounds
+The API SHALL require the same account-read permission as dashboard overview and SHALL bound history reads to the preceding 30 days. Dashboard overview polling MUST NOT trigger attribution calculation.
+
+#### Scenario: Viewer lacks account-read permission
+- **WHEN** a user without account-read permission requests attribution
+- **THEN** the API denies access
+
+## ADDED Requirements
 
 ### Requirement: Fresh quota reset detection
 The API SHALL recognize a reset when a fresh long-window reset deadline advances by at least one day, independently of whether used percentage decreases. It SHALL also recognize renewed deadlines after the previous deadline expires, renewed deadlines whose inferred start falls between observations, and fresh meaningful drops to zero even before reset metadata refreshes. Small same-cycle percentage corrections, including a one-point correction to zero with the same future deadline, MUST NOT reset the accounting window. Expired or regressed reset deadlines MUST NOT restore an old-cycle estimate. Natural reset boundaries SHALL use the previous reset deadline; early resets SHALL use the new deadline minus the quota duration when that boundary fits between surrounding observations or a deadline advance of at least one day confirms renewal despite an intervening stale poll; otherwise the first fresh reset observation. An initial current cycle SHALL be inferred from its fresh reset deadline when no reset transition is retained.
@@ -37,24 +56,3 @@ The API and dashboard SHALL retain finite nonnegative estimated shares above 100
 #### Scenario: Estimate is 140 percent
 - **WHEN** calibration implies an LB share of 140%
 - **THEN** the API reports 140% and card/list quota indicators display approximately 140% via LB
-
-### Requirement: Operator Pro ratio
-Dashboard settings SHALL allow an optional positive Pro weekly capacity ratio relative to Plus/Team weekly capacity. When unset, attribution SHALL use the maintained Pro weekly subscription-credit capacity. When set, attribution SHALL use the configured ratio for Pro weekly observations, including calibration references. The setting MUST NOT change routing or displayed Subscription credits.
-
-#### Scenario: Pro weekly ratio is twenty
-- **WHEN** Plus weekly capacity is 7,560 credits and the Pro ratio is 20
-- **THEN** attribution uses 151,200 credits without changing routing or displayed Subscription capacity
-
-### Requirement: Dashboard displays the estimate beside its quota
-The dashboard SHALL show available estimates beside the matching weekly/monthly quota in card and list views, with the cycle's date range available in the explanation. It MUST NOT imply attribution to an individual. Missing estimates SHALL show an unavailable state explaining fresh cycle data, positive quota use, and peer calibration requirements. An API error MUST NOT be presented as an account-specific unavailable estimate. Expired estimates MUST NOT remain visible beside a renewed quota while attribution refresh is pending.
-
-#### Scenario: Cached estimate belongs to an expired or replaced cycle
-- **WHEN** fresh quota data confirms a renewal before the attribution query returns
-- **THEN** the previous-cycle badge is hidden and the unavailable state is displayed
-
-### Requirement: Attribution access and query bounds
-The API SHALL require the same account-read permission as dashboard overview and SHALL bound history reads to the preceding 30 days. Dashboard overview polling MUST NOT trigger attribution calculation.
-
-#### Scenario: Viewer lacks account-read permission
-- **WHEN** a user without account-read permission requests attribution
-- **THEN** the API denies access

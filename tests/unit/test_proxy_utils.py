@@ -57403,7 +57403,7 @@ async def test_t3_quota_failover(
     elif request_shape == "reasoning_context":
         request_payload["reasoning"] = {"effort": "low", "context": "all_turns"}
     elif request_shape == "inline_namespace":
-        request_payload["input"].insert(
+        cast(list[JsonValue], request_payload["input"]).insert(
             0,
             {
                 "type": "additional_tools",

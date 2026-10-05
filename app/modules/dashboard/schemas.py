@@ -152,6 +152,7 @@ class QuotaLbShareEstimate(DashboardModel):
     account_id: str
     since: datetime
     as_of: datetime
+    reset_at: datetime | None = None
     window_minutes: int
     observed_used_percent: float
     observed_used_credits: float

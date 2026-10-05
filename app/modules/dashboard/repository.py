@@ -79,6 +79,7 @@ class QuotaObservation:
     recorded_at: datetime
     used_percent: float
     reset_at: int | None
+    window_minutes: int = 10080
 
 
 class DashboardRepository:
@@ -97,33 +98,6 @@ class DashboardRepository:
     async def latest_usage_by_account(self, window: str) -> dict[str, UsageHistory]:
         return await self._usage_repo.latest_by_account(window=window)
 
-    async def latest_full_long_observation(
-        self,
-        account_id: str,
-        window_minutes: int,
-        since: datetime,
-        until: datetime,
-    ) -> QuotaObservation | None:
-        result = await self._session.execute(
-            select(
-                UsageHistory.account_id,
-                UsageHistory.recorded_at,
-                UsageHistory.used_percent,
-                UsageHistory.reset_at,
-            )
-            .where(
-                UsageHistory.account_id == account_id,
-                UsageHistory.recorded_at >= since,
-                UsageHistory.recorded_at <= until,
-                UsageHistory.window_minutes == window_minutes,
-                UsageHistory.used_percent >= 100,
-            )
-            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
-            .limit(1)
-        )
-        row = result.first()
-        return QuotaObservation(*row) if row is not None else None
-
     async def long_quota_observations(
         self,
         account_windows: dict[str, int],
@@ -132,8 +106,8 @@ class DashboardRepository:
     ) -> list[QuotaObservation]:
         if not account_windows:
             return []
-        # Keep both sides of each percentage change, including the last 100%
-        # row before a reset. The caller starts this scan at that indexed row.
+        # Keep percentage edges and both sides of deadline renewals. Equal
+        # usage on either side of a reset must not compress away the boundary.
         ordered = (
             select(
                 UsageHistory.id.label("id"),
@@ -141,12 +115,19 @@ class DashboardRepository:
                 UsageHistory.recorded_at.label("recorded_at"),
                 UsageHistory.used_percent.label("used_percent"),
                 UsageHistory.reset_at.label("reset_at"),
+                UsageHistory.window_minutes.label("window_minutes"),
                 func.lag(UsageHistory.used_percent)
                 .over(partition_by=UsageHistory.account_id, order_by=(UsageHistory.recorded_at, UsageHistory.id))
                 .label("previous_used"),
                 func.lead(UsageHistory.used_percent)
                 .over(partition_by=UsageHistory.account_id, order_by=(UsageHistory.recorded_at, UsageHistory.id))
                 .label("next_used"),
+                func.lag(UsageHistory.reset_at)
+                .over(partition_by=UsageHistory.account_id, order_by=(UsageHistory.recorded_at, UsageHistory.id))
+                .label("previous_reset"),
+                func.lead(UsageHistory.reset_at)
+                .over(partition_by=UsageHistory.account_id, order_by=(UsageHistory.recorded_at, UsageHistory.id))
+                .label("next_reset"),
             )
             .where(
                 tuple_(UsageHistory.account_id, UsageHistory.window_minutes).in_(list(account_windows.items())),
@@ -161,6 +142,7 @@ class DashboardRepository:
                 ordered.c.recorded_at,
                 ordered.c.used_percent,
                 ordered.c.reset_at,
+                ordered.c.window_minutes,
             )
             .where(
                 or_(
@@ -168,6 +150,8 @@ class DashboardRepository:
                     ordered.c.next_used.is_(None),
                     ordered.c.used_percent != ordered.c.previous_used,
                     ordered.c.used_percent != ordered.c.next_used,
+                    ordered.c.reset_at.is_distinct_from(ordered.c.previous_reset),
+                    ordered.c.reset_at.is_distinct_from(ordered.c.next_reset),
                 )
             )
             .order_by(ordered.c.account_id, ordered.c.recorded_at, ordered.c.id)
@@ -186,7 +170,7 @@ class DashboardRepository:
             select(RequestLog.account_id, func.sum(RequestLog.cost_usd))
             .where(
                 RequestLog.account_id.in_(account_ids),
-                RequestLog.requested_at > since,
+                RequestLog.requested_at >= since,
                 RequestLog.requested_at <= until,
                 RequestLog.status == "success",
                 RequestLog.cost_usd.is_not(None),

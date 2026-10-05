@@ -6,7 +6,7 @@ from app.core import usage as usage_core
 from app.core.crypto import TokenEncryptor
 from app.core.usage.refresh_policy import USAGE_REFRESH_INTERVAL_SECONDS
 from app.core.usage.types import UsageWindowRow
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import UsageHistory
 from app.modules.accounts.mappers import build_account_summaries
 from app.modules.dashboard.builders import (
@@ -14,7 +14,7 @@ from app.modules.dashboard.builders import (
     build_overview_timeframe,
     resolve_overview_timeframe,
 )
-from app.modules.dashboard.quota_lb_share import estimate_quota_lb_share
+from app.modules.dashboard.quota_lb_share import current_quota_cycle_start, estimate_quota_lb_share
 from app.modules.dashboard.repository import DashboardRepository, QuotaObservation
 from app.modules.dashboard.schemas import (
     DashboardMetricsComparison,
@@ -124,41 +124,38 @@ class DashboardService:
                 continue
             if now - latest.recorded_at > timedelta(minutes=5):
                 continue
-            window_minutes_by_account[account.id] = latest.window_minutes
+            if latest.reset_at is not None and latest.reset_at <= naive_utc_to_epoch(now):
+                continue
+            window_minutes_by_account[account.id] = 43200 if latest is monthly_row else 10080
             capacity_by_account[account.id] = capacity
-        if len(window_minutes_by_account) < 3:
-            return QuotaLbShareResponse()
-
-        baselines: dict[str, QuotaObservation] = {}
-        for account_id, window_minutes in window_minutes_by_account.items():
-            row = await self._repo.latest_full_long_observation(
-                account_id, window_minutes, now - timedelta(days=30), now
-            )
-            if row is not None:
-                baselines[account_id] = row
-        if not baselines:
-            return QuotaLbShareResponse()
+        history_since = now - timedelta(days=30)
         observations = await self._repo.long_quota_observations(
             window_minutes_by_account,
-            min(row.recorded_at for row in baselines.values()),
+            history_since,
             now,
         )
         rows_by_account: dict[str, list[QuotaObservation]] = {}
         for row in observations:
             rows_by_account.setdefault(row.account_id, []).append(row)
 
+        calibration_costs: dict[str, float] = {}
+        for account_id, rows in rows_by_account.items():
+            costs = await self._repo.successful_costs_by_account(
+                [account_id], rows[0].recorded_at, rows[-1].recorded_at
+            )
+            calibration_costs[account_id] = costs.get(account_id, 0.0)
+
         estimates: list[QuotaLbShareEstimate] = []
-        for account_id in baselines:
+        for account_id, window_minutes in window_minutes_by_account.items():
             target_rows = rows_by_account.get(account_id, [])
             if not target_rows or now - target_rows[-1].recorded_at > timedelta(minutes=5):
                 continue
-            last_full = next((row for row in reversed(target_rows) if row.used_percent >= 100), None)
-            if last_full is None:
+            cycle_start = current_quota_cycle_start(target_rows, window_minutes)
+            if cycle_start is None or cycle_start < history_since:
                 continue
             references = {peer_id: rows for peer_id, rows in rows_by_account.items() if peer_id != account_id}
-            costs = await self._repo.successful_costs_by_account(
-                [account_id, *references], last_full.recorded_at, target_rows[-1].recorded_at
-            )
+            costs = await self._repo.successful_costs_by_account([account_id], cycle_start, target_rows[-1].recorded_at)
+            costs = {**calibration_costs, account_id: costs.get(account_id, 0.0)}
             estimate = estimate_quota_lb_share(
                 account_id=account_id,
                 target_rows=target_rows,

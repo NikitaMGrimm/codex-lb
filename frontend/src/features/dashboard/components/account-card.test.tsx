@@ -33,7 +33,7 @@ describe("AccountCard", () => {
     expect(screen.queryByTestId("quota-lb-share")).not.toBeInTheDocument();
     rerender(<AccountCard account={account} showQuotaLbShare />);
     expect(screen.getByTestId("quota-lb-share-unavailable")).toHaveTextContent("— via LB");
-    expect(screen.getByTestId("quota-lb-share-unavailable")).toHaveAttribute("title", expect.stringContaining("previous 100% observation"));
+    expect(screen.getByTestId("quota-lb-share-unavailable")).toHaveAttribute("title", expect.stringContaining("fresh current-cycle quota data"));
   });
 
   it("renders both 5h and weekly quota bars for regular accounts", () => {
