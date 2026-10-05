@@ -37,7 +37,7 @@ from app.db.migrate import (
     run_startup_migrations,
     run_upgrade,
 )
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import SessionLocal, engine
 from app.modules.accounts.repository import AccountsRepository
 
@@ -59,7 +59,7 @@ async def db_setup(_reset_db_state):
     """Model-built schema starts at the current migration revision."""
     del _reset_db_state
     async with engine.begin() as connection:
-        await connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(64) NOT NULL)"))
+        await connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(255) NOT NULL)"))
         await connection.execute(
             text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
             {"revision": _HEAD_REVISION},
@@ -304,6 +304,29 @@ async def test_run_startup_migrations_handles_legacy_schema_table_and_legacy_ale
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.bootstrap.stamped_revision is None
     assert result.current_revision == _HEAD_REVISION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ledger", ["legacy", "missing"])
+async def test_startup_recovery_preserves_existing_pro_ratio(db_setup, ledger: str):
+    async with SessionLocal() as session:
+        session.add(DashboardSettings(id=1, pro_weekly_capacity_multiplier=17))
+        if ledger == "missing":
+            await session.execute(text("DROP TABLE alembic_version"))
+        else:
+            await session.execute(
+                text("UPDATE alembic_version SET version_num = :legacy"),
+                {"legacy": "013_add_dashboard_settings_routing_strategy"},
+            )
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+
+    assert result.current_revision == _HEAD_REVISION
+    assert check_schema_drift(_DATABASE_URL) == ()
+    async with SessionLocal() as session:
+        ratio = await session.execute(text("SELECT pro_weekly_capacity_multiplier FROM dashboard_settings WHERE id=1"))
+        assert ratio.scalar_one() == 17
 
 
 @pytest.mark.asyncio
@@ -1439,6 +1462,9 @@ async def test_usage_history_autovacuum_tuning_migration_sets_and_resets_relopti
             ).scalar_one()
             return set(options or ())
 
+    # The model-built fixture does not carry migration-only storage options.
+    # Start before the revision so startup applies the published migration.
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), parent_revision))
     result = await run_startup_migrations(_DATABASE_URL)
     assert result.current_revision == _HEAD_REVISION
     assert expected_options <= await _usage_history_reloptions()

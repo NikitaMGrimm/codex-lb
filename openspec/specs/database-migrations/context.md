@@ -72,3 +72,20 @@ branch. See the [repair context](../../changes/merge-overflow-transport-migratio
 ## Example
 
 Branch A and B each create migration revisions in parallel. After merge, CI detects multiple heads and fails. The resolver adds a merge revision, reruns CI, and proceeds. During deployment, a DB still storing old `013_add_dashboard_settings_routing_strategy` in `alembic_version` is auto-remapped to `20260225_000000_add_dashboard_settings_routing_strategy` before upgrade.
+
+## Pro attribution ledger replay
+
+The deployed Pro ratio migration adds one nullable floating-point column and
+remains immutable. Losing or rewinding a ledger can replay it over a column
+that already exists. The locked application runner uses Alembic's original
+plan and replaces only this step's DDL with a no-op after inspecting the
+compatible column on the migration connection. Alembic still updates that
+step's ledger and applies all other pending revisions, including other branches.
+A type, nullability, or server-default mismatch fails before that step advances.
+
+For example, a stored Pro ratio of 17 survives a lost ledger or a replay from
+the ratio migration's parent. A fresh parent without the column still runs
+the published DDL. A nullable VARCHAR column is not accepted as evidence that
+the revision already ran. Full IDs, prefixes, and relative targets retain
+Alembic's original target semantics because the plan is not split. Direct
+Alembic invocations bypass the application runner's lock and replay guard.

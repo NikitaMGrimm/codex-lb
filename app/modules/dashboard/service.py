@@ -165,7 +165,7 @@ class DashboardService:
                 reference_capacities=capacity_by_account,
                 costs_by_account=costs,
             )
-            if estimate is not None:
+            if estimate is not None and (estimate.reset_at is None or estimate.reset_at > now):
                 estimates.append(estimate)
         return QuotaLbShareResponse(estimates=estimates)
 

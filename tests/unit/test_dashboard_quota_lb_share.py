@@ -91,10 +91,11 @@ def test_same_cycle_corrections_do_not_reset_and_latest_use_is_the_denominator()
     assert estimate.observed_used_percent == 30
 
 
-def test_unused_cycle_reports_zero_without_peer_calibration() -> None:
+@pytest.mark.parametrize("used", [0, 5])
+def test_zero_lb_cost_reports_zero_without_peer_calibration(used: float) -> None:
     estimate = estimate_quota_lb_share(
         account_id="target",
-        target_rows=[_row("target", 1, 0, 7)],
+        target_rows=[_row("target", 1, used, 7)],
         target_capacity_credits=7560,
         window_minutes=10080,
         reference_rows={},
@@ -177,3 +178,29 @@ def test_one_point_correction_to_zero_waits_for_deadline_confirmation() -> None:
 def test_a_quiet_zero_cycle_cannot_retain_an_old_boundary_after_renewal() -> None:
     rows = [_row("target", 0, 0, 7), _row("target", 25, 0, 7), _row("target", 26, 5, 8)]
     assert current_quota_cycle_start(rows, 10080) == BASE + timedelta(hours=24)
+
+
+def test_missing_metadata_keeps_confirmed_deadline_and_rejects_old_replay() -> None:
+    rows = [
+        _row("target", 0, 55, 7),
+        _row("target", 1, 55, 7 + 1 / 24),
+        _row("target", 2, 60, None),
+    ]
+    estimate = _estimate(rows)
+    assert estimate is not None
+    assert estimate.reset_at == BASE + timedelta(days=7, hours=1)
+    old = _row("target", 3, 90, 7)
+    assert current_quota_cycle_start([*rows, old], 10080) is None
+    assert observed_quota_growth([*rows, old]) == 60
+    estimate = _estimate([*rows, old, _row("target", 4, 61, None)])
+    assert estimate is not None
+    assert estimate.reset_at == BASE + timedelta(days=7, hours=1)
+
+
+def test_renewed_deadline_after_metadata_gap_starts_new_cycle() -> None:
+    rows = [_row("target", 1, 50, 7), _row("target", 167, 55, None), _row("target", 169, 60, 14)]
+    assert current_quota_cycle_start(rows, 10080) == BASE + timedelta(days=7)
+    assert observed_quota_growth(rows) == 65
+    estimate = _estimate(rows)
+    assert estimate is not None
+    assert estimate.reset_at == BASE + timedelta(days=14)

@@ -15,11 +15,13 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
+from alembic.runtime.environment import EnvironmentContext
+from alembic.runtime.migration import RevisionStep
 from alembic.script import ScriptDirectory
 from alembic.script.revision import RevisionError
 from alembic.util.exc import CommandError
 from anyio import to_thread
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import Float, create_engine, inspect, text
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.engine import Connection
 
@@ -944,6 +946,41 @@ def run_upgrade(
         )
 
 
+def _already_applied_pro_ratio() -> None:
+    """Alembic still advances this step's ledger using its original ancestry."""
+
+
+def _upgrade_with_pro_ratio_replay_guard(config: Config, revision: str) -> None:
+    # Use Alembic's normal plan and per-step transactions. Splitting the
+    # upgrade around this revision would change relative targets and could
+    # lose another branch's pending migrations or ledger heads.
+    if ":" in revision:
+        raise CommandError("Range revision not allowed")
+    script = ScriptDirectory.from_config(config)
+
+    def upgrade(current: tuple[str, ...], context: MigrationContext) -> Iterator[RevisionStep]:
+        for step in script._upgrade_revs(revision, cast("Any", current)):
+            if step.revision.revision == "20260930_000000_pro_weekly_attribution_ratio":
+                assert context.connection is not None
+                columns = inspect(context.connection).get_columns("dashboard_settings")
+                column = next((item for item in columns if item["name"] == "pro_weekly_capacity_multiplier"), None)
+                if column is not None:
+                    if not isinstance(column["type"], Float) or not column["nullable"] or column["default"] is not None:
+                        raise MigrationBootstrapError(
+                            "Existing dashboard_settings.pro_weekly_capacity_multiplier must be a nullable "
+                            "floating-point column without a server default; repair the schema before retrying. "
+                            "The Pro ratio migration has not been stamped."
+                        )
+                    logger.warning(
+                        "Preserving existing Pro attribution ratio column while repairing its migration ledger"
+                    )
+                    step.migration_fn = _already_applied_pro_ratio
+            yield step
+
+    with EnvironmentContext(config, script, fn=upgrade, as_sql=False, destination_rev=revision):
+        script.run_env()
+
+
 def _run_upgrade_locked(
     config: Config,
     database_url: str,
@@ -997,7 +1034,7 @@ def _run_upgrade_locked(
     # reconciliation may all have moved the ledger, and the question is what
     # this database has actually applied at the moment the upgrade starts.
     _check_legacy_credential_drop(config, _required_sqlalchemy_url(config), revision)
-    command.upgrade(config, revision)
+    _upgrade_with_pro_ratio_replay_guard(config, revision)
 
     sync_database_url = _required_sqlalchemy_url(config)
     current_revision = _read_current_revision(sync_database_url)

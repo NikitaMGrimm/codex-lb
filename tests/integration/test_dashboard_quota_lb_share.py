@@ -193,9 +193,10 @@ async def test_api_withholds_stale_or_old_cycle_data(async_client, db_setup, inv
 
 
 @pytest.mark.asyncio
-async def test_unused_cycle_is_available_without_peers(async_client, db_setup) -> None:
+@pytest.mark.parametrize("used", [0, 5])
+async def test_zero_lb_cost_is_available_without_peers(async_client, db_setup, used: float) -> None:
 
-    await _seed(current_used=0)
+    await _seed(current_used=used)
     async with SessionLocal() as session:
         await session.execute(delete(RequestLog))
         await session.execute(delete(UsageHistory).where(UsageHistory.account_id == "peer"))
@@ -204,3 +205,25 @@ async def test_unused_cycle_is_available_without_peers(async_client, db_setup) -
     estimate = next(e for e in response.json()["estimates"] if e["accountId"] == "target")
     assert estimate["estimatedLbSharePercent"] == 0
     assert estimate["referenceAccountCount"] == 0
+
+
+@pytest.mark.asyncio
+async def test_api_expires_confirmed_deadline_during_metadata_gap(async_client, db_setup) -> None:
+    now, _, _ = await _seed()
+    deadline = int((now - timedelta(seconds=30)).replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        await session.execute(update(UsageHistory).where(UsageHistory.account_id == "target").values(reset_at=deadline))
+        session.add(
+            UsageHistory(
+                account_id="target",
+                window="primary",
+                window_minutes=10080,
+                recorded_at=now - timedelta(seconds=40),
+                used_percent=5,
+                reset_at=None,
+            )
+        )
+        await session.commit()
+    response = await async_client.get("/api/dashboard/quota-lb-share")
+    assert response.status_code == 200
+    assert not any(e["accountId"] == "target" for e in response.json()["estimates"])

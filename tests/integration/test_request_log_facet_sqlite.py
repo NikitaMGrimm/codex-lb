@@ -98,6 +98,9 @@ async def test_options_avoid_repeated_live_cohort_scans(
                 await session.execute(
                     text(f"CREATE INDEX idx_logs_live_{name} ON request_logs ({columns}) WHERE deleted_at IS NULL")
                 )
+        # ANALYZE in a previous migration test can leave this SQLite-owned
+        # table behind after ORM schema recreation. This case needs no stats.
+        await session.execute(text("DROP TABLE IF EXISTS sqlite_stat1"))
         await session.commit()
         assert not (await session.execute(text("SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'"))).all()
 

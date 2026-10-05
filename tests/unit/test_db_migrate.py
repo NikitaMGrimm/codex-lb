@@ -1615,6 +1615,57 @@ def test_check_schema_drift_detects_missing_dashboard_read_indexes(tmp_path: Pat
     assert any("idx_api_keys_name" in diff for diff in drift)
 
 
+PRO_RATIO_REVISION = "20260930_000000_pro_weekly_attribution_ratio"
+PRO_RATIO_PARENT = "20260913_000000_merge_vps_and_usage_reserves"
+
+
+@pytest.mark.parametrize("target", [PRO_RATIO_REVISION, PRO_RATIO_REVISION[:16], "+1"])
+def test_pro_ratio_replay_preserves_values_and_requested_target(tmp_path: Path, target: str) -> None:
+    url = _db_url(tmp_path / "pro-ratio-replay.db")
+    run_upgrade(url, PRO_RATIO_PARENT, bootstrap_legacy=False)
+    with create_engine(to_sync_database_url(url), future=True).begin() as connection:
+        connection.execute(text("ALTER TABLE dashboard_settings ADD COLUMN pro_weekly_capacity_multiplier FLOAT"))
+        connection.execute(text("UPDATE dashboard_settings SET pro_weekly_capacity_multiplier=17 WHERE id=1"))
+
+    result = run_upgrade(url, target, bootstrap_legacy=False)
+
+    assert result.current_revision == PRO_RATIO_REVISION
+    with create_engine(to_sync_database_url(url), future=True).connect() as connection:
+        assert (
+            connection.execute(
+                text("SELECT pro_weekly_capacity_multiplier FROM dashboard_settings WHERE id=1")
+            ).scalar_one()
+            == 17
+        )
+
+
+@pytest.mark.parametrize("definition", ["VARCHAR", "FLOAT NOT NULL DEFAULT 20", "FLOAT DEFAULT 20"])
+def test_pro_ratio_replay_rejects_incompatible_existing_column(tmp_path: Path, definition: str) -> None:
+    url = _db_url(tmp_path / "incompatible-pro-ratio.db")
+    run_upgrade(url, PRO_RATIO_PARENT, bootstrap_legacy=False)
+    with create_engine(to_sync_database_url(url), future=True).begin() as connection:
+        connection.execute(
+            text(f"ALTER TABLE dashboard_settings ADD COLUMN pro_weekly_capacity_multiplier {definition}")
+        )
+
+    with pytest.raises(MigrationBootstrapError, match="nullable floating-point column without a server default"):
+        run_upgrade(url, PRO_RATIO_REVISION, bootstrap_legacy=False)
+
+    assert inspect_migration_state(url).current_revision == PRO_RATIO_PARENT
+
+
+def test_pro_ratio_replay_applies_other_pending_branch_migrations(tmp_path: Path) -> None:
+    url = _db_url(tmp_path / "pro-ratio-partial-schema.db")
+    run_upgrade(url, PRO_RATIO_PARENT, bootstrap_legacy=False)
+    with create_engine(to_sync_database_url(url), future=True).begin() as connection:
+        connection.execute(text("ALTER TABLE dashboard_settings ADD COLUMN pro_weekly_capacity_multiplier FLOAT"))
+
+    result = run_upgrade(url, "head", bootstrap_legacy=False)
+
+    assert result.current_revision == inspect_migration_state(url).head_revision
+    assert check_schema_drift(url) == ()
+
+
 def test_run_upgrade_auto_remaps_legacy_revision_ids(tmp_path: Path) -> None:
     db_path = tmp_path / "remap.db"
     url = _db_url(db_path)

@@ -11,6 +11,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_migrations.py::test_postgresql_migration_contract_policy_and_drift_match \
 	tests/integration/test_migrations.py::test_postgresql_upgrade_head_from_empty_database \
 	tests/integration/test_migrations.py::test_postgresql_startup_migration_auto_remap_legacy_head \
+	tests/integration/test_migrations.py::test_startup_recovery_preserves_existing_pro_ratio \
 	tests/integration/test_migrations.py::test_account_usage_limits_migration_upgrade_and_downgrade[postgresql] \
 	tests/integration/test_migrations.py::test_usage_limit_overrides_preserve_scalar_and_round_trip[postgresql] \
 	tests/integration/test_auth_provider_abstraction.py \
