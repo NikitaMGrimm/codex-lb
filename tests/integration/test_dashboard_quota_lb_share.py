@@ -85,7 +85,11 @@ async def _seed(*, target_plan: str = "pro", current_used: float = 5) -> tuple[d
                     requested_at=at,
                 )
             )
-        await session.execute(update(DashboardSettings).values(pro_weekly_capacity_multiplier=20))
+        await session.execute(
+            update(DashboardSettings).values(
+                pro_weekly_capacity_multiplier=20, quota_lb_share_reference_account_ids_json='["peer"]'
+            )
+        )
         await session.commit()
     return now, start, deadline
 
@@ -227,3 +231,66 @@ async def test_api_expires_confirmed_deadline_during_metadata_gap(async_client, 
     response = await async_client.get("/api/dashboard/quota-lb-share")
     assert response.status_code == 200
     assert not any(e["accountId"] == "target" for e in response.json()["estimates"])
+
+
+@pytest.mark.asyncio
+async def test_trusted_reference_settings_roundtrip_preserves_ratio_and_ignores_unknown_target(
+    async_client, db_setup
+) -> None:
+    await _seed()
+    response = await async_client.put(
+        "/api/settings", json={"quotaLbShareReferenceAccountIds": ["peer", "peer", "target"]}
+    )
+    assert response.status_code == 200
+    assert response.json()["quotaLbShareReferenceAccountIds"] == ["peer", "target"]
+    assert response.json()["proWeeklyCapacityMultiplier"] == 20
+    # Target is configured too, but must be excluded from its own conversion.
+    response = await async_client.get("/api/dashboard/quota-lb-share")
+    estimate = next(e for e in response.json()["estimates"] if e["accountId"] == "target")
+    assert estimate["estimatedLbSharePercent"] == pytest.approx(10)
+    assert estimate["referenceAccountCount"] == 1
+    response = await async_client.put("/api/settings", json={"proWeeklyCapacityMultiplier": 10})
+    assert response.status_code == 200
+    assert response.json()["quotaLbShareReferenceAccountIds"] == ["peer", "target"]
+    response = await async_client.get("/api/dashboard/quota-lb-share")
+    estimate = next(e for e in response.json()["estimates"] if e["accountId"] == "target")
+    assert estimate["estimatedLbSharePercent"] == pytest.approx(20)
+
+
+@pytest.mark.asyncio
+async def test_no_trusted_reference_disables_positive_cost_estimates(async_client, db_setup) -> None:
+    await _seed()
+    response = await async_client.put("/api/settings", json={"quotaLbShareReferenceAccountIds": []})
+    assert response.status_code == 200
+    assert (await async_client.get("/api/dashboard/quota-lb-share")).json()["estimates"] == []
+
+
+@pytest.mark.asyncio
+async def test_only_selected_peer_current_cycle_affects_calibration(async_client, db_setup) -> None:
+    now, start, deadline = await _seed()
+    async with SessionLocal() as session:
+        # Old-cycle peer growth and requests must not influence conversion.
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id="peer",
+                    window="secondary",
+                    window_minutes=10080,
+                    recorded_at=start - timedelta(days=3),
+                    used_percent=80,
+                    reset_at=deadline - 3 * 86400,
+                ),
+                RequestLog(
+                    account_id="peer",
+                    request_id="old-clean-cost",
+                    model="gpt-6-sol",
+                    status="success",
+                    requested_at=start - timedelta(days=2),
+                    cost_usd=1000,
+                ),
+            ]
+        )
+        await session.commit()
+    response = await async_client.get("/api/dashboard/quota-lb-share")
+    estimate = next(e for e in response.json()["estimates"] if e["accountId"] == "target")
+    assert estimate["estimatedLbSharePercent"] == pytest.approx(10)

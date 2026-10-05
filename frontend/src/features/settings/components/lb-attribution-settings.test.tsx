@@ -3,9 +3,22 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { LbAttributionSettings } from "@/features/settings/components/lb-attribution-settings";
-import { createDashboardSettings } from "@/test/mocks/factories";
+import { createAccountSummary, createDashboardSettings } from "@/test/mocks/factories";
 
 describe("LbAttributionSettings", () => {
+  it("saves selected clean references without overwriting the Pro ratio", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<LbAttributionSettings
+      settings={createDashboardSettings({ proWeeklyCapacityMultiplier: 20 })}
+      accounts={[createAccountSummary({ accountId: "clean", email: "clean@example.com", planType: "team" })]}
+      busy={false} onSave={onSave}
+    />);
+    await user.click(screen.getByRole("checkbox", { name: "clean@example.com (team)" }));
+    await user.click(screen.getByRole("button", { name: "Save references" }));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ quotaLbShareReferenceAccountIds: ["clean"] }));
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty("proWeeklyCapacityMultiplier");
+  });
   it("saves a valid Pro ratio and can reset to subscription credits", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

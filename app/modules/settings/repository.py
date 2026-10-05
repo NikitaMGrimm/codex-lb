@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 
 from sqlalchemy import func, select
@@ -209,6 +210,7 @@ class SettingsRepository:
         weekly_pace_smoothing_minutes: int | None = None,
         pro_weekly_capacity_multiplier: float | None = None,
         clear_pro_weekly_capacity_multiplier: bool = False,
+        quota_lb_share_reference_account_ids: list[str] | None = None,
         guest_access_enabled: bool | None = None,
         limit_warmup_staggered_idle_enabled: bool | None = None,
         request_log_retention_days: int | None = None,
@@ -415,6 +417,10 @@ class SettingsRepository:
             settings.weekly_pace_working_days = weekly_pace_working_days
         if weekly_pace_smoothing_minutes is not None:
             settings.weekly_pace_smoothing_minutes = weekly_pace_smoothing_minutes
+        if quota_lb_share_reference_account_ids is not None:
+            settings.quota_lb_share_reference_account_ids_json = json.dumps(
+                sorted(set(quota_lb_share_reference_account_ids))
+            )
         if clear_pro_weekly_capacity_multiplier:
             settings.pro_weekly_capacity_multiplier = None
         elif pro_weekly_capacity_multiplier is not None:

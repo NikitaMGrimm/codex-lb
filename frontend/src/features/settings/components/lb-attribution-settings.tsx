@@ -4,20 +4,26 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import type { AccountSummary } from "@/features/accounts/schemas";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
 
 export function LbAttributionSettings({
   settings,
+  accounts = [],
   busy,
   onSave,
 }: {
   settings: DashboardSettings;
+  accounts?: AccountSummary[];
   busy: boolean;
   onSave: (payload: SettingsUpdateRequest) => Promise<void>;
 }) {
   const { t } = useTranslation();
   const [draft, setDraft] = useState(settings.proWeeklyCapacityMultiplier?.toString() ?? "");
+  const [references, setReferences] = useState(settings.quotaLbShareReferenceAccountIds);
+  const referencesChanged = [...references].sort().join(",") !== [...settings.quotaLbShareReferenceAccountIds].sort().join(",");
   const value = Number(draft);
   const valid = draft.trim() !== "" && Number.isFinite(value) && value > 0 && value <= 1000;
   const changed = valid && value !== settings.proWeeklyCapacityMultiplier;
@@ -71,6 +77,29 @@ export function LbAttributionSettings({
           ? t("settings.lbAttribution.usingCredits")
           : t("settings.lbAttribution.current", { value: settings.proWeeklyCapacityMultiplier })}
       </p>
+      <fieldset className="mt-5 space-y-2" disabled={busy}>
+        <legend className="text-xs font-medium">{t("settings.lbAttribution.references")}</legend>
+        <p className="text-xs text-muted-foreground">{t("settings.lbAttribution.referencesHelp")}</p>
+        {accounts.map((account) => (
+          <label key={account.accountId} className="flex items-center gap-2 text-xs">
+            <Checkbox
+              checked={references.includes(account.accountId)}
+              disabled={busy}
+              onCheckedChange={(checked) => setReferences((current) => checked === true
+                ? [...current.filter((id) => id !== account.accountId), account.accountId]
+                : current.filter((id) => id !== account.accountId))}
+            />
+            {account.email} ({account.planType})
+          </label>
+        ))}
+        <Button
+          size="sm"
+          disabled={busy || !referencesChanged}
+          onClick={() => void onSave(buildSettingsUpdateRequest(settings, { quotaLbShareReferenceAccountIds: references }))}
+        >
+          {t("settings.lbAttribution.saveReferences")}
+        </Button>
+      </fieldset>
     </section>
   );
 }

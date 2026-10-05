@@ -6,7 +6,7 @@ The quota bar includes use through Codex LB and external/direct use. The approxi
 
 Target costs begin at the current reset boundary, and the denominator is the latest upstream used percentage converted with the maintained plan capacity or configured Pro ratio. A first reading of 5% counts all 5%, even without a retained zero or 100%-used observation. A fresh unused cycle with no logged cost reports zero.
 
-Peer calibration is separate: up to 30 days of other accounts' quota growth and matching successful request USD costs supplies a cost-per-credit conversion. One positive peer sample suffices. A new cycle need not wait for new calibration data if recent peer evidence exists. Initial peer usage is the calibration baseline; usage first observed after a subsequent reset counts in full. This enables early estimates while retaining uncertainty from small samples.
+Select accounts known to be used only through LB under Settings → LB attribution → Clean reference accounts. Calibration uses only selected peers' fresh current-cycle quota use and successful costs over matching cycles, excluding the target itself. Empty selection disables positive-cost estimates; zero-cost estimates remain available. One positive peer reading suffices immediately, including a nonzero first reading. No reference emails or account IDs are hardcoded. The owner's two clean Team accounts predicted each other's current cycles at approximately 99% and 101% in read-only replay; older cycles showed workload drift, so the result remains approximate.
 
 ## Reset boundaries
 

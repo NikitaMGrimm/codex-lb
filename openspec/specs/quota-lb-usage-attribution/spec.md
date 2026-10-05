@@ -25,11 +25,22 @@ The API SHALL recognize a reset when a fresh long-window reset deadline advances
 - **THEN** attribution is unavailable until fresh current-cycle data arrives
 
 ### Requirement: Bounded recent peer calibration
-The API SHALL calibrate estimated USD cost per subscription credit from other eligible accounts' recent observed quota growth and successful LB costs over matching peer observation intervals, bounded to the preceding 30 days. Calibration SHALL count nonzero first observations after resets, including resets with equal or higher usage. A single reference account with positive growth and cost SHALL suffice; there SHALL be no minimum 20-point growth requirement. The API SHALL omit an estimate with positive logged LB cost when no positive peer calibration is available. Calibration evidence MAY span earlier quota cycles; target accounting MUST remain restricted to the current cycle.
+
+The API SHALL calibrate estimated USD cost per subscription credit only from explicitly selected trusted LB-only accounts. It MUST exclude the target account from its own calibration. Each reference SHALL contribute its latest observed current-cycle used percentage, including a nonzero first reading, and successful LB costs over that same cycle through the quota observation. Expired, stale, regressed, or undefined reference cycles MUST NOT contribute. A single selected reference with positive use and cost SHALL suffice; there SHALL be no minimum usage threshold. History SHALL remain bounded to 30 days. Positive-cost estimates without a usable trusted peer SHALL be omitted; zero-cost estimates SHALL remain available without peers.
+
+#### Scenario: Unknown Pro use cannot inflate Team estimates
+- **GIVEN** two Team accounts are selected as clean references and Pro is not selected
+- **WHEN** Pro consumes quota outside LB
+- **THEN** Pro consumption does not contribute to calibration
+- **AND** each Team target is calibrated from the other selected Team account
+
+#### Scenario: First small reference reading
+- **GIVEN** one trusted peer first reports 1% used with positive current-cycle LB cost
+- **THEN** it supplies calibration immediately without waiting for previous cycles
 
 #### Scenario: Early estimate from a small peer sample
-- **GIVEN** one peer has positive observed growth below 20 percentage points and positive logged cost
-- **THEN** the API can produce a current-cycle estimate without waiting for another reference or more growth
+- **GIVEN** one selected trusted peer has positive observed usage below 20 percentage points and positive logged cost
+- **THEN** the API can produce a current-cycle estimate without waiting for another reference or more usage
 
 ### Requirement: Uncapped diagnostic estimates
 The API and dashboard SHALL retain finite nonnegative estimated shares above 100% without hiding or clamping them. The UI SHALL label the result as approximate and explain that values above 100% indicate calibration mismatch, not measured upstream attribution. The estimate SHALL include cycle-start and observation timestamps, observed credits, estimated LB credits, and reference count.
@@ -81,3 +92,12 @@ renewed deadline after a metadata gap MUST still establish the new cycle.
 - **AND** the last confirmed cycle deadline has passed
 - **WHEN** the dashboard requests LB attribution
 - **THEN** the old-cycle estimate is omitted until a fresh cycle is established
+
+### Requirement: Trusted reference selection
+
+Dashboard settings SHALL persist a bounded list of trusted reference account IDs, initially empty. Administrators SHALL select and deselect reference accounts in the LB attribution settings. Unrelated settings saves MUST preserve that selection, and reference selection MUST preserve the configured Pro ratio. The UI explanation SHALL identify references as LB-only accounts and their selection as an assumption.
+
+#### Scenario: Select two clean accounts
+- **WHEN** an administrator saves two account IDs as trusted references
+- **THEN** attribution uses only those references after settings cache invalidation
+- **AND** the existing Pro ratio remains unchanged

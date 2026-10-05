@@ -1637,6 +1637,9 @@ class DashboardSettings(Base):
         nullable=False,
     )
     pro_weekly_capacity_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quota_lb_share_reference_account_ids_json: Mapped[str] = mapped_column(
+        Text, default="[]", server_default=text("'[]'"), nullable=False
+    )
     limit_warmup_staggered_idle_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

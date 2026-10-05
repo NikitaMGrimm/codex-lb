@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, StrictInt, field_validator
 
@@ -132,6 +132,9 @@ class DashboardSettingsResponse(DashboardModel):
     weekly_pace_working_days: str = _DEFAULT_WEEKLY_PACE_WORKING_DAYS
     weekly_pace_smoothing_minutes: int = Field(default=30)
     pro_weekly_capacity_multiplier: float | None = Field(default=None, gt=0, le=1000)
+    quota_lb_share_reference_account_ids: list[Annotated[str, Field(min_length=1, max_length=256)]] = Field(
+        default_factory=list, max_length=100
+    )
     limit_warmup_staggered_idle_enabled: bool
     request_log_retention_days: int = Field(ge=0, le=3650)
     usage_history_retention_days: int = Field(ge=0, le=3650)
@@ -305,6 +308,9 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     weekly_pace_working_days: str | None = None
     weekly_pace_smoothing_minutes: int | None = None
     pro_weekly_capacity_multiplier: float | None = Field(default=None, gt=0, le=1000)
+    quota_lb_share_reference_account_ids: list[Annotated[str, Field(min_length=1, max_length=256)]] | None = Field(
+        default=None, max_length=100
+    )
     guest_access_enabled: bool | None = None
     limit_warmup_staggered_idle_enabled: bool | None = None
     # Tri-state retention overrides: absent = unchanged, present null = clear

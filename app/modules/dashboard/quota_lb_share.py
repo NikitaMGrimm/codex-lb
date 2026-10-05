@@ -157,7 +157,9 @@ def estimate_quota_lb_share(
     reference_credits = reference_cost = 0.0
     reference_count = 0
     for reference_id, rows in reference_rows.items():
-        points = observed_quota_growth(rows)
+        if not rows or _current_quota_cycle(rows, rows[-1].window_minutes) is None:
+            continue
+        points = rows[-1].used_percent
         cost = costs_by_account.get(reference_id, 0.0)
         if points <= 0 or cost <= 0:
             continue

@@ -149,6 +149,7 @@ class DashboardSettingsData:
     # end M1 stream/bridge budgets
     # Effective value, source and fallbacks of every inheritable setting, keyed
     # by setting name; the settings API exposes it as ``provenance``.
+    quota_lb_share_reference_account_ids: list[str] = field(default_factory=list)
     provenance: Mapping[str, InheritableValue[Any]] = field(default_factory=dict)
 
 
@@ -228,6 +229,7 @@ class DashboardSettingsUpdateData:
     clear_usage_history_retention_override: bool
     # C2-3 resilience toggles: tri-state (value = store, clear flag = back to
     # NULL so the env alias / default applies again, neither = untouched).
+    quota_lb_share_reference_account_ids: list[str] | None = None
     soft_drain_enabled: bool | None = None
     clear_soft_drain_enabled: bool = False
     deterministic_failover_enabled: bool | None = None
@@ -431,6 +433,7 @@ class SettingsService:
             weekly_pace_smoothing_minutes=payload.weekly_pace_smoothing_minutes,
             pro_weekly_capacity_multiplier=payload.pro_weekly_capacity_multiplier,
             clear_pro_weekly_capacity_multiplier=payload.clear_pro_weekly_capacity_multiplier,
+            quota_lb_share_reference_account_ids=payload.quota_lb_share_reference_account_ids,
             guest_access_enabled=payload.guest_access_enabled,
             limit_warmup_staggered_idle_enabled=payload.limit_warmup_staggered_idle_enabled,
             request_log_retention_days=payload.request_log_retention_override_days,
@@ -694,6 +697,7 @@ def _settings_data(row: DashboardSettings, totp: TotpEnrollmentSummary) -> Dashb
         weekly_pace_working_days=row.weekly_pace_working_days,
         weekly_pace_smoothing_minutes=row.weekly_pace_smoothing_minutes,
         pro_weekly_capacity_multiplier=row.pro_weekly_capacity_multiplier,
+        quota_lb_share_reference_account_ids=json.loads(row.quota_lb_share_reference_account_ids_json),
         guest_access_enabled=row.guest_access_enabled,
         guest_password_configured=row.guest_password_hash is not None,
         limit_warmup_staggered_idle_enabled=row.limit_warmup_staggered_idle_enabled,

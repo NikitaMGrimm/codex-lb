@@ -247,7 +247,7 @@ export function SettingsPage() {
                 busy={controlsDisabled}
                 onSave={handleSave}
               />
-              <LbAttributionSettings key={settings.proWeeklyCapacityMultiplier ?? "default"} settings={settings} busy={controlsDisabled} onSave={handleSave} />
+              <LbAttributionSettings key={`${settings.proWeeklyCapacityMultiplier ?? "default"}:${settings.quotaLbShareReferenceAccountIds.join(",")}`} accounts={accountsQuery.data ?? []} settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <ResilienceSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <SessionBridgeSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />
               <BackgroundJobsSettings settings={settings} busy={controlsDisabled} onSave={handleSave} />

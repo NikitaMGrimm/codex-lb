@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 
 from app.core import usage as usage_core
@@ -138,12 +139,18 @@ class DashboardService:
         for row in observations:
             rows_by_account.setdefault(row.account_id, []).append(row)
 
+        trusted_ids = set(json.loads(settings.quota_lb_share_reference_account_ids_json))
         calibration_costs: dict[str, float] = {}
+        trusted_rows: dict[str, list[QuotaObservation]] = {}
         for account_id, rows in rows_by_account.items():
-            costs = await self._repo.successful_costs_by_account(
-                [account_id], rows[0].recorded_at, rows[-1].recorded_at
-            )
+            if account_id not in trusted_ids:
+                continue
+            cycle_start = current_quota_cycle_start(rows, window_minutes_by_account[account_id])
+            if cycle_start is None or cycle_start < history_since:
+                continue
+            costs = await self._repo.successful_costs_by_account([account_id], cycle_start, rows[-1].recorded_at)
             calibration_costs[account_id] = costs.get(account_id, 0.0)
+            trusted_rows[account_id] = rows
 
         estimates: list[QuotaLbShareEstimate] = []
         for account_id, window_minutes in window_minutes_by_account.items():
@@ -153,7 +160,7 @@ class DashboardService:
             cycle_start = current_quota_cycle_start(target_rows, window_minutes)
             if cycle_start is None or cycle_start < history_since:
                 continue
-            references = {peer_id: rows for peer_id, rows in rows_by_account.items() if peer_id != account_id}
+            references = {peer_id: rows for peer_id, rows in trusted_rows.items() if peer_id != account_id}
             costs = await self._repo.successful_costs_by_account([account_id], cycle_start, target_rows[-1].recorded_at)
             costs = {**calibration_costs, account_id: costs.get(account_id, 0.0)}
             estimate = estimate_quota_lb_share(

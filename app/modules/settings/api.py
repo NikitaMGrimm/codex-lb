@@ -286,6 +286,7 @@ def _dashboard_settings_response(settings, *, principal: DashboardPrincipal) -> 
         weekly_pace_working_days=settings.weekly_pace_working_days,
         weekly_pace_smoothing_minutes=settings.weekly_pace_smoothing_minutes,
         pro_weekly_capacity_multiplier=settings.pro_weekly_capacity_multiplier,
+        quota_lb_share_reference_account_ids=settings.quota_lb_share_reference_account_ids,
         guest_access_enabled=settings.guest_access_enabled,
         guest_password_configured=settings.guest_password_configured,
         limit_warmup_staggered_idle_enabled=settings.limit_warmup_staggered_idle_enabled,
@@ -1372,6 +1373,7 @@ async def update_settings(
                     else current.weekly_pace_smoothing_minutes
                 ),
                 pro_weekly_capacity_multiplier=payload.pro_weekly_capacity_multiplier,
+                quota_lb_share_reference_account_ids=payload.quota_lb_share_reference_account_ids,
                 clear_pro_weekly_capacity_multiplier=(
                     "pro_weekly_capacity_multiplier" in payload.model_fields_set
                     and payload.pro_weekly_capacity_multiplier is None
@@ -1573,6 +1575,7 @@ async def update_settings(
             "weekly_pace_working_days",
             "weekly_pace_smoothing_minutes",
             "pro_weekly_capacity_multiplier",
+            "quota_lb_share_reference_account_ids",
             "guest_access_enabled",
             "limit_warmup_staggered_idle_enabled",
             "request_log_retention_override_days",
