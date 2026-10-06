@@ -105,6 +105,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     StickySelectionRequest,
     _clone_account,
+    _release_selection_resources,
     _StickySelectionOutcome,
     prepare_selection_states,
     run_sticky_selection_path,
@@ -141,6 +142,8 @@ from app.modules.proxy._load_balancer.tunables import (
     resolve_routing_tunables,
 )
 from app.modules.proxy._load_balancer.types import (
+    SELECTION_STATE_CHANGED,
+    SELECTION_STATE_CHANGED_MESSAGE,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
@@ -855,6 +858,7 @@ class LoadBalancer:
                 ),
             )
             selection_inputs = unbound_outcome.selection_inputs
+            selection_inputs_generation = unbound_outcome.selection_inputs_generation
             selected_snapshot = unbound_outcome.selected_snapshot
             selected_lease = unbound_outcome.selected_lease
             error_message = unbound_outcome.error_message
@@ -884,9 +888,18 @@ class LoadBalancer:
                             sticky_seed_kind,
                         )
                 except BaseException:
-                    await self.release_account_lease(selected_lease)
+                    await _release_selection_resources(self, selected_lease, None)
                     selected_lease = None
                     raise
+                if self._selection_inputs_cache.generation != selection_inputs_generation:
+                    # The seed may already be visible to a sibling; keep its
+                    # owner while rejecting this superseded admission.
+                    await _release_selection_resources(self, selected_lease, None)
+                    return AccountSelection(
+                        account=None,
+                        error_message=SELECTION_STATE_CHANGED_MESSAGE,
+                        error_code=SELECTION_STATE_CHANGED,
+                    )
         else:
             sticky_outcome = await run_sticky_selection_path(
                 self,

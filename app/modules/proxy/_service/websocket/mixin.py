@@ -2907,45 +2907,60 @@ class _WebSocketMixin:
                     error_message = error.message if error and error.message else "Upstream error"
                     error_type = error.type if error and error.type else "server_error"
                     if request_state is not None:
-                        rejection_owned = True
-                        if request_state_registered:
-                            async with pending_lock:
-                                rejection_owned = request_state in pending_requests
-                                if rejection_owned:
-                                    pending_requests.remove(request_state)
-                        await proxy._release_request_state_account_response_create_lease(request_state)
-                        if not rejection_owned:
-                            # The reader already settled and reported this frame.
-                            continue
-                        await proxy._release_websocket_request_state_reservation(request_state)
-                        if request_state_registered:
-                            await _release_websocket_response_create_gate(
-                                request_state, response_create_gate, scheduler=scheduler_for(proxy)
-                            )
-                        try:
-                            await proxy._write_websocket_connect_failure(
-                                account_id=account.id if account is not None else None,
-                                api_key=api_key,
-                                request_state=request_state,
+
+                        async def finalize_rejection(state: _WebSocketRequestState, owns_rejection: bool) -> None:
+                            await proxy._release_request_state_account_response_create_lease(state)
+                            if not owns_rejection:
+                                # The reader already settled and reported this frame.
+                                return
+                            await proxy._release_websocket_request_state_reservation(state)
+                            if request_state_registered:
+                                await _release_websocket_response_create_gate(
+                                    state, response_create_gate, scheduler=scheduler_for(proxy)
+                                )
+                            try:
+                                await proxy._write_websocket_connect_failure(
+                                    account_id=account.id if account is not None else None,
+                                    api_key=api_key,
+                                    request_state=state,
+                                    error_code=error_code or "upstream_error",
+                                    error_message=error_message,
+                                )
+                            except Exception:
+                                _facade().logger.warning(
+                                    "Failed to log websocket pre-dispatch rejection request_id=%s",
+                                    state.request_log_id or state.request_id,
+                                    exc_info=True,
+                                )
+                            await proxy._emit_websocket_terminal_error(
+                                websocket,
+                                client_send_lock=client_send_lock,
+                                request_state=state,
                                 error_code=error_code or "upstream_error",
                                 error_message=error_message,
+                                error_type=error_type,
+                                error_param=error.param_state if error else None,
+                                downstream_activity=downstream_activity,
                             )
-                        except Exception:
-                            _facade().logger.warning(
-                                "Failed to log websocket pre-dispatch rejection request_id=%s",
-                                request_state.request_log_id or request_state.request_id,
-                                exc_info=True,
+
+                        if request_state_registered:
+                            await pending_lock.acquire()
+                        try:
+                            rejection_owned = not request_state_registered or request_state in pending_requests
+                            if request_state_registered and rejection_owned:
+                                pending_requests.remove(request_state)
+                            request_state_failure_task = scheduler_for(proxy).create_task(
+                                finalize_rejection(request_state, rejection_owned),
+                                name="proxy-websocket-finalization-dispatch-rejection",
                             )
-                        await proxy._emit_websocket_terminal_error(
-                            websocket,
-                            client_send_lock=client_send_lock,
-                            request_state=request_state,
-                            error_code=error_code or "upstream_error",
-                            error_message=error_message,
-                            error_type=error_type,
-                            error_param=error.param_state if error else None,
-                            downstream_activity=downstream_activity,
-                        )
+                            _track_websocket_owned_task(proxy, request_state_failure_task)
+                        finally:
+                            if request_state_registered:
+                                pending_lock.release()
+                        # The removed frame is owned before the next cancellation
+                        # point; scope cleanup and lifespan draining can await it.
+                        await asyncio.shield(request_state_failure_task)
+                        request_state_failure_task = None
                     continue
                 except UpstreamWebSocketTransportError as exc:
                     # send_str/send_bytes may fail after handing bytes to the

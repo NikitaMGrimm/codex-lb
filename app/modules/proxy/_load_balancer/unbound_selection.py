@@ -93,6 +93,7 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
 @dataclass(frozen=True, slots=True)
 class UnboundSelectionOutcome(Generic[SelectionInputsT]):
     selection_inputs: SelectionInputsT
+    selection_inputs_generation: int
     selected_snapshot: Account | None
     selected_lease: AccountLease | None
     error_message: str | None
@@ -145,6 +146,7 @@ async def run_unbound_selection_path(
         assert account is None
         return UnboundSelectionOutcome(
             selection_inputs=selection_inputs,
+            selection_inputs_generation=selection_inputs_generation,
             selected_snapshot=None,
             selected_lease=None,
             error_message=error_message,
@@ -508,7 +510,10 @@ async def run_unbound_selection_path(
             reservation_committed = False
             try:
                 async with owner._runtime_lock:
-                    reservation_committed = owner._commit_due_probe_reservation_locked(probe_reservation)
+                    reservation_committed = (
+                        owner._selection_inputs_cache.generation == selection_inputs_generation
+                        and owner._commit_due_probe_reservation_locked(probe_reservation)
+                    )
                     if reservation_committed:
                         owner._sync_committed_probe_state_locked(
                             probe_reservation,
@@ -518,13 +523,11 @@ async def run_unbound_selection_path(
                     else:
                         owner._release_due_probe_reservation_locked(probe_reservation)
             except BaseException:
-                await owner.release_account_lease(selected_lease)
+                await _release_selection_resources(owner, selected_lease, probe_reservation)
                 selected_lease = None
-                async with owner._runtime_lock:
-                    owner._release_due_probe_reservation_locked(probe_reservation)
                 raise
             if not reservation_committed:
-                await owner.release_account_lease(selected_lease)
+                await _release_selection_resources(owner, selected_lease, probe_reservation)
                 selected_lease = None
                 selected_snapshot = None
                 error_message = None
@@ -556,6 +559,7 @@ async def run_unbound_selection_path(
 
     return UnboundSelectionOutcome(
         selection_inputs=selection_inputs,
+        selection_inputs_generation=selection_inputs_generation,
         selected_snapshot=selected_snapshot,
         selected_lease=selected_lease,
         error_message=error_message,

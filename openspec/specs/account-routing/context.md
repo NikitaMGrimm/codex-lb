@@ -79,6 +79,22 @@ for a capped account, the refresh owns routing invalidation even if its subseque
 policy read is cancelled; the committed measurement becomes visible and
 cancellation propagates.
 
+Final selection observation also covers the runtime-lock wait before a recovery
+probe commits and the database wait that initializes a process seed. The probe
+checks its generation inside the commitment lock, so a rejected attempt does
+not consume the quiet interval. A retried selection carries its successful
+generation to the seed-persistence fence. If that seed already committed, it
+retains its owner while the superseded attempt releases admission and fails
+closed; deleting it could invalidate a sibling that already observed it.
+
+Rejected WebSocket frames transfer settlement to a tracked finalization task
+before leaving pending ownership. Scope cancellation can await that task even
+while account-lease release waits. Late sticky invalidation uses the existing
+cancellation-deferring resource release, preserving both cancellation and
+committed affinity. For example, lowering a 20-percent cap to 10 percent during
+the final wait for an account observed at 10 percent prevents dispatch and
+releases its provisional accounting.
+
 ## Reauthentication warning state
 
 `reauth_required` means refresh-token exchange needs operator repair; it does not

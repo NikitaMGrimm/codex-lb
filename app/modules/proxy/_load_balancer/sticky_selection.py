@@ -1359,7 +1359,10 @@ async def run_sticky_selection_path(
             try:
                 async with owner._runtime_lock:
                     assert probe_reservation is not None
-                    reservation_committed = owner._commit_due_probe_reservation_locked(probe_reservation)
+                    reservation_committed = (
+                        owner._selection_inputs_cache.generation == selection_inputs_generation
+                        and owner._commit_due_probe_reservation_locked(probe_reservation)
+                    )
                     if reservation_committed:
                         owner._sync_committed_probe_state_locked(
                             probe_reservation,
@@ -1430,7 +1433,10 @@ async def run_sticky_selection_path(
             try:
                 assert probe_reservation is not None
                 async with owner._runtime_lock:
-                    reservation_committed = owner._commit_due_probe_reservation_locked(probe_reservation)
+                    reservation_committed = (
+                        owner._selection_inputs_cache.generation == selection_inputs_generation
+                        and owner._commit_due_probe_reservation_locked(probe_reservation)
+                    )
                     if reservation_committed:
                         owner._sync_committed_probe_state_locked(
                             probe_reservation,
@@ -1501,14 +1507,14 @@ async def run_sticky_selection_path(
                 except BaseException:
                     # Never leak the local concurrency lease when sticky
                     # persistence fails.
-                    await owner.release_account_lease(selected_lease)
+                    await _release_selection_resources(owner, selected_lease, probe_reservation)
                     selected_lease = None
                     raise
         if selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation:
             # Persistence may commit affinity after the earlier admission
             # fence. Preserve that owner, but never return stale policy
             # authorization or retain its provisional concurrency lease.
-            await owner.release_account_lease(selected_lease)
+            await _release_selection_resources(owner, selected_lease, probe_reservation)
             selected_lease = None
             return _direct_error(
                 account=None,
