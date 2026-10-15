@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260728_010000_add_account_usage_limits"
-down_revision = "20260816_000000_add_model_source_embeddings"
+down_revision = "20260918_000000_merge_scim_and_overflow_heads"
 branch_labels = None
 depends_on = None
 
