@@ -574,6 +574,11 @@ async def run_sticky_selection_path(
     )
     attempt = 0
     suppress_recovery_probe_candidates = False
+    # Dedicated budget for the post-persistence generation fence below. The
+    # general ``attempt`` counter is shared with unrelated retry causes and
+    # reset by probe-suppression paths, so this fence consumes its own
+    # retries and always terminates under continuous churn.
+    post_persist_generation_retries = 0
     pending_initial_owner_lookup = request.initial_sticky_owner_lookup
     while True:
         attempt += 1
@@ -1513,14 +1518,33 @@ async def run_sticky_selection_path(
         if selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation:
             # Persistence may commit affinity after the earlier admission
             # fence. Preserve that owner, but never return stale policy
-            # authorization or retain its provisional concurrency lease.
+            # authorization or retain its provisional concurrency lease:
+            # release the provisional resources, reload fresh inputs, and
+            # retry so the next iteration re-reads the now-committed owner
+            # and re-authorizes it through the unchanged account-cap,
+            # security, API-key, and usage-policy gates.
             await _release_selection_resources(owner, selected_lease, probe_reservation)
             selected_lease = None
-            return _direct_error(
-                account=None,
-                error_message=SELECTION_STATE_CHANGED_MESSAGE,
-                error_code=SELECTION_STATE_CHANGED,
-            )
+            if post_persist_generation_retries >= MAX_SELECTION_ATTEMPTS:
+                return _direct_error(
+                    account=None,
+                    error_message=SELECTION_STATE_CHANGED_MESSAGE,
+                    error_code=SELECTION_STATE_CHANGED,
+                )
+            post_persist_generation_retries += 1
+            selection_inputs, selection_inputs_generation = await load_selection_inputs()
+            if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                return _direct_error(
+                    account=None,
+                    error_message=selection_inputs.error_message,
+                    error_code=selection_inputs.error_code,
+                )
+            selected_snapshot = None
+            error_message = None
+            selected_states = []
+            selected_account_map = {}
+            await asyncio.sleep(0)
+            continue
         if sticky_outcome.isolation_release is not None:
             # Here, not at selection: the candidate can still be lost to a
             # concurrent lease or the attempt retried on stale state, and this

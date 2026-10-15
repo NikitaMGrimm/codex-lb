@@ -23,6 +23,7 @@ from app.core.balancer import (
 from app.db.models import Account, AccountStatus, StickySession, StickySessionKind, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.proxy._load_balancer.types import MAX_SELECTION_ATTEMPTS
 from app.modules.proxy.account_cache import AccountSelectionCache
 from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountSelection, LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
@@ -1656,6 +1657,79 @@ async def test_public_selection_handles_input_changes_during_persistence(
 
 
 @pytest.mark.asyncio
+async def test_post_persist_generation_bump_retries_and_preserves_committed_owner(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account("contract-post-persist-retry")
+    balancer, _, _, sticky_repo = _balancer([account], selection_cache)
+    upsert_calls = 0
+    real_upsert = sticky_repo.upsert
+
+    async def bump_once(key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+        nonlocal upsert_calls
+        upsert_calls += 1
+        result = await real_upsert(key, account_id, kind=kind)
+        if upsert_calls == 1:
+            # Ambient invalidation (e.g. the CacheInvalidationPoller
+            # account-selection callback) landing between sticky
+            # persistence and the post-persistence generation fence.
+            selection_cache.invalidate()
+        return result
+
+    monkeypatch.setattr(sticky_repo, "upsert", bump_once)
+
+    selection = await asyncio.wait_for(_select_with_lease(balancer, sticky=True), timeout=2.0)
+
+    assert upsert_calls == 2
+    assert selection.account is not None
+    assert selection.account.id == account.id
+    assert selection.lease is not None
+    assert selection.error_code is None
+    # The committed affinity is preserved, never deleted or rebound.
+    assert sticky_repo.account_id == account.id
+
+    await balancer.release_account_lease(selection.lease)
+    assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_post_persist_continuous_churn_fails_closed_after_bound_without_leaks(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account("contract-post-persist-churn")
+    balancer, _, _, sticky_repo = _balancer([account], selection_cache)
+    upsert_calls = 0
+    real_upsert = sticky_repo.upsert
+
+    async def bump_always(key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+        nonlocal upsert_calls
+        upsert_calls += 1
+        result = await real_upsert(key, account_id, kind=kind)
+        selection_cache.invalidate()
+        return result
+
+    monkeypatch.setattr(sticky_repo, "upsert", bump_always)
+    release_spy = AsyncMock(wraps=balancer.release_account_lease)
+    monkeypatch.setattr(balancer, "release_account_lease", release_spy)
+
+    selection = await asyncio.wait_for(_select_with_lease(balancer, sticky=True), timeout=2.0)
+
+    assert selection.account is None
+    assert selection.lease is None
+    assert selection.error_code == "selection_state_changed"
+    assert selection_failure_response(selection)[0] == 503
+    # One initial attempt plus one retry per fence budget unit, then fail closed.
+    assert upsert_calls == 1 + MAX_SELECTION_ATTEMPTS
+    assert release_spy.await_count == upsert_calls
+    # The committed affinity is preserved, never deleted or rebound, and no
+    # provisional lease pressure escapes.
+    assert sticky_repo.account_id == account.id
+    assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
 @pytest.mark.parametrize(
     ("new_status", "expected_error_code"),
@@ -1889,9 +1963,13 @@ async def test_sticky_persistence_policy_change_releases_admission(
 
     selection = await _select_with_lease(balancer, sticky=True)
 
+    # The post-persistence fence retries against fresh inputs instead of
+    # failing closed, so the retry re-authorizes the committed owner and
+    # surfaces the true usage-policy outcome rather than the generic fence
+    # error -- without bypassing the gate or leaking the released admission.
     assert selection.account is None
     assert selection.lease is None
-    assert selection.error_code == "selection_state_changed"
+    assert selection.error_code == "account_usage_limit_reached"
     assert sticky_repo.account_id == account.id
     assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
