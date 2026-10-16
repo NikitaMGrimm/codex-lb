@@ -799,9 +799,9 @@ async def test_published_override_schema_upgrades_without_replaying_schema_chang
         (versions / f"{name}.py").unlink()
     scalar = versions / "20260728_010000_add_account_usage_limits.py"
     original = scalar.read_text()
-    assert (
-        'down_revision = "20260918_000000_merge_scim_and_overflow_heads"' in original
-    ), "published-topology rewrite did not match the scalar revision"
+    assert 'down_revision = "20260918_000000_merge_scim_and_overflow_heads"' in original, (
+        "published-topology rewrite did not match the scalar revision"
+    )
     published_config.set_main_option("version_locations", str(versions))
     published_config.set_main_option("path_separator", "os")
     await to_thread.run_sync(lambda: command.upgrade(published_config, "20260910_010000_add_usage_limit_overrides"))
