@@ -34,7 +34,6 @@ from app.core.balancer.logic import (
     handle_rate_limit,
     plausible_rate_limit_reset_at,
     pool_usage_exhaustion,
-    routing_eligible_states,
     select_account,
 )
 
@@ -74,6 +73,5 @@ __all__ = [
     "handle_rate_limit",
     "plausible_rate_limit_reset_at",
     "pool_usage_exhaustion",
-    "routing_eligible_states",
     "select_account",
 ]

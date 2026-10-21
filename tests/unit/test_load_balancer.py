@@ -20,11 +20,11 @@ from app.core.balancer import (
     ROUTING_POLICY_PRESERVE,
     AccountState,
     RoutingCost,
+    evaluate_routing_pool,
     handle_permanent_failure,
     handle_quota_exceeded,
     handle_rate_limit,
     plausible_rate_limit_reset_at,
-    routing_eligible_states,
     select_account,
 )
 from app.core.balancer.logic import DRAIN_PRIMARY_THRESHOLD_PCT, PROBE_QUIET_SECONDS
@@ -93,9 +93,9 @@ def test_routing_eligibility_does_not_normalize_live_states() -> None:
         reset_at=now - 1,
     )
 
-    eligible = routing_eligible_states([expired], now=now)
+    eligible = evaluate_routing_pool([expired], now=now).normal_candidates
 
-    assert eligible == [expired]
+    assert eligible == (expired,)
     assert expired.status == AccountStatus.RATE_LIMITED
     assert expired.reset_at == now - 1
     assert expired.used_percent == 80.0

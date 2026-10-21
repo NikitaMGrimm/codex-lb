@@ -22,7 +22,6 @@ from app.core.balancer import (
     SelectionResult,
     TrafficClass,
     evaluate_routing_pool,
-    routing_eligible_states,
     select_account,
 )
 from app.core.balancer.logic import (
@@ -2367,7 +2366,7 @@ def _pool_has_available_account_without_backoff(
     # classify on copies so cap-error reporting cannot mutate the real
     # selection snapshot before sticky persistence. Keep the pool intact:
     # opportunistic admission compares candidates with one another.
-    return bool(routing_eligible_states(states, now=now, traffic_class=traffic_class))
+    return bool(evaluate_routing_pool(states, now=now, traffic_class=traffic_class).normal_candidates)
 
 
 def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:

@@ -612,16 +612,6 @@ def evaluate_routing_pool(
     return RoutingPoolEvaluation(originals, project(normal), project(capacity), project(routable))
 
 
-def routing_eligible_states(
-    states: Iterable[AccountState],
-    *,
-    now: float | None = None,
-    traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
-) -> list[AccountState]:
-    """Return the pool-wide states eligible for the requested traffic class, excluding error backoff."""
-    return list(evaluate_routing_pool(states, now=now, traffic_class=traffic_class).normal_candidates)
-
-
 def select_account(
     states: Iterable[AccountState],
     now: float | None = None,
