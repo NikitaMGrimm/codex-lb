@@ -207,19 +207,20 @@ A missing, paused, or deactivated owner, or a `reauth_required` owner whose stor
 
 Final owner authorization MUST read committed policy, status, and standard telemetry in one database snapshot, independently of the selection cache. It MUST distinguish permission, a policy block, an unavailable owner, and an authorization failure, and it MUST NOT report an unavailable owner as policy-blocked. Peer replicas MUST keep the existing invalidation and TTL fallback; acknowledging a mutation MUST NOT be assumed to invalidate every replica synchronously.
 
-If selection inputs are invalidated during affinity persistence, recovery-probe commitment, or process-seed persistence, selection MUST NOT return the account or a provisional lease and MUST return `selection_state_changed`. If the bounded retry budget runs out because inputs keep changing, sticky and unbound selection MUST fail closed with a retryable local 503 even when the owner check would allow the account; a specific owner or policy denial MUST keep its own error. Every failed final authorization MUST release provisional leases, token pressure, and recovery probes, MUST NOT publish a new or changed sticky owner, and MUST keep already committed affinity and process-seed owners. A rejected probe admission MUST NOT consume the recovery quiet interval. Cancellation MUST propagate only after this cleanup finishes, including when cancellation repeats during cleanup.
+If selection inputs are invalidated during affinity persistence, recovery-probe commitment, or process-seed persistence, selection MUST NOT return the account from that attempt or keep its provisional lease; it MUST retry against fresh inputs within a bounded budget, and a fresh evaluation that finds an owner or policy denial MUST return that error. If the budget runs out because inputs keep changing, sticky and unbound selection MUST fail closed with the retryable local 503 `selection_state_changed`, even when the owner check would allow the account. Every failed final authorization MUST release provisional leases, token pressure, and recovery probes, MUST NOT publish a new or changed sticky owner, and MUST keep already committed affinity and process-seed owners. A rejected probe admission MUST NOT consume the recovery quiet interval. Cancellation MUST propagate only after this cleanup finishes, including when cancellation repeats during cleanup.
 
 #### Scenario: Usage crosses a threshold while affinity is persisted
 
 - **GIVEN** an account was selected from an available observation
 - **WHEN** a committed observation crosses its threshold and invalidates selection inputs during affinity persistence
-- **THEN** admission returns `selection_state_changed` without an account or lease
-- **AND** its concurrency accounting is released
+- **THEN** that attempt's provisional lease and concurrency accounting are released
+- **AND** the retried evaluation returns `account_usage_limit_reached` without an account
+- **AND** the committed affinity is unchanged
 
 #### Scenario: Selection inputs keep changing through retry exhaustion
 
 - **WHEN** selection inputs change after every bounded selection attempt
-- **THEN** selection fails closed with a retryable local 503 and publishes no affinity
+- **THEN** selection fails closed with `selection_state_changed` and publishes no new affinity
 - **AND** provisional leases and recovery probes are released
 
 #### Scenario: Owner disappears on the final attempt
