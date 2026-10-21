@@ -93,6 +93,7 @@ from app.modules.proxy._load_balancer.model_eligibility import (
     _mapped_model_has_registry_entry as _mapped_model_has_registry_entry_impl,
 )
 from app.modules.proxy._load_balancer.opportunistic_admission import (
+    OPPORTUNISTIC_BURN_WINDOW_CLOSED,
     OpportunisticAdmissionRequest,
     apply_lease_release,
     detached_runtime_snapshot,
@@ -172,7 +173,6 @@ from app.modules.proxy.fair_share import (
     evaluate_stream_fair_share,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
-from app.modules.proxy.selection_errors import OPPORTUNISTIC_BURN_WINDOW_CLOSED
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,

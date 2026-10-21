@@ -337,8 +337,25 @@ async def _release_selection_resources(
         raise error
 
 
-async def _final_attempt_authorization_failure(owner: StickySelectionOwner, account_id: str) -> SelectionResult:
-    authorization = await owner.authorize_account_fresh(account_id)
+async def _discard_superseded_attempt(
+    owner: StickySelectionOwner,
+    account_id: str,
+    lease: AccountLease | None,
+    probe: ProbeReservation | None,
+    *,
+    final_attempt: bool,
+) -> SelectionResult | None:
+    """Release an attempt whose selection inputs changed before it was returned.
+
+    Earlier attempts retry from fresh inputs (``None``). The final attempt
+    reads the owner directly so a specific owner or policy denial is reported.
+    """
+    try:
+        if not final_attempt:
+            return None
+        authorization = await owner.authorize_account_fresh(account_id)
+    finally:
+        await _release_selection_resources(owner, lease, probe)
     match authorization.kind:
         case OwnerAuthorizationKind.ALLOWED:
             # A fresh owner policy cannot validate the superseded model,
@@ -574,10 +591,8 @@ async def run_sticky_selection_path(
     )
     attempt = 0
     suppress_recovery_probe_candidates = False
-    # Dedicated budget for the post-persistence generation fence below. The
-    # general ``attempt`` counter is shared with unrelated retry causes and
-    # reset by probe-suppression paths, so this fence consumes its own
-    # retries and always terminates under continuous churn.
+    # The post-persistence fence needs its own budget: probe suppression
+    # resets ``attempt``, so sharing it could retry forever under churn.
     post_persist_generation_retries = 0
     pending_initial_owner_lookup = request.initial_sticky_owner_lookup
     while True:
@@ -712,10 +727,8 @@ async def run_sticky_selection_path(
             # them here would disable the gate under pool-wide backoff.
             pool = evaluate_routing_pool(states, traffic_class=traffic_class, now=owner._clock.time())
             fair_share_candidate_ids = [state.account_id for state in pool.capacity_candidates]
-            # Congestion relief cannot make a hard-pinned owner eligible when
-            # the operator's usage policy blocks it. Let the canonical owner
-            # selector surface that terminal policy result instead of parking
-            # the request in a fair-share capacity wait.
+            # A policy-blocked hard owner reports its policy denial instead of
+            # waiting on peer-pool fair share.
             hard_owner_usage_limit_blocked = hard_sticky and any(
                 state.account_id == sticky_existing_account_id and state.usage_limit_state.blocks_account_use
                 for state in states
@@ -1259,30 +1272,19 @@ async def run_sticky_selection_path(
                 )
             await asyncio.sleep(0)
             continue
-        selection_generation_changed = (
-            selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation
-        )
-        final_authorization_failure: SelectionResult | None = None
-        if selection_generation_changed and attempt >= MAX_SELECTION_ATTEMPTS:
-            assert selected_snapshot is not None
-            try:
-                final_authorization_failure = await _final_attempt_authorization_failure(
-                    owner,
-                    selected_snapshot.id,
-                )
-            except BaseException:
-                await _release_selection_resources(owner, selected_lease, probe_reservation)
-                selected_lease = None
-                raise
-        if selection_generation_changed and (
-            attempt < MAX_SELECTION_ATTEMPTS or final_authorization_failure is not None
-        ):
+        if selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation:
             # Account or usage data changed after this attempt loaded its
             # selection snapshot. The lease and any probe reservation are
             # still provisional, and the sticky mutation has not been written
             # yet, so discard the attempt and re-evaluate the hard gates from a
             # fresh snapshot before publishing affinity or returning admission.
-            await _release_selection_resources(owner, selected_lease, probe_reservation)
+            final_authorization_failure = await _discard_superseded_attempt(
+                owner,
+                selected_snapshot.id,
+                selected_lease,
+                probe_reservation,
+                final_attempt=attempt >= MAX_SELECTION_ATTEMPTS,
+            )
             selected_lease = None
             if final_authorization_failure is not None:
                 selected_snapshot = None
@@ -1516,13 +1518,9 @@ async def run_sticky_selection_path(
                     selected_lease = None
                     raise
         if selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation:
-            # Persistence may commit affinity after the earlier admission
-            # fence. Preserve that owner, but never return stale policy
-            # authorization or retain its provisional concurrency lease:
-            # release the provisional resources, reload fresh inputs, and
-            # retry so the next iteration re-reads the now-committed owner
-            # and re-authorizes it through the unchanged account-cap,
-            # security, API-key, and usage-policy gates.
+            # Affinity may already be committed. Keep that owner, but release
+            # the provisional admission and retry from fresh inputs so the
+            # committed owner passes every gate again.
             await _release_selection_resources(owner, selected_lease, probe_reservation)
             selected_lease = None
             if post_persist_generation_retries >= MAX_SELECTION_ATTEMPTS:
@@ -2550,12 +2548,13 @@ def _select_account_preferring_budget_safe(
         if state.routing_policy != ROUTING_POLICY_PRESERVE and not state_budget_threshold(state)
     ]
     if preferred_states:
-        selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list
-        terminal_pool = (
-            [*selection_pool, *usage_limit_blocked] if len(preferred_states) == len(state_list) else selection_pool
+        # A narrowed pool falls through below; only a terminal selection needs
+        # policy-blocked accounts as error evidence.
+        selection_pool = (
+            preferred_states if len(preferred_states) != len(state_list) else [*state_list, *usage_limit_blocked]
         )
         preferred = select_account(
-            terminal_pool,
+            selection_pool,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,

@@ -381,23 +381,37 @@ def _http_bridge_usage_limit_authorization_failed_error() -> ProxyResponseError:
     )
 
 
-def _ensure_http_bridge_session_owner_authorized(
-    session: "_HTTPBridgeSession",
+async def _load_owner_authorization(
+    proxy: Any,
+    account_id: str,
+    *,
+    timeout_seconds: float,
+    surface: str,
+) -> OwnerAuthorization:
+    try:
+        return await scheduler_for(proxy).wait_for(
+            proxy._load_balancer.authorize_account_fresh(account_id),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError:
+        logger.warning("%s owner authorization timed out account_id=%s", surface, account_id)
+        return OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
+
+
+def _owner_authorization_error(
     owner_authorization: OwnerAuthorization,
-) -> None:
+    access_token_expires_at: float | None,
+) -> ProxyResponseError | None:
+    """Map a fresh owner decision to the shared pre-dispatch error contract."""
     if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
-        raise _http_bridge_usage_limit_authorization_failed_error()
+        return _http_bridge_usage_limit_authorization_failed_error()
     if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE or (
         owner_authorization.owner_status is AccountStatus.REAUTH_REQUIRED
-        and reauth_access_token_is_expired(AccountStatus.REAUTH_REQUIRED, session.access_token_expires_at)
+        and reauth_access_token_is_expired(AccountStatus.REAUTH_REQUIRED, access_token_expires_at)
     ):
-        session.upstream_control.reconnect_requested = True
-        session.upstream_control.retire_after_drain = True
-        raise _http_bridge_previous_response_owner_unavailable_error()
+        return _http_bridge_previous_response_owner_unavailable_error()
     if owner_authorization.allowed:
-        return
-    session.upstream_control.reconnect_requested = True
-    session.upstream_control.retire_after_drain = True
+        return None
     status_code, error_payload = selection_failure_response(
         AccountSelection(
             account=None,
@@ -405,7 +419,22 @@ def _ensure_http_bridge_session_owner_authorized(
             error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
         )
     )
-    raise ProxyResponseError(status_code, error_payload)
+    return ProxyResponseError(status_code, error_payload)
+
+
+def _ensure_http_bridge_session_owner_authorized(
+    session: "_HTTPBridgeSession",
+    owner_authorization: OwnerAuthorization,
+) -> None:
+    error = _owner_authorization_error(owner_authorization, session.access_token_expires_at)
+    if error is None:
+        return
+    if owner_authorization.kind is not OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+        # Owner loss and policy denial retire the bridge after admitted turns
+        # drain; a failed policy read keeps it available for a retry.
+        session.upstream_control.reconnect_requested = True
+        session.upstream_control.retire_after_drain = True
+    raise error
 
 
 async def _rollback_http_bridge_recovery_turn_state_registration(
@@ -2905,17 +2934,14 @@ class _HTTPBridgeRequestSubmitMixin:
         self: Any,
         session: "_HTTPBridgeSession",
     ) -> OwnerAuthorization:
-        account_id = session.account.id
-        try:
-            # Final dispatch reads stay under lifecycle_lock so a reconnect
-            # cannot switch the owner between authorization and upstream send.
-            return await scheduler_for(self).wait_for(
-                self._load_balancer.authorize_account_fresh(account_id),
-                timeout=_HTTP_BRIDGE_OWNER_AUTHORIZATION_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            logger.warning("HTTP bridge owner authorization timed out account_id=%s", account_id)
-            return OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
+        # Final dispatch reads stay under lifecycle_lock so a reconnect cannot
+        # switch the owner between authorization and upstream send.
+        return await _load_owner_authorization(
+            self,
+            session.account.id,
+            timeout_seconds=_HTTP_BRIDGE_OWNER_AUTHORIZATION_TIMEOUT_SECONDS,
+            surface="HTTP bridge",
+        )
 
     async def _ensure_http_bridge_session_stream_lease_locked(
         self: Any,

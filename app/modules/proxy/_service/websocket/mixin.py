@@ -26,7 +26,6 @@ from app.core.balancer import (
     RoutingStrategy,
     failover_decision,
 )
-from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -295,6 +294,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
 )
 from app.modules.proxy._service.http_bridge.request_submit import (
+    _load_owner_authorization,
+    _owner_authorization_error,
+)
+from app.modules.proxy._service.http_bridge.request_submit import (
     _text_with_account_installation_id as _text_with_account_installation_id,
 )
 from app.modules.proxy._service.observability import (
@@ -462,7 +465,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _wrapped_websocket_error_event,
 )
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
-from app.modules.proxy.account_eligibility import account_access_token_expires_at, reauth_access_token_is_expired
+from app.modules.proxy.account_eligibility import account_access_token_expires_at
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _is_synthesized_turn_state,
@@ -503,7 +506,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, AccountSelection, effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
@@ -524,7 +527,6 @@ from app.modules.proxy.tool_call_dedupe import (
 from app.modules.proxy.tool_call_dedupe import (
     response_id_from_payload as tool_call_response_id_from_payload,
 )
-from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 
 
 def _facade() -> Any:
@@ -1362,40 +1364,20 @@ async def _process_upstream_websocket_transport_end(
 
 
 async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, account: Account) -> None:
-    try:
-        owner_authorization = await scheduler_for(proxy).wait_for(
-            proxy._load_balancer.authorize_account_fresh(account.id),
-            timeout=_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS,
-        )
-    except TimeoutError:
-        logger.warning("WebSocket owner authorization timed out account_id=%s", account.id)
-        owner_authorization = OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
-    if owner_authorization.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
-        raise ProxyResponseError(
-            503,
-            openai_error(
-                "account_usage_limit_authorization_failed",
-                "Unable to verify account usage limit; retry later.",
-                error_type="server_error",
-            ),
-        )
-    if owner_authorization.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE or (
-        owner_authorization.owner_status is AccountStatus.REAUTH_REQUIRED
-        and reauth_access_token_is_expired(
-            AccountStatus.REAUTH_REQUIRED,
-            account_access_token_expires_at(account, proxy._encryptor),
-        )
-    ):
-        raise _http_bridge_previous_response_owner_unavailable_error()
-    if owner_authorization.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
-        status_code, error_payload = selection_failure_response(
-            AccountSelection(
-                account=None,
-                error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
-                error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
-            )
-        )
-        raise ProxyResponseError(status_code, error_payload)
+    owner_authorization = await _load_owner_authorization(
+        proxy,
+        account.id,
+        timeout_seconds=_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS,
+        surface="WebSocket",
+    )
+    access_token_expires_at = (
+        account_access_token_expires_at(account, proxy._encryptor)
+        if owner_authorization.owner_status is AccountStatus.REAUTH_REQUIRED
+        else None
+    )
+    error = _owner_authorization_error(owner_authorization, access_token_expires_at)
+    if error is not None:
+        raise error
 
 
 class _WebSocketMixin:
@@ -2738,14 +2720,7 @@ class _WebSocketMixin:
                             request_state.fresh_upstream_request_text = fresh_upstream_request_text
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
-                    if is_response_create and account is not None:
                         await _authorize_websocket_dispatch_owner(proxy, account)
-                    if (
-                        is_response_create
-                        and text_data is not None
-                        and request_state is not None
-                        and account is not None
-                    ):
                         # The reader can retire the socket or finalize an
                         # unsent request while authorization awaits. Sample
                         # reconnect and claim dispatch under the same lock as

@@ -24,9 +24,9 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _account_cap_error_code,
     _account_cap_error_message,
     _clone_account,
+    _discard_superseded_attempt,
     _filter_recovery_probe_candidates,
     _filter_states_for_usage_limit_and_account_caps,
-    _final_attempt_authorization_failure,
     _probing_result_requires_recovery_reservation,
     _release_selection_resources,
     _select_account_preferring_budget_safe,
@@ -444,25 +444,14 @@ async def run_unbound_selection_path(
             selected_account_map = {}
             continue
 
-        selection_generation_changed = (
-            selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation
-        )
-        final_authorization_failure: SelectionResult | None = None
-        if selection_generation_changed and attempt >= MAX_SELECTION_ATTEMPTS:
-            assert selected_snapshot is not None
-            try:
-                final_authorization_failure = await _final_attempt_authorization_failure(
-                    owner,
-                    selected_snapshot.id,
-                )
-            except BaseException:
-                await _release_selection_resources(owner, selected_lease, probe_reservation)
-                selected_lease = None
-                raise
-        if selection_generation_changed and (
-            attempt < MAX_SELECTION_ATTEMPTS or final_authorization_failure is not None
-        ):
-            await _release_selection_resources(owner, selected_lease, probe_reservation)
+        if selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation:
+            final_authorization_failure = await _discard_superseded_attempt(
+                owner,
+                selected_snapshot.id,
+                selected_lease,
+                probe_reservation,
+                final_attempt=attempt >= MAX_SELECTION_ATTEMPTS,
+            )
             selected_lease = None
             if final_authorization_failure is not None:
                 selected_snapshot = None
