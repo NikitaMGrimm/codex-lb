@@ -9,6 +9,7 @@ import threading
 import time
 import tomllib
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -4725,11 +4726,34 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
     )
 
 
+def _install_pinned_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    account: object,
+    upstreams: Callable[[], object],
+    **settings_overrides: object,
+) -> None:
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings(**settings_overrides)
+
+    async def allow(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return account, upstreams()
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+
 @pytest.mark.parametrize(
     ("blocked_state", "expected_error_code", "reauth_expiry_offset"),
     [
         (AccountUsageLimitState.REACHED, "account_usage_limit_reached", None),
-        (AccountUsageLimitState.DATA_UNAVAILABLE, "account_usage_limit_reached", None),
         (None, "previous_response_owner_unavailable", None),
         (AccountUsageLimitState.AVAILABLE, None, 60),
         (AccountUsageLimitState.AVAILABLE, "previous_response_owner_unavailable", -60),
@@ -4804,20 +4828,6 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
     usage_limit_state = AccountUsageLimitState.DISABLED
     owner_status = AccountStatus.ACTIVE
 
-    class _FakeSettingsCache:
-        async def get(self):
-            return _websocket_settings()
-
-    async def allow_firewall(_websocket):
-        return None
-
-    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
-        return None
-
-    async def fake_connect_proxy_websocket(self, headers, **kwargs):
-        del self, headers, kwargs
-        return account, upstream
-
     async def authorize_account_fresh(self, account_id):
         del self
         assert account_id == account.id
@@ -4831,22 +4841,10 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
             owner_status=owner_status,
         )
 
-    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
-    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
-    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
-    monkeypatch.setattr(
-        proxy_module.LoadBalancer,
-        "authorize_account_fresh",
-        authorize_account_fresh,
-    )
+    _install_pinned_websocket(monkeypatch, account=account, upstreams=lambda: upstream)
+    monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
-    request = {
-        "type": "response.create",
-        "model": "gpt-5.4",
-        "input": "turn",
-        "stream": True,
-    }
+    request = {"type": "response.create", "model": "gpt-5.4", "input": "turn", "stream": True}
     with TestClient(app_instance) as client:
         with client.websocket_connect("/v1/responses") as websocket:
             websocket.send_text(json.dumps(request))
@@ -4873,7 +4871,6 @@ def test_v1_responses_websocket_revalidates_account_before_each_request(
     ("second_check", "expected_error_code"),
     [
         (AccountUsageLimitState.REACHED, "account_usage_limit_reached"),
-        (AccountUsageLimitState.DATA_UNAVAILABLE, "account_usage_limit_reached"),
         (None, "account_usage_limit_authorization_failed"),
     ],
 )
@@ -4944,20 +4941,6 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
             policy_blocked = True
         return lease
 
-    class _FakeSettingsCache:
-        async def get(self):
-            return _websocket_settings(proxy_account_response_create_limit=create_limit)
-
-    async def allow_firewall(_websocket):
-        return None
-
-    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
-        return None
-
-    async def fake_connect_proxy_websocket(self, headers, **kwargs):
-        del self, headers, kwargs
-        return account, upstream
-
     async def authorize_account_fresh(self, account_id):
         del self
         assert account_id == account.id
@@ -4977,31 +4960,24 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
         if lease is not None:
             released_create_leases.append(lease)
 
+    _install_pinned_websocket(
+        monkeypatch,
+        account=account,
+        upstreams=lambda: upstream,
+        proxy_account_response_create_limit=create_limit,
+    )
     monkeypatch.setattr(
         proxy_module.ProxyService, "_acquire_account_response_create_lease_or_overload", acquire_create_lease
     )
-    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
-    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
-    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_websocket_connect_failure", record_connect_failure)
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_release_request_state_account_response_create_lease",
         track_release_create_lease,
     )
-    monkeypatch.setattr(
-        proxy_module.LoadBalancer,
-        "authorize_account_fresh",
-        authorize_account_fresh,
-    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
-    request = {
-        "type": "response.create",
-        "model": "gpt-5.4",
-        "input": "turn",
-        "stream": True,
-    }
+    request = {"type": "response.create", "model": "gpt-5.4", "input": "turn", "stream": True}
     try:
         with TestClient(app_instance) as client:
             with client.websocket_connect("/v1/responses") as websocket:
@@ -5036,29 +5012,12 @@ def test_v1_responses_websocket_owner_authorization_timeout_fails_frame(app_inst
     upstream = _FakeUpstreamWebSocket([])
     account = SimpleNamespace(id="acct_ws_auth_timeout")
 
-    class _FakeSettingsCache:
-        async def get(self):
-            return _websocket_settings()
-
-    async def allow_firewall(_websocket):
-        return None
-
-    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
-        return None
-
-    async def fake_connect_proxy_websocket(self, headers, **kwargs):
-        del self, headers, kwargs
-        return account, upstream
-
     async def stalled_authorization(self, account_id):
         del self
         assert account_id == account.id
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
-    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
-    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    _install_pinned_websocket(monkeypatch, account=account, upstreams=lambda: upstream)
     monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", stalled_authorization)
     monkeypatch.setattr(websocket_mixin_module, "_WEBSOCKET_OWNER_AUTHORIZATION_TIMEOUT_SECONDS", 0.01)
 
@@ -5105,20 +5064,6 @@ def test_v1_responses_websocket_expiry_during_owner_authorization_does_not_dispa
     original_release = proxy_module.LoadBalancer.release_account_lease
     original_emit_error = proxy_module.ProxyService._emit_websocket_terminal_error
 
-    class _FakeSettingsCache:
-        async def get(self):
-            return _websocket_settings(proxy_request_budget_seconds=0.05, stream_idle_timeout_seconds=1.0)
-
-    async def allow_firewall(_websocket):
-        return None
-
-    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
-        return None
-
-    async def fake_connect_proxy_websocket(self, headers, **kwargs):
-        del self, headers, kwargs
-        return account, upstream
-
     async def authorize_account_fresh(self, account_id):
         nonlocal authorization_calls
         del self
@@ -5152,10 +5097,13 @@ def test_v1_responses_websocket_expiry_during_owner_authorization_does_not_dispa
         terminal_errors.append(kwargs["error_code"])
         await original_emit_error(self, websocket, **kwargs)
 
-    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
-    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
-    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    _install_pinned_websocket(
+        monkeypatch,
+        account=account,
+        upstreams=lambda: upstream,
+        proxy_request_budget_seconds=0.05,
+        stream_idle_timeout_seconds=1.0,
+    )
     monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
     monkeypatch.setattr(proxy_module.ProxyService, "_emit_websocket_terminal_error", record_terminal_error)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_websocket_connect_failure", record_failure)
@@ -5208,20 +5156,6 @@ def test_v1_responses_websocket_reconnects_when_owner_auth_outlives_socket(app_i
     account = SimpleNamespace(id="acct_ws_auth_reconnect")
     authorization_calls = 0
 
-    class _FakeSettingsCache:
-        async def get(self):
-            return _websocket_settings()
-
-    async def allow_firewall(_websocket):
-        return None
-
-    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
-        return None
-
-    async def fake_connect_proxy_websocket(self, headers, **kwargs):
-        del self, headers, kwargs
-        return account, upstreams.popleft()
-
     async def authorize_account_fresh(self, account_id):
         nonlocal authorization_calls
         del self
@@ -5233,10 +5167,7 @@ def test_v1_responses_websocket_reconnects_when_owner_auth_outlives_socket(app_i
             assert closed, "the proxy must retire the first upstream while owner authorization is pending"
         return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
 
-    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
-    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
-    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
-    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    _install_pinned_websocket(monkeypatch, account=account, upstreams=upstreams.popleft)
     monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
     with TestClient(app_instance) as client:

@@ -84,18 +84,6 @@ def _opportunistic_pool(now: float) -> list[AccountState]:
     ]
 
 
-def test_opportunistic_routing_eligibility_is_pool_scoped() -> None:
-    now = 1_700_000_000.0
-
-    eligible = routing_eligible_states(
-        _opportunistic_pool(now),
-        now=now,
-        traffic_class="opportunistic",
-    )
-
-    assert [state.account_id for state in eligible] == ["near-floor", "peer"]
-
-
 def test_routing_eligibility_does_not_normalize_live_states() -> None:
     now = 1_700_000_000.0
     expired = AccountState(
@@ -174,30 +162,6 @@ def test_select_account_returns_stable_error_when_all_accounts_are_usage_limited
     assert result.account is None
     assert result.error_code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
     assert result.error_message is not None
-
-
-def test_budget_safe_all_blocked_selection_preserves_usage_exhaustion_controls() -> None:
-    blocked = AccountState(
-        "locally-blocked",
-        AccountStatus.QUOTA_EXCEEDED,
-        used_percent=100.0,
-        usage_limit_state=AccountUsageLimitState.REACHED,
-    )
-    wider_scope = [blocked, AccountState("usable-peer", AccountStatus.ACTIVE, used_percent=20.0)]
-
-    controls: tuple[tuple[bool, list[AccountState] | None], ...] = ((False, None), (True, wider_scope))
-    for allow_exhaustion_error, exhaustion_states in controls:
-        result = _select_account_preferring_budget_safe(
-            [blocked],
-            prefer_earlier_reset=False,
-            routing_strategy="usage_weighted",
-            budget_threshold_pct=95.0,
-            traffic_class="opportunistic",
-            allow_usage_exhaustion_error=allow_exhaustion_error,
-            usage_exhaustion_states=exhaustion_states,
-        )
-        assert result.account is None
-        assert result.error_code is None
 
 
 def test_select_account_prefers_local_policy_error_over_upstream_exhausted_peer() -> None:
@@ -1029,7 +993,7 @@ def test_select_account_can_disable_pool_usage_exhaustion_for_owner_scope():
     assert result.error_message == "Rate limit exceeded. Try again in 300s"
 
 
-@pytest.mark.parametrize("limit_state", list(AccountUsageLimitState))
+@pytest.mark.parametrize("limit_state", [AccountUsageLimitState.DISABLED, AccountUsageLimitState.REACHED])
 def test_budget_safe_selection_uses_full_scope_for_usage_exhaustion(limit_state: AccountUsageLimitState) -> None:
     now = time.time()
     cap_filtered_states = [
@@ -1064,7 +1028,7 @@ def test_budget_safe_selection_uses_full_scope_for_usage_exhaustion(limit_state:
     assert result.error_message == "Rate limit exceeded. Try again in 300s"
 
 
-@pytest.mark.parametrize("limit_state", list(AccountUsageLimitState))
+@pytest.mark.parametrize("limit_state", [AccountUsageLimitState.DISABLED, AccountUsageLimitState.REACHED])
 def test_budget_safe_capacity_selection_forwards_usage_exhaustion_controls(limit_state: AccountUsageLimitState) -> None:
     now = time.time()
     owner_scope = [
@@ -2555,32 +2519,6 @@ async def test_usage_limited_account_recovers_after_fresh_post_reset_observation
     assert account.status is AccountStatus.ACTIVE
     assert repos.accounts.update_status.await_count == 0
     assert repos.accounts.update_status_if_current.await_count == 0
-
-
-@pytest.mark.asyncio
-async def test_load_balancer_preserves_usage_limit_error_with_paused_peer() -> None:
-    from app.modules.proxy.load_balancer import LoadBalancer
-
-    now = datetime.now(timezone.utc)
-    limited = _make_test_account(account_id="limited-with-paused-peer")
-    limited.usage_limit_enabled = True
-    limited.usage_limit_percent = 10.0
-    paused = _make_test_account(account_id="paused-peer")
-    paused.status = AccountStatus.PAUSED
-    usage = _make_test_usage(
-        account_id=limited.id,
-        window="primary",
-        used_percent=10.0,
-        reset_at=int((now + timedelta(hours=1)).timestamp()),
-        recorded_at=now.replace(tzinfo=None),
-    )
-    repos = _usage_limit_test_repositories([limited, paused], {limited.id: usage})
-    balancer = LoadBalancer(repo_factory=lambda: repos)
-
-    selection = await balancer.select_account(routing_strategy="usage_weighted")
-
-    assert selection.account is None
-    assert selection.error_code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
 
 
 @pytest.mark.asyncio

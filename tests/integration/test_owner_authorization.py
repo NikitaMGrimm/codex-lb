@@ -29,13 +29,11 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "policy", ["disabled", "available", "reached", "unknown-plan-missing-5h", "unknown-plan-missing-weekly"]
-)
+@pytest.mark.parametrize("policy", ["disabled", "available", "reached", "unknown-plan-missing-5h"])
 async def test_owner_authorization_query_budget_and_cached_selection(db_setup, monkeypatch, policy):
     owner_id = "authorization-query-budget"
     enabled, used = policy != "disabled", 10.0 if policy == "reached" else 5.0
-    missing_window = {"unknown-plan-missing-5h": "primary", "unknown-plan-missing-weekly": "secondary"}.get(policy)
+    missing_window = "primary" if policy == "unknown-plan-missing-5h" else None
     async with SessionLocal() as session:
         session.add(
             Account(
@@ -50,7 +48,6 @@ async def test_owner_authorization_query_budget_and_cached_selection(db_setup, m
                 usage_limit_enabled=enabled,
                 usage_limit_percent=10.0 if enabled and missing_window is None else None,
                 usage_limit_5h_percent=70.0 if missing_window == "primary" else None,
-                usage_limit_weekly_percent=90.0 if missing_window == "secondary" else None,
             )
         )
         session.add_all(

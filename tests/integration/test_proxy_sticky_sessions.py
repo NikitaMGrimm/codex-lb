@@ -3225,10 +3225,7 @@ async def test_cleanup_retires_derived_prompt_cache_rows_and_keeps_client_sticky
 
 @pytest.mark.asyncio
 async def test_v1_prompt_cache_key_survives_generation_bump_during_sticky_persist(async_client, monkeypatch):
-    """A generation bump landing between sticky persistence and the
-    post-persistence fence must retry against fresh inputs, not fail the
-    request: the committed owner is re-authorized and upstream is called
-    exactly once."""
+    """A generation bump after sticky persistence retries instead of failing the request."""
     from app.modules.proxy.account_cache import get_account_selection_cache
     from app.modules.proxy.sticky_repository import StickySessionsRepository
 
@@ -3262,8 +3259,7 @@ async def test_v1_prompt_cache_key_survives_generation_bump_during_sticky_persis
         result = await real_upsert(self, key, account_id, kind=kind)
         if bumps == 0:
             bumps += 1
-            # Same non-propagating invalidation the CacheInvalidationPoller
-            # account-selection callback issues on an ambient bump.
+            # Matches the cache-invalidation poller's ambient local bump.
             get_account_selection_cache().invalidate(propagate=False)
         return result
 
@@ -3279,7 +3275,5 @@ async def test_v1_prompt_cache_key_survives_generation_bump_during_sticky_persis
     response = await async_client.post("/backend-api/codex/responses", json=payload)
     assert response.status_code == 200
     assert bumps == 1
-    # The retry re-authorizes the committed owner: exactly one upstream call.
-    # (Upstream routing uses the requested account name; the import returns
-    # the DB row id with a random suffix.)
+    # Upstream receives the imported ChatGPT account id, not the DB row id.
     assert seen == ["acc_gen_bump"]

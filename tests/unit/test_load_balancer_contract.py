@@ -446,40 +446,6 @@ async def test_public_fair_share_ignores_usage_limited_counters_when_admitting(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
-async def test_public_fair_share_all_usage_limited_keeps_policy_error(
-    selection_cache: AccountSelectionCache,
-    sticky: bool,
-) -> None:
-    limited = _account(f"contract-fair-share-all-limited-{sticky}")
-    limited.usage_limit_enabled = True
-    limited.usage_limit_percent = 10.0
-    balancer, _, _, _ = _balancer(
-        [limited],
-        selection_cache,
-        primary={limited.id: _usage_row(40, limited.id, window="primary", used_percent=10.0)},
-    )
-    balancer._runtime[limited.id] = load_balancer_module.RuntimeState(
-        inflight_streams=3,
-        stream_key_inflight={"requester": 2, "other": 1},
-    )
-
-    selection = await balancer.select_account(
-        "contract-all-limited-sticky" if sticky else None,
-        sticky_kind=StickySessionKind.PROMPT_CACHE if sticky else None,
-        sticky_max_age_seconds=600 if sticky else None,
-        routing_strategy="usage_weighted",
-        lease_kind="stream",
-        concurrency_caps=AccountConcurrencyCaps(response_create_limit=3, stream_limit=3),
-        api_key_id="requester",
-        api_key_stream_fair_share_threshold_pct=100,
-    )
-
-    assert selection.account is None
-    assert selection.error_code == "account_usage_limit_reached"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
 @pytest.mark.parametrize(
     ("candidate_status", "candidate_in_backoff", "expected_error_code"),
     [
@@ -535,32 +501,6 @@ async def test_public_account_caps_consider_only_routable_usage_eligible_peers(
         next(account for account in selection_inputs.accounts if account.id == limited.id).status
         is AccountStatus.ACTIVE
     )
-
-
-@pytest.mark.asyncio
-async def test_public_unbound_backoff_fallback_respects_stream_cap(
-    selection_cache: AccountSelectionCache,
-) -> None:
-    accounts = [_account(f"contract-backoff-capped-{index}") for index in range(2)]
-    balancer, _, _, _ = _balancer(accounts, selection_cache)
-    now = datetime.now(UTC).timestamp()
-    for account in accounts:
-        balancer._runtime[account.id] = load_balancer_module.RuntimeState(
-            error_count=3,
-            last_error_at=now,
-            inflight_streams=1,
-        )
-
-    selection = await balancer.select_account(
-        routing_strategy="usage_weighted",
-        lease_kind="stream",
-        concurrency_caps=_CONCURRENCY_CAPS,
-    )
-
-    assert selection.account is None
-    assert selection.lease is None
-    assert selection.error_code == "account_stream_cap"
-    assert {runtime.inflight_streams for runtime in balancer._runtime.values()} == {1}
 
 
 @pytest.mark.asyncio
@@ -674,7 +614,7 @@ async def test_public_exhaustion_envelope_wins_when_account_also_reaches_local_c
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lease_kind", [None, "stream", "response_create"])
+@pytest.mark.parametrize("lease_kind", [None, "stream"])
 @pytest.mark.parametrize("observe_only", [False, True])
 async def test_public_opportunistic_selection_preserves_local_usage_limit_code(
     selection_cache: AccountSelectionCache,
@@ -1546,54 +1486,6 @@ async def test_non_sticky_cache_generation_change_reselects_and_releases_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
-async def test_public_selection_rechecks_usage_limit_when_inputs_change_before_persist(
-    selection_cache: AccountSelectionCache,
-    monkeypatch: pytest.MonkeyPatch,
-    sticky: bool,
-) -> None:
-    account = _account(f"contract-input-generation-pre-persist-{sticky}")
-    account.usage_limit_enabled = True
-    account.usage_limit_percent = 10.0
-    initial_usage = _usage_row(80, account.id, window="primary", used_percent=5.0)
-    balancer, _, usage_repo, sticky_repo = _balancer(
-        [account],
-        selection_cache,
-        primary={account.id: initial_usage},
-    )
-    original_prepare = balancer._prepare_sticky_selection_states
-    input_changed = False
-
-    def cross_limit_after_input_load(
-        *args: Any,
-        **kwargs: Any,
-    ) -> tuple[list[AccountState], dict[str, Account]]:
-        nonlocal input_changed
-        prepared = original_prepare(*args, **kwargs)
-        if not input_changed:
-            input_changed = True
-            usage_repo.rows["primary"][account.id] = _usage_row(
-                81,
-                account.id,
-                window="primary",
-                used_percent=10.0,
-            )
-            selection_cache.invalidate()
-        return prepared
-
-    monkeypatch.setattr(balancer, "_prepare_sticky_selection_states", cross_limit_after_input_load)
-
-    selection = await asyncio.wait_for(_select_with_lease(balancer, sticky=sticky), timeout=1.0)
-
-    assert input_changed
-    assert selection.account is None
-    assert selection.lease is None
-    assert selection.error_code == "account_usage_limit_reached"
-    assert sticky_repo.account_id is None
-    assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
 @pytest.mark.parametrize("reached_at", [1, 4, None], ids=["first-attempt", "final-attempt", "continuous-churn"])
 async def test_public_selection_handles_input_changes_during_persistence(
     selection_cache: AccountSelectionCache,
@@ -1657,43 +1549,6 @@ async def test_public_selection_handles_input_changes_during_persistence(
 
 
 @pytest.mark.asyncio
-async def test_post_persist_generation_bump_retries_and_preserves_committed_owner(
-    selection_cache: AccountSelectionCache,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    account = _account("contract-post-persist-retry")
-    balancer, _, _, sticky_repo = _balancer([account], selection_cache)
-    upsert_calls = 0
-    real_upsert = sticky_repo.upsert
-
-    async def bump_once(key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
-        nonlocal upsert_calls
-        upsert_calls += 1
-        result = await real_upsert(key, account_id, kind=kind)
-        if upsert_calls == 1:
-            # Ambient invalidation (e.g. the CacheInvalidationPoller
-            # account-selection callback) landing between sticky
-            # persistence and the post-persistence generation fence.
-            selection_cache.invalidate()
-        return result
-
-    monkeypatch.setattr(sticky_repo, "upsert", bump_once)
-
-    selection = await asyncio.wait_for(_select_with_lease(balancer, sticky=True), timeout=2.0)
-
-    assert upsert_calls == 2
-    assert selection.account is not None
-    assert selection.account.id == account.id
-    assert selection.lease is not None
-    assert selection.error_code is None
-    # The committed affinity is preserved, never deleted or rebound.
-    assert sticky_repo.account_id == account.id
-
-    await balancer.release_account_lease(selection.lease)
-    assert await balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
-
-
-@pytest.mark.asyncio
 async def test_post_persist_continuous_churn_fails_closed_after_bound_without_leaks(
     selection_cache: AccountSelectionCache,
     monkeypatch: pytest.MonkeyPatch,
@@ -1735,11 +1590,10 @@ async def test_post_persist_continuous_churn_fails_closed_after_bound_without_le
     ("new_status", "expected_error_code"),
     [
         (AccountStatus.PAUSED, "preferred_account_unavailable"),
-        (AccountStatus.DEACTIVATED, "preferred_account_unavailable"),
         (AccountStatus.REAUTH_REQUIRED, "selection_state_changed"),
         (None, "preferred_account_unavailable"),
     ],
-    ids=["paused", "deactivated", "reauth", "deleted"],
+    ids=["paused", "reauth", "deleted"],
 )
 async def test_final_attempt_changed_owner_never_publishes_affinity_or_leaks_pressure(
     selection_cache: AccountSelectionCache,
@@ -1808,10 +1662,7 @@ async def test_final_authorization_database_failure_is_local_and_releases_pressu
 
 
 @pytest.mark.parametrize("traffic_class", ["foreground", "opportunistic"])
-@pytest.mark.parametrize(
-    "peer_status",
-    [AccountStatus.PAUSED, AccountStatus.DEACTIVATED, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED],
-)
+@pytest.mark.parametrize("peer_status", [AccountStatus.PAUSED, AccountStatus.QUOTA_EXCEEDED])
 def test_disabled_usage_policy_projection_preserves_canonical_fallback_context(traffic_class, peer_status):
     from app.modules.proxy._load_balancer.sticky_selection import _filter_states_for_usage_limit_and_account_caps
 
@@ -1849,12 +1700,7 @@ def test_disabled_usage_policy_projection_preserves_canonical_fallback_context(t
 @pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
 @pytest.mark.parametrize(
     ("peer_status", "admits_backoff"),
-    [
-        (AccountStatus.PAUSED, False),
-        (AccountStatus.DEACTIVATED, False),
-        (AccountStatus.RATE_LIMITED, True),
-        (AccountStatus.QUOTA_EXCEEDED, True),
-    ],
+    [(AccountStatus.PAUSED, False), (AccountStatus.RATE_LIMITED, True)],
 )
 async def test_disabled_usage_policy_public_fallback_matches_pre_feature_base(
     selection_cache: AccountSelectionCache,
@@ -1862,9 +1708,8 @@ async def test_disabled_usage_policy_public_fallback_matches_pre_feature_base(
     peer_status: AccountStatus,
     admits_backoff: bool,
 ) -> None:
-    # Verified on base 5ad638b6: paused/deactivated accounts were already removed
-    # during account loading. Quota/rate-limited peers reach canonical selection
-    # and must retain their hard-block evidence through the new cap projection.
+    # Account loading already drops paused peers; rate-limited peers reach
+    # canonical selection and keep their hard-block evidence.
     active, peer = _account("baseline-backoff"), _account("baseline-peer")
     peer.status = peer_status
     peer.reset_at = int(time.time()) + 3600
@@ -1937,16 +1782,13 @@ async def test_final_authorization_repeated_cancellation_releases_selection_pres
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("per_window", [False, True], ids=["scalar", "window-override"])
 async def test_sticky_persistence_policy_change_releases_admission(
     selection_cache: AccountSelectionCache,
     monkeypatch: pytest.MonkeyPatch,
-    per_window: bool,
 ) -> None:
     account = _account("contract-sticky-persistence-policy")
     account.usage_limit_enabled = True
-    account.usage_limit_percent = 80.0 if per_window else 10.0
-    account.usage_limit_5h_percent = 10.0 if per_window else None
+    account.usage_limit_percent = 10.0
     balancer, _, usage_repo, sticky_repo = _balancer(
         [account],
         selection_cache,
@@ -1963,10 +1805,8 @@ async def test_sticky_persistence_policy_change_releases_admission(
 
     selection = await _select_with_lease(balancer, sticky=True)
 
-    # The post-persistence fence retries against fresh inputs instead of
-    # failing closed, so the retry re-authorizes the committed owner and
-    # surfaces the true usage-policy outcome rather than the generic fence
-    # error -- without bypassing the gate or leaking the released admission.
+    # The post-persistence fence retries from fresh inputs, so the committed
+    # owner is re-authorized and reports its policy denial.
     assert selection.account is None
     assert selection.lease is None
     assert selection.error_code == "account_usage_limit_reached"

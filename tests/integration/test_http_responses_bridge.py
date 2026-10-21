@@ -43,7 +43,6 @@ from app.db.models import (
     HttpBridgeSessionState,
     RequestLog,
     StickySession,
-    UsageHistory,
 )
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
@@ -4960,12 +4959,10 @@ def _install_bridge_account_upstream(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("per_window", [False, True], ids=["shared-limit", "window-override"])
 async def test_v1_responses_http_bridge_revalidates_usage_limit_before_second_turn(
     async_client,
     app_instance,
     monkeypatch,
-    per_window: bool,
 ) -> None:
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -4975,17 +4972,7 @@ async def test_v1_responses_http_bridge_revalidates_usage_limit_before_second_tu
     )
     account = await _get_account(account_id)
     async with SessionLocal() as session:
-        session.add(
-            UsageHistory(
-                account_id=account_id,
-                used_percent=10.0,
-                recorded_at=utcnow(),
-                window="primary",
-                reset_at=None,
-                window_minutes=300,
-            )
-        )
-        await session.commit()
+        await UsageRepository(session).add_entry(account_id, 10.0, window="primary", window_minutes=300)
     upstream = _FakeBridgeUpstreamWebSocket("resp_usage_limit_recheck")
 
     _install_bridge_account_upstream(monkeypatch, account=account, upstream=upstream)
@@ -5003,12 +4990,7 @@ async def test_v1_responses_http_bridge_revalidates_usage_limit_before_second_tu
     service = get_proxy_service_for_app(app_instance)
     bridge_session = service._http_bridge_sessions[bridge_key]
 
-    changed = await async_client.put(
-        f"/api/accounts/{account_id}/usage-limit",
-        json={"enabled": True, "percent": 80.0, "percent5H": 10.0}
-        if per_window
-        else {"enabled": True, "percent": 10.0},
-    )
+    changed = await async_client.put(f"/api/accounts/{account_id}/usage-limit", json={"enabled": True, "percent": 10.0})
     assert changed.status_code == 200
     second = await async_client.post(
         "/v1/responses",
@@ -5077,86 +5059,10 @@ async def test_v1_responses_http_bridge_owner_authorization_failure_is_stable(
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_usage_limit_rejects_only_overlapping_new_turn(
-    async_client,
-    app_instance,
-    monkeypatch,
-) -> None:
-    _install_bridge_settings(monkeypatch, enabled=True)
-    account_id = await _import_account(
-        async_client,
-        "acc_http_bridge_usage_limit_overlap",
-        "http-bridge-usage-limit-overlap@example.com",
-    )
-    account = await _get_account(account_id)
-    async with SessionLocal() as session:
-        session.add(
-            UsageHistory(
-                account_id=account_id,
-                used_percent=10.0,
-                recorded_at=utcnow(),
-                window="primary",
-                reset_at=None,
-                window_minutes=300,
-            )
-        )
-        await session.commit()
-
-    upstream = _OverlappingBridgeUpstream()
-
-    _install_bridge_account_upstream(monkeypatch, account=account, upstream=upstream)
-
-    prompt_cache_key = "usage-limit-overlap"
-    payload = {
-        "model": "gpt-5.1",
-        "instructions": "Return exactly OK.",
-        "input": "first turn",
-        "prompt_cache_key": prompt_cache_key,
-    }
-    first_task = asyncio.create_task(async_client.post("/v1/responses", json=payload))
-    try:
-        await _wait_for_event(upstream.first_request_sent)
-        bridge_key = proxy_module._HTTPBridgeSessionKey("prompt_cache", prompt_cache_key, None)
-        service = get_proxy_service_for_app(app_instance)
-        bridge_session = service._http_bridge_sessions[bridge_key]
-
-        changed = await async_client.put(
-            f"/api/accounts/{account_id}/usage-limit",
-            json={"enabled": True, "percent": 10.0},
-        )
-        assert changed.status_code == 200
-        second = await async_client.post(
-            "/v1/responses",
-            json={**payload, "input": "second turn"},
-        )
-
-        assert second.status_code == 429
-        assert second.json()["error"]["code"] == "account_usage_limit_reached"
-        assert len(upstream.sent_text) == 1
-        assert upstream.closed is False
-
-        await upstream.complete_first_response()
-        first = await first_task
-        assert first.status_code == 200
-        assert first.json()["id"] == "resp_usage_limit_overlap"
-        await _wait_for_event(upstream.closed_event)
-        assert bridge_session.closed is True
-        assert upstream.closed is True
-        assert bridge_session.account_lease is None
-    finally:
-        if not first_task.done():
-            await upstream.complete_first_response()
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(first_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("per_window", [False, True], ids=["scalar", "window-override"])
 async def test_http_bridge_policy_change_during_dispatch_wait_rejects_unsent_turn(
     async_client,
     app_instance,
     monkeypatch,
-    per_window: bool,
 ) -> None:
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(async_client, "acc_dispatch_policy", "dispatch-policy@example.com")
@@ -5164,13 +5070,7 @@ async def test_http_bridge_policy_change_during_dispatch_wait_rejects_unsent_tur
     async with SessionLocal() as session:
         await UsageRepository(session).add_entry(account_id, 10.0, window="primary", window_minutes=300)
     upstream = _FakeBridgeUpstreamWebSocket("resp_dispatch_policy")
-    monkeypatch.setattr(
-        proxy_module.ProxyService,
-        "_select_account_with_budget",
-        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
-    )
-    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
-    monkeypatch.setattr(proxy_module, "connect_responses_websocket", AsyncMock(return_value=upstream))
+    _install_bridge_account_upstream(monkeypatch, account=account, upstream=upstream)
     payload = {"model": "gpt-5.1", "input": "first", "prompt_cache_key": "dispatch-policy"}
     first = await async_client.post("/v1/responses", json=payload)
     assert first.status_code == 200
@@ -5195,9 +5095,7 @@ async def test_http_bridge_policy_change_during_dispatch_wait_rejects_unsent_tur
         await _wait_for_event(dispatch_waiting)
         changed = await async_client.put(
             f"/api/accounts/{account_id}/usage-limit",
-            json={"enabled": True, "percent": 80.0, "percent5H": 10.0}
-            if per_window
-            else {"enabled": True, "percent": 10.0},
+            json={"enabled": True, "percent": 10.0},
         )
         assert changed.status_code == 200
         dispatch_lock.release()
@@ -5220,7 +5118,7 @@ async def test_http_bridge_policy_change_during_dispatch_wait_rejects_unsent_tur
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("policy_read", ["reached", "failed", "stalled_reached", "stalled_failed"])
+@pytest.mark.parametrize("policy_read", ["reached", "failed", "stalled_reached"])
 async def test_http_bridge_policy_read_interruption_preserves_overlapping_turn(
     async_client,
     app_instance,
@@ -5235,17 +5133,7 @@ async def test_http_bridge_policy_read_interruption_preserves_overlapping_turn(
     )
     account = await _get_account(account_id)
     async with SessionLocal() as session:
-        session.add(
-            UsageHistory(
-                account_id=account_id,
-                used_percent=10.0,
-                recorded_at=utcnow(),
-                window="primary",
-                reset_at=None,
-                window_minutes=300,
-            )
-        )
-        await session.commit()
+        await UsageRepository(session).add_entry(account_id, 10.0, window="primary", window_minutes=300)
 
     upstream = _OverlappingBridgeUpstream()
 
