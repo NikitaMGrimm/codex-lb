@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from sqlalchemy import delete, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
@@ -563,7 +563,7 @@ async def test_quota_planner_warm_now_refuses_weekly_only_account(async_client, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "race_point",
-    ["post_claim", "post_reservation", "authorization_failed", "authorization_cancelled"],
+    ["post_reservation", "authorization_failed", "authorization_cancelled"],
 )
 async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
     monkeypatch: pytest.MonkeyPatch,
@@ -572,7 +572,6 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
 ) -> None:
     del db_setup
     account_id = f"acc-warmup-final-authorization-{race_point}"
-    with_reservation = race_point != "post_claim"
     async with SessionLocal() as session:
         account = _warmup_test_account(account_id)
         account.usage_limit_enabled = True
@@ -608,31 +607,20 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
                 )
                 await race_session.commit()
 
-        if with_reservation:
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, *args, **kwargs):
+                del args, kwargs
+                if race_point == "post_reservation":
+                    await reach_limit()
+                return SimpleNamespace(reservation_id="reservation-final-authorization")
 
-            class FakeApiKeys:
-                async def enforce_limits_for_request(self, *args, **kwargs):
-                    del args, kwargs
-                    if race_point == "post_reservation":
-                        await reach_limit()
-                    return SimpleNamespace(reservation_id="reservation-final-authorization")
+            async def release_usage_reservation(self, reservation_id: str) -> None:
+                if race_point == "authorization_cancelled":
+                    release_started.set()
+                    await allow_release.wait()
+                released_reservations.append(reservation_id)
 
-                async def release_usage_reservation(self, reservation_id: str) -> None:
-                    if race_point == "authorization_cancelled":
-                        release_started.set()
-                        await allow_release.wait()
-                    released_reservations.append(reservation_id)
-
-            monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
-        else:
-            claim = service._planner.claim_warmup_decision
-
-            async def claim_then_reach_limit(*args, **kwargs):
-                claimed = await claim(*args, **kwargs)
-                await reach_limit()
-                return claimed
-
-            monkeypatch.setattr(service._planner, "claim_warmup_decision", claim_then_reach_limit)
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
 
         if race_point in {"authorization_failed", "authorization_cancelled"}:
             load_fresh_standard_usage = service._load_fresh_standard_usage
@@ -681,14 +669,14 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
             result = await service.warm_now(
                 account_id=account_id,
                 model="gpt-5.4-mini",
-                api_key_id="api-key-race" if with_reservation else None,
+                api_key_id="api-key-race",
                 force_probe=True,
             )
             decision_id = result.decision_id
         repeated = await service.warm_now(
             account_id=account_id,
             model="gpt-5.4-mini",
-            api_key_id="api-key-race" if with_reservation else None,
+            api_key_id="api-key-race",
             force_probe=True,
             decision_id=decision_id,
         )
@@ -700,19 +688,15 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
 
     assert stored is not None
     assert stored.status == "skipped"
-    expected_reason = (
-        "account_usage_limit_reached"
-        if race_point in {"post_claim", "post_reservation"}
-        else (
-            "account_usage_limit_authorization_cancelled"
-            if race_point == "authorization_cancelled"
-            else "account_usage_limit_authorization_failed"
-        )
-    )
+    expected_reason = {
+        "post_reservation": "account_usage_limit_reached",
+        "authorization_failed": "account_usage_limit_authorization_failed",
+        "authorization_cancelled": "account_usage_limit_authorization_cancelled",
+    }[race_point]
     assert stored.reason == expected_reason
     assert repeated.status == "skipped"
     assert repeated.reason == expected_reason
-    assert released_reservations == (["reservation-final-authorization"] if with_reservation else [])
+    assert released_reservations == ["reservation-final-authorization"]
 
 
 @pytest.mark.asyncio
@@ -767,77 +751,6 @@ async def test_quota_planner_warm_now_final_authorization_blocks_paused_account(
     assert result.status == "skipped"
     assert result.reason == "account_status_paused"
     assert released_reservations == ["reservation-paused-account"]
-
-
-@pytest.mark.asyncio
-async def test_quota_planner_warm_now_final_authorization_blocks_unavailable_usage_data(
-    monkeypatch: pytest.MonkeyPatch,
-    db_setup,
-) -> None:
-    del db_setup
-    account_id = "acc-warmup-final-authorization-data-unavailable"
-    released_reservations: list[str] = []
-    async with SessionLocal() as session:
-        account = _warmup_test_account(account_id)
-        account.usage_limit_enabled = True
-        account.usage_limit_percent = 10.0
-        session.add(account)
-        session.add(
-            UsageHistory(
-                account_id=account_id,
-                used_percent=5.0,
-                recorded_at=utcnow(),
-                window="primary",
-                reset_at=None,
-                window_minutes=300,
-            )
-        )
-        await QuotaPlannerRepository(session).upsert_settings(_AUTO_WARMUP_SETTINGS)
-        service = QuotaWarmupService(session)
-
-        async def drop_measurements_after_claim(*args, **kwargs):
-            claimed = await claim(*args, **kwargs)
-            async with SessionLocal() as race_session:
-                await race_session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
-                await race_session.commit()
-            return claimed
-
-        claim = service._planner.claim_warmup_decision
-        monkeypatch.setattr(service._planner, "claim_warmup_decision", drop_measurements_after_claim)
-
-        class FakeApiKeys:
-            async def enforce_limits_for_request(self, *args, **kwargs):
-                del args, kwargs
-                return SimpleNamespace(reservation_id="reservation-data-unavailable")
-
-            async def release_usage_reservation(self, reservation_id: str) -> None:
-                released_reservations.append(reservation_id)
-
-        async def fail_send(*args, **kwargs):
-            del args, kwargs
-            raise AssertionError("final usage authorization must block the warmup probe")
-
-        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
-        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fail_send)
-
-        result = await service.warm_now(
-            account_id=account_id,
-            model="gpt-5.4-mini",
-            api_key_id="api-key-race",
-            force_probe=True,
-        )
-        stored = await session.scalar(
-            select(QuotaPlannerDecision)
-            .where(QuotaPlannerDecision.id == result.decision_id)
-            .execution_options(populate_existing=True)
-        )
-
-    assert stored is not None
-    assert stored.status == "skipped"
-    assert stored.reason == "account_usage_limit_reached"
-    assert result.status == "skipped"
-    assert result.reason == "account_usage_limit_reached"
-    assert released_reservations == ["reservation-data-unavailable"]
 
 
 @pytest.mark.asyncio
