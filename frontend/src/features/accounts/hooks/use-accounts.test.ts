@@ -398,8 +398,8 @@ describe("useAccounts", () => {
 });
 
 it.each([
-  [true, 80, null, "Account usage limit enabled"],
-  [false, null, 90, "Account usage limit disabled"],
+  [true, 80, null, "Reserve turned on"],
+  [false, null, 90, "Reserve turned off"],
 ])("reports standalone override updates correctly", async (enabled, percent5H, percentWeekly, expected) => {
   const success = vi.spyOn(toast, "success");
   server.use(http.put("/api/accounts/:accountId/usage-limit", () =>

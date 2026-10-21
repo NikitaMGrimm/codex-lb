@@ -294,11 +294,17 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
               data-testid={`donut-legend-${i}`}
             >
               <div className="flex min-w-0 items-center gap-2">
-                <span
-                  aria-hidden
-                  className="h-2.5 w-2.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: item.color }}
-                />
+                {item.hatched ? (
+                  <svg aria-hidden className="h-2.5 w-2.5 shrink-0" viewBox="0 0 10 10">
+                    <circle cx="5" cy="5" r="5" fill={"url(#" + reservePatternId + ")"} />
+                  </svg>
+                ) : (
+                  <span
+                    aria-hidden
+                    className="h-2.5 w-2.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: item.color }}
+                  />
+                )}
                 <span className="truncate font-medium">
                   {item.isEmail && blurred
                     ? <><span className="privacy-blur">{item.label}</span>{item.labelSuffix}</>

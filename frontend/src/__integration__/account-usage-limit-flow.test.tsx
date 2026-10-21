@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
@@ -31,6 +31,8 @@ function installAccountRefetchFailure(account: ReturnType<typeof createAccountSu
   return () => requestCount;
 }
 
+const editor = () => within(screen.getByRole("region", { name: "Account usage limit" }));
+
 function renderAccountsPage() {
   window.history.pushState({}, "", "/accounts");
   renderWithProviders(<App />);
@@ -61,7 +63,7 @@ describe("account usage limit flow", () => {
     await waitFor(() => {
       expect(accountListRequests()).toBeGreaterThanOrEqual(2);
       expect(usageLimitSwitch).toBeChecked();
-      expect(screen.getByText("Usage unavailable · routing blocked")).toBeInTheDocument();
+      expect(editor().getByText("Usage unavailable")).toBeInTheDocument();
       expect(screen.getByText("Forced account-list outage")).toBeInTheDocument();
     });
   });
@@ -79,17 +81,15 @@ describe("account usage limit flow", () => {
     resetMockState([account]);
     const user = renderAccountsPage();
 
-    const input = await screen.findByRole("spinbutton", {
-      name: "Reserve for yourself (%)",
-    });
+    const input = await screen.findByRole("spinbutton", { name: "5-hour" });
     await user.clear(input);
     await user.type(input, "90");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(accountListRequests()).toBeGreaterThanOrEqual(2);
-      expect(screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" })).toHaveValue(90);
-      expect(screen.getByText("Usage unavailable · routing blocked")).toBeInTheDocument();
+      expect(screen.getByRole("spinbutton", { name: "5-hour" })).toHaveValue(90);
+      expect(editor().getByText("Usage unavailable")).toBeInTheDocument();
       expect(screen.getByText("Forced account-list outage")).toBeInTheDocument();
     });
   });
@@ -121,9 +121,8 @@ describe("account usage limit flow", () => {
 
     await waitFor(() => {
       expect(toggle).toHaveAttribute("aria-checked", String(enabled));
-      expect(screen.getByRole("spinbutton", { name: "Reserve for yourself (%)" })).toHaveValue(80);
-      expect(screen.getByRole("spinbutton", { name: "5-hour reserve (%)" })).toHaveValue(60);
-      expect(screen.getByRole("spinbutton", { name: "Weekly reserve (%)" })).toHaveValue(40);
+      expect(screen.getByRole("spinbutton", { name: "5-hour" })).toHaveValue(60);
+      expect(screen.getByRole("spinbutton", { name: "Weekly" })).toHaveValue(40);
     });
   });
 

@@ -68,9 +68,15 @@ Limit warm-up sends **one small real request** (using the configured warm-up mod
 
 ## Reserve quota on individual accounts
 
-On the **Accounts** page, an account can have an optional maximum-used
-percentage. For example, a limit of `10%` reserves roughly 90% of that
-account's standard quota for direct use. Optional **5-hour** and **weekly** overrides replace this default for their window. Blank overrides inherit the default; with no default, only explicitly configured windows are limited. Monthly windows use the default, never the weekly override.
+On the **Accounts** page, **Keep quota for yourself** sets how much of each
+quota window to keep for direct use. There is one row per window the account
+reports (for example **5-hour** and **Weekly**), and each row shows the remaining
+quota and how much of it Codex LB could use with the value you are typing, so a
+reserve that would block the account right away shows as reached before you
+save. A reserve of `90%` stores a maximum-used limit of `10%`. A blank row keeps
+nothing back. Monthly-only accounts get a single **Monthly** row, and accounts
+whose windows are not known yet get a single **All windows** row; monthly
+windows never use the weekly reserve.
 
 The quota bars keep provider remaining visible and mark reserved quota with hatching. At 54% used with an 80% cap, the provider has 46% remaining: 20% is reserved and 26% is usable by Codex LB.
 
@@ -81,8 +87,8 @@ percentage. It also stops selecting the account when current usage data is
 missing or stale (fail-closed) until a fresh observation restores eligibility.
 The account's upstream status is not changed.
 
-You can disable a configured limit without forgetting its percentage, or remove
-it to clear the value. Because upstream usage is observed after requests finish,
+The switch turns a saved reserve off without forgetting it; clear every row and
+save to remove it. Because upstream usage is observed after requests finish,
 delayed reporting and requests already in flight can move actual usage past the
 displayed limit before the gate sees it.
 
