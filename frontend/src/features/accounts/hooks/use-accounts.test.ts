@@ -319,4 +319,3 @@ describe("useAccounts", () => {
     expect(refetchInterval).toBeUndefined();
   });
 });
-
