@@ -196,10 +196,9 @@ function reserveRows(account: AccountSummary, t: (key: string) => string): Row[]
       : []),
   ];
   if (rows.length === 0 || governed.length > 0) {
-    const monthlyOnly = governed.length === 1 && "monthly" in governed[0];
-    const label = monthlyOnly
-      ? "accounts.usageLimit.windows.monthly"
-      : rows.length === 0 ? "accounts.usageLimit.windows.all" : "accounts.usageLimit.windows.other";
+    const label = rows.length > 0
+      ? "accounts.usageLimit.windows.other"
+      : governed.length === 1 && "monthly" in governed[0] ? "accounts.usageLimit.windows.monthly" : "accounts.usageLimit.windows.all";
     rows.push({ field: "percent", label: t(label), remaining: governed.length === 1 ? governed[0].remaining : null });
   }
   return rows;
