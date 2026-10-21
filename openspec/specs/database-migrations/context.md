@@ -75,15 +75,14 @@ Branch A and B each create migration revisions in parallel. After merge, CI dete
 
 ## Usage-limit history convergence
 
-The usage-limit branch and September upstream history converge at
-`20261002_000000_merge_usage_limits_and_main_heads`. Their existing revision
-identifiers and parentage remain intact, so databases that already applied
-either branch can upgrade normally. For example, a database with an enabled
-10% policy and a disabled saved 20% policy keeps both values while applying
-upstream migrations; an upstream-only database gains disabled policy fields.
+The usage-limit revisions and later upstream history converge at
+`20261002_000000_merge_usage_limits_and_main_heads` and
+`20261002_010000_merge_usage_limit_review_heads`. Existing revision identifiers
+and parents stay intact, so databases that already applied any lineage upgrade
+normally. For example, a database with an enabled 10% policy and a disabled
+saved 20% policy keeps both values while applying upstream migrations, and an
+upstream-only database gains disabled policy fields.
 
-The topology guard accepts a parallel branch only when the checkout joins its
-lineage with every upstream head and retains one canonical head. Joining an
-older upstream revision while omitting a later head still fails. Both upgrade
-paths and this incomplete-convergence case are covered by the
-[local review](../../changes/archive/2026-10-02-review-account-usage-limit-boundaries/context.md).
+The topology guard accepts a parallel branch only when the checkout joins it
+with every upstream head and keeps one canonical head; joining an older
+upstream revision while omitting a later head still fails.

@@ -2,44 +2,29 @@
 
 ### Requirement: Quota warmup reauthorizes account usage limits before probe dispatch
 
-Quota warmup planning MUST exclude an already-evaluated account state whose enabled usage-limit state is `reached` or `data_unavailable`. After atomically claiming a planned decision and acquiring any API-key reservation, execution MUST freshly load the account and atomically read its current usage-limit policy plus standard primary, secondary, and monthly observations. It MUST require the fresh account status to remain `active` and MUST apply the canonical standard usage-limit evaluator and shape rules immediately before sending the synthetic probe.
+Quota warmup planning MUST exclude an account whose enabled usage limit is `reached` or `data_unavailable`. After claiming a decision and acquiring any API-key reservation, execution MUST reload the account, its policy, and its standard observations in one read, MUST require the account to remain `active`, and MUST evaluate the usage limit again immediately before sending the probe. A missing account MUST skip with reason `account_not_found`, a non-active account with `account_status_<status>`, and a `reached` or `data_unavailable` policy with `account_usage_limit_reached`. A failed read MUST skip with `account_usage_limit_authorization_failed`, and a cancelled read MUST skip with `account_usage_limit_authorization_cancelled` and then propagate cancellation; neither MAY be recorded as `account_usage_limit_reached`.
 
-A missing fresh account MUST skip with reason `account_not_found`; any fresh non-active account MUST skip with reason `account_status_<status>`; and a `reached` or `data_unavailable` evaluation MUST skip with reason `account_usage_limit_reached`. If the final authorization read fails, execution MUST skip with reason `account_usage_limit_authorization_failed`; if that read is cancelled, it MUST use reason `account_usage_limit_authorization_cancelled` and propagate cancellation after cleanup. Every denial MUST release any API-key reservation, transition the claimed decision from `executing` to `skipped`, and MUST NOT send the probe. Authorization failure or cancellation MUST NOT be persisted as `account_usage_limit_reached`. Disabled and `available` policies MUST preserve normal short-window planning and execution behavior.
+Every denial MUST roll back the authorization transaction, including after a failed statement or a connection invalidated by cancellation, release any API-key reservation, move the decision from `executing` to `skipped`, and send no probe, all before cancellation propagates. SQLite diagnostic listeners MUST NOT reconnect an invalidated connection or block that rollback. Disabled and `available` policies MUST keep normal planning and execution behavior.
 
 #### Scenario: Limit reached after quota warmup planning
 
 - **GIVEN** a quota warmup was planned while the account policy was available
-- **AND** a newer standard observation reaches the enabled maximum before execution
-- **WHEN** the execution gate re-evaluates the account
+- **AND** a newer observation reaches the maximum before execution
+- **WHEN** the execution gate evaluates the account again
 - **THEN** the decision is skipped with reason `account_usage_limit_reached`
-- **AND** no synthetic upstream request is sent
+- **AND** no synthetic request is sent
 
-#### Scenario: Account pauses after quota warmup planning
+#### Scenario: Account pauses after the claim
 
-- **GIVEN** a quota warmup was planned while the account was active
-- **AND** the account becomes paused after the decision claim or API-key reservation
-- **WHEN** the final execution authorization reloads the account
+- **GIVEN** a claimed quota warmup holds an API-key reservation
+- **WHEN** the account becomes paused before final authorization
 - **THEN** the decision is skipped with reason `account_status_paused`
-- **AND** any API-key reservation is released
-- **AND** no synthetic upstream request is sent
+- **AND** the reservation is released and no synthetic request is sent
 
-#### Scenario: Final quota warmup authorization fails
+#### Scenario: Cancellation interrupts the authorization statement
 
-- **GIVEN** a quota warmup decision is claimed and holds an API-key reservation
-- **WHEN** its final standard-usage authorization read fails
-- **THEN** the decision is skipped with reason `account_usage_limit_authorization_failed`
-- **AND** the API-key reservation is released
-- **AND** no synthetic upstream request is sent
-
-
-### Requirement: Authorization cleanup recovers a failed database transaction
-
-Before settling a denied or cancelled claimed warmup, execution MUST roll back the authorization read transaction, including when an actual database statement fails or the driver connection is invalidated by cancellation. It MUST finish reservation release and the `executing` to `skipped` transition before propagating cancellation. SQLite diagnostic listeners MUST NOT reconnect an invalidated connection or prevent this rollback.
-
-#### Scenario: Cancellation interrupts an actual authorization SQL statement
-
-- **GIVEN** a warmup has a committed execution claim and a real API-key usage reservation
-- **WHEN** cancellation interrupts its final authorization SQL operation
-- **THEN** cleanup restores a usable transaction and releases the reservation's reserved capacity
+- **GIVEN** a warmup has a committed execution claim and a real API-key reservation
+- **WHEN** cancellation interrupts its final authorization SQL statement
+- **THEN** cleanup restores a usable transaction and releases the reserved capacity
 - **AND** the decision becomes `skipped` with reason `account_usage_limit_authorization_cancelled`
-- **AND** cancellation propagates and no probe is dispatched
+- **AND** cancellation propagates without a probe being sent

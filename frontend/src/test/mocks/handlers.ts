@@ -706,41 +706,12 @@ function effectiveMockUsageLimit(account: AccountSummary, windowMinutes: number 
   return account.usageLimitPercent ?? null;
 }
 
+// The real evaluation lives in the backend; the mock only keeps reads consistent with the saved policy.
 function refreshMockUsageLimitSnapshot(account: AccountSummary): void {
   account.effectiveLimitPrimary = effectiveMockUsageLimit(account, account.windowMinutesPrimary);
   account.effectiveLimitSecondary = effectiveMockUsageLimit(account, account.windowMinutesSecondary);
   account.effectiveLimitMonthly = effectiveMockUsageLimit(account, account.windowMinutesMonthly);
-  if (!account.usageLimitEnabled) {
-    account.usageLimitState = "disabled";
-    return;
-  }
-
-  const hasMonthly = account.windowMinutesMonthly != null || account.usage?.monthlyRemainingPercent != null;
-  const windows = hasMonthly
-    ? [{ minutes: account.windowMinutesMonthly, remaining: account.usage?.monthlyRemainingPercent,
-      limit: account.effectiveLimitMonthly }]
-    : [
-      { minutes: account.windowMinutesPrimary, remaining: account.usage?.primaryRemainingPercent,
-        limit: account.effectiveLimitPrimary },
-      { minutes: account.windowMinutesSecondary, remaining: account.usage?.secondaryRemainingPercent,
-        limit: account.effectiveLimitSecondary },
-    ];
-  const missingOverrideWindow = !hasMonthly && [
-    { limit: account.usageLimit5HPercent, capacity: account.capacityCreditsPrimary, minutes: 300 },
-    { limit: account.usageLimitWeeklyPercent, capacity: account.capacityCreditsSecondary, minutes: 10_080 },
-  ].some(({ limit, capacity, minutes }) => limit != null && (capacity == null || capacity > 0) &&
-    !windows.some((window) => window.minutes === minutes));
-  const observed = windows.filter(({ minutes, remaining }) => minutes != null || remaining != null);
-  const limited = observed.filter(({ limit }) => limit != null);
-  const missingLimitedMeasurement = limited.some(({ remaining }) =>
-    remaining == null || !Number.isFinite(remaining) || remaining < 0 || remaining > 100);
-  if (observed.length === 0 || missingOverrideWindow || missingLimitedMeasurement) {
-    account.usageLimitState = "data_unavailable";
-  } else if (limited.some(({ remaining, limit }) => remaining != null && limit != null && 100 - remaining >= limit)) {
-    account.usageLimitState = "reached";
-  } else {
-    account.usageLimitState = "available";
-  }
+  account.usageLimitState = account.usageLimitEnabled ? "available" : "disabled";
 }
 
 function findApiKey(keyId: string): ApiKey | undefined {

@@ -1,4 +1,3 @@
-import { UsageQuotaBar, UsageQuotaSummary } from "@/components/usage-quota-bar";
 import { Clock, ExternalLink, Play, RotateCcw, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -7,6 +6,7 @@ import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { useSmoothPercent } from "@/hooks/use-smooth-percent";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
+import { UsageQuotaBar, UsageQuotaSummary } from "@/components/usage-quota-bar";
 import {
   accountSubscriptionCredits,
   formatCreditValue,
