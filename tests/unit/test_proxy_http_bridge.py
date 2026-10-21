@@ -26223,6 +26223,10 @@ async def test_recovery_submit_interruption_after_alias_commit_restores_previous
     )
     session.durable_session_id = "durable-recovery"
     session.durable_owner_epoch = 4
+    lease = proxy_service.AccountLease("lease-recovery", session.account.id, "stream", time.monotonic())
+    session.account_lease = lease
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     service._http_bridge_sessions[key] = session
     alias_owner = {"http_turn_commit_cancel": "durable-predecessor"}
     alias_committed = asyncio.Event()
@@ -26319,6 +26323,7 @@ async def test_recovery_submit_interruption_after_alias_commit_restores_previous
 
     assert alias_owner["http_turn_commit_cancel"] == "durable-predecessor"
     send_text.assert_not_awaited()
+    release_account_lease.assert_any_await(lease)
     if interruption == "policy_read_failed":
         close.assert_not_awaited()
         release_live_session.assert_not_awaited()
