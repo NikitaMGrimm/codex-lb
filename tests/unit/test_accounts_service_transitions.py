@@ -95,25 +95,10 @@ async def test_set_usage_limit_invalidates_local_and_peer_selection_caches(
     monkeypatch.setattr("app.modules.accounts.service.bump_cache_invalidation_local", bump)
     service = AccountsService(repo=repo)
 
-    result = await service.set_usage_limit(
-        _ACCOUNT_ID,
-        enabled=True,
-        percent=10.0,
-        update_percent=True,
-        percent_5h=70.0,
-        update_5h=True,
-    )
+    thresholds = {"percent": 10.0, "percent_5h": 70.0}
+    result = await service.set_usage_limit(_ACCOUNT_ID, enabled=True, thresholds=thresholds)
 
     assert result == configuration
-    repo.update_usage_limit.assert_awaited_once_with(
-        _ACCOUNT_ID,
-        enabled=True,
-        percent=10.0,
-        update_percent=True,
-        percent_5h=70.0,
-        percent_weekly=None,
-        update_5h=True,
-        update_weekly=False,
-    )
+    repo.update_usage_limit.assert_awaited_once_with(_ACCOUNT_ID, enabled=True, thresholds=thresholds)
     cache.invalidate.assert_called_once_with(propagate=False)
     bump.assert_awaited_once_with("account_selection")

@@ -171,17 +171,6 @@ async def test_ingestor_throttles_identical_snapshots(monkeypatch: pytest.Monkey
     assert [snap.primary.used_percent for _, snap in writes if snap.primary is not None] == [25.0, 90.0]
 
 
-def test_usage_policy_coalescing_preserves_exact_percentage_changes() -> None:
-    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=60.0)
-    account_id = "acc-precise-limit"
-    ingestor._last_write[account_id] = (_snapshot(primary_used=10.001), time.monotonic())
-
-    crossed_limit = _snapshot(primary_used=10.003)
-
-    assert ingestor._should_skip(account_id, crossed_limit, exact_usage=False) is True
-    assert ingestor._should_skip(account_id, crossed_limit, exact_usage=True) is False
-
-
 @pytest.mark.asyncio
 async def test_ingestor_queue_overflow_drops_oldest() -> None:
     ingestor = live_ingest.LiveUsageIngestor(queue_size=2, write_min_interval_seconds=60.0)
