@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -133,6 +134,13 @@ class AccountUsageLimitConfiguration:
 
 class InvalidAccountUsageLimitError(ValueError):
     """An enabled policy would have no configured threshold after an update."""
+
+
+_USAGE_LIMIT_COLUMNS = {
+    "percent": "usage_limit_percent",
+    "percent_5h": "usage_limit_5h_percent",
+    "percent_weekly": "usage_limit_weekly_percent",
+}
 
 
 # The account-listing request-usage summary dedupes and re-aggregates the
@@ -1016,58 +1024,48 @@ class AccountsRepository:
         account_id: str,
         *,
         enabled: bool,
-        percent: float | None,
-        update_percent: bool,
-        percent_5h: float | None = None,
-        percent_weekly: float | None = None,
-        update_5h: bool = False,
-        update_weekly: bool = False,
+        thresholds: Mapping[str, float | None],
     ) -> AccountUsageLimitConfiguration | None:
+        """Set the enabled flag and replace only the thresholds present in ``thresholds``."""
+        values = {_USAGE_LIMIT_COLUMNS[name]: value for name, value in thresholds.items()}
         async with sqlite_writer_section():
             statement = (
                 update(Account)
-                .where(Account.id == account_id)
-                .where(Account.delete_requested_at.is_(None))
-                .values(usage_limit_enabled=enabled)
+                .where(Account.id == account_id, Account.delete_requested_at.is_(None))
+                .values(usage_limit_enabled=enabled, **values)
             )
             if enabled:
-                # Evaluate omitted fields against the current row in the same
+                # Evaluate omitted thresholds against the current row in the same
                 # UPDATE so a concurrent writer cannot invalidate a prior read.
-                statement = statement.where(
-                    or_(
-                        (literal(percent, Float()) if update_percent else Account.usage_limit_percent).is_not(None),
-                        (literal(percent_5h, Float()) if update_5h else Account.usage_limit_5h_percent).is_not(None),
-                        (
-                            literal(percent_weekly, Float()) if update_weekly else Account.usage_limit_weekly_percent
-                        ).is_not(None),
+                resulting = (
+                    literal(values[column], Float()) if column in values else getattr(Account, column)
+                    for column in _USAGE_LIMIT_COLUMNS.values()
+                )
+                statement = statement.where(or_(*(threshold.is_not(None) for threshold in resulting)))
+            row = (
+                await self._session.execute(
+                    statement.returning(
+                        Account.usage_limit_enabled,
+                        Account.usage_limit_percent,
+                        Account.usage_limit_5h_percent,
+                        Account.usage_limit_weekly_percent,
                     )
                 )
-            if update_percent:
-                statement = statement.values(usage_limit_percent=percent)
-            if update_5h:
-                statement = statement.values(usage_limit_5h_percent=percent_5h)
-            if update_weekly:
-                statement = statement.values(usage_limit_weekly_percent=percent_weekly)
-            result = await self._session.execute(
-                statement.returning(
-                    Account.usage_limit_enabled,
-                    Account.usage_limit_percent,
-                    Account.usage_limit_5h_percent,
-                    Account.usage_limit_weekly_percent,
-                )
-            )
-            row = result.one_or_none()
-            existing_account_id = None
+            ).one_or_none()
+            account_exists = False
             if row is None and enabled:
-                existing_account_id = await self._session.scalar(
-                    select(Account.id).where(Account.id == account_id).where(Account.delete_requested_at.is_(None))
+                account_exists = (
+                    await self._session.scalar(
+                        select(Account.id).where(Account.id == account_id, Account.delete_requested_at.is_(None))
+                    )
+                    is not None
                 )
             await self._session.commit()
+            if account_exists:
+                raise InvalidAccountUsageLimitError(
+                    "at least one percentage is required when the usage limit is enabled"
+                )
             if row is None:
-                if existing_account_id is not None:
-                    raise InvalidAccountUsageLimitError(
-                        "at least one percentage is required when the usage limit is enabled"
-                    )
                 return None
             return AccountUsageLimitConfiguration(
                 enabled=bool(row.usage_limit_enabled),

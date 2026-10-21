@@ -416,17 +416,13 @@ async def update_account_usage_limit(
     principal: DashboardPrincipal = Depends(require_dashboard_permission(Permission.ACCOUNTS_WRITE)),
     context: AccountsContext = Depends(get_accounts_context),
 ) -> AccountUsageLimitUpdateResponse:
-    percent_was_provided = "percent" in payload.model_fields_set
+    # Omitted thresholds keep their stored values; explicit nulls clear them.
+    thresholds = payload.model_dump(include={"percent", "percent_5h", "percent_weekly"}, exclude_unset=True)
     try:
         configuration = await context.service.set_usage_limit(
             account_id,
             enabled=payload.enabled,
-            percent=payload.percent,
-            update_percent=percent_was_provided,
-            percent_5h=payload.percent_5h,
-            percent_weekly=payload.percent_weekly,
-            update_5h="percent_5h" in payload.model_fields_set,
-            update_weekly="percent_weekly" in payload.model_fields_set,
+            thresholds=thresholds,
         )
     except InvalidAccountUsageLimitError as exc:
         raise DashboardValidationError(str(exc)) from exc
@@ -443,7 +439,7 @@ async def update_account_usage_limit(
             "percent": configuration.percent,
             "percent_5h": configuration.percent_5h,
             "percent_weekly": configuration.percent_weekly,
-            "percent_was_provided": percent_was_provided,
+            "percent_was_provided": "percent" in thresholds,
         },
     )
     return AccountUsageLimitUpdateResponse(

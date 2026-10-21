@@ -770,17 +770,16 @@ class UsageUpdater:
             snapshot_windows,
         )
         usage_written = bool(entries)
-        # Until the post-commit policy read succeeds, conservatively invalidate
-        # the committed observation even if that read is cancelled.
-        usage_limit_enabled = usage_written
+        # The telemetry commit already succeeded: invalidate cached routing
+        # eligibility unless a completed post-commit read shows the policy is
+        # disabled, even if that read or the recovery write fails or is cancelled.
+        invalidate_selection = usage_written
         try:
-            usage_limit_enabled = usage_written and await self._usage_limit_enabled_after_snapshot(account)
+            if usage_written:
+                invalidate_selection = await self._usage_limit_enabled_after_snapshot(account)
             await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
         finally:
-            if usage_limit_enabled:
-                # The telemetry commit already succeeded. A recovery write or
-                # refresh may fail afterwards, but the new limit observation
-                # must still invalidate cached routing eligibility.
+            if invalidate_selection:
                 get_account_selection_cache().invalidate()
         additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
         return AccountRefreshResult(usage_written=usage_written or (standard_data_unavailable and additional_synced))
@@ -791,9 +790,7 @@ class UsageUpdater:
         try:
             current = await self._accounts_repo.get_by_id_fresh(account.id)
         except Exception:
-            # The telemetry commit already succeeded. Conservatively invalidate
-            # when the post-commit policy read fails so cached routing cannot
-            # outlive a concurrent enable.
+            # Fail toward invalidation so cached routing cannot outlive a concurrent enable.
             logger.warning(
                 "Usage refresh could not re-read account policy after snapshot account_id=%s request_id=%s",
                 account.id,

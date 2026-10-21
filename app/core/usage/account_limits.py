@@ -18,7 +18,7 @@ class AccountUsageLimitState(str, Enum):
 
     @property
     def blocks_account_use(self) -> bool:
-        return self is type(self).REACHED or self is type(self).DATA_UNAVAILABLE
+        return self in (AccountUsageLimitState.REACHED, AccountUsageLimitState.DATA_UNAVAILABLE)
 
 
 def evaluate_standard_usage_limit(
@@ -42,18 +42,15 @@ def evaluate_standard_usage_limit(
     if not configured or any(not math.isfinite(value) or not 0.0 < value <= 100.0 for value in configured):
         return AccountUsageLimitState.DATA_UNAVAILABLE
 
-    current_time = now or datetime.now(timezone.utc)
-    if current_time.tzinfo is None:
-        current_time = current_time.replace(tzinfo=timezone.utc)
-    else:
-        current_time = current_time.astimezone(timezone.utc)
-
+    current_time = _as_utc(now) or datetime.now(timezone.utc)
     relevant_rows = _relevant_standard_rows(
         plan_type=plan_type,
         primary=primary,
         secondary=secondary,
         monthly=monthly,
     )
+    # A configured window override needs a current matching sample unless the
+    # plan has no capacity for that window or the account is monthly-only.
     monthly_only = monthly is not None and relevant_rows == (monthly,)
     if not monthly_only:
         for override, window, duration in (
@@ -61,32 +58,32 @@ def evaluate_standard_usage_limit(
             (limit_weekly_percent, "secondary", 10080),
         ):
             capacity = usage_core.capacity_for_plan(plan_type, window)
-            if override is not None and (capacity is None or capacity > 0):
-                if not any(
-                    row.window_minutes == duration and not _window_elapsed(row, current_time) for row in relevant_rows
-                ):
-                    return AccountUsageLimitState.DATA_UNAVAILABLE
+            requires_sample = override is not None and (capacity is None or capacity > 0)
+            if requires_sample and not any(
+                row.window_minutes == duration and not _window_elapsed(row, current_time) for row in relevant_rows
+            ):
+                return AccountUsageLimitState.DATA_UNAVAILABLE
     limited_rows = [
-        (
-            row,
-            effective_usage_limit_percent(
+        (row, cap)
+        for row in relevant_rows
+        if (
+            cap := effective_usage_limit_percent(
                 enabled=enabled,
                 limit_percent=limit_percent,
                 limit_5h_percent=limit_5h_percent,
                 limit_weekly_percent=limit_weekly_percent,
                 window_minutes=row.window_minutes,
-            ),
+            )
         )
-        for row in relevant_rows
+        is not None
     ]
-    limited_rows = [(row, cap) for row, cap in limited_rows if cap is not None]
     if not limited_rows and any(not usage_core.is_no_data_placeholder(row) for row in relevant_rows):
         return AccountUsageLimitState.AVAILABLE
     current_rows = [(row, cap) for row, cap in limited_rows if not _window_elapsed(row, current_time)]
     if not current_rows:
         return AccountUsageLimitState.DATA_UNAVAILABLE
 
-    freshness_seconds = max(int(refresh_interval_seconds) * 2, MINIMUM_USAGE_LIMIT_FRESHNESS_SECONDS)
+    freshness_seconds = max(refresh_interval_seconds * 2, MINIMUM_USAGE_LIMIT_FRESHNESS_SECONDS)
     freshness_cutoff = current_time - timedelta(seconds=freshness_seconds)
     reached = False
     for row, cap in current_rows:
@@ -101,10 +98,7 @@ def evaluate_standard_usage_limit(
         ):
             return AccountUsageLimitState.DATA_UNAVAILABLE
         reached = reached or used_percent >= cap
-
-    if reached:
-        return AccountUsageLimitState.REACHED
-    return AccountUsageLimitState.AVAILABLE
+    return AccountUsageLimitState.REACHED if reached else AccountUsageLimitState.AVAILABLE
 
 
 def effective_usage_limit_percent(
