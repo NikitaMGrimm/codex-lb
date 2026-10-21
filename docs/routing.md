@@ -70,49 +70,38 @@ Limit warm-up sends **one small real request** (using the configured warm-up mod
 
 On the **Accounts** page, **Keep quota for yourself** sets how much of each
 quota window to keep for direct use. There is one row per window the account
-reports (for example **5-hour** and **Weekly**), and each row shows the remaining
+reports (for example **5-hour** and **Weekly**). Each row shows the remaining
 quota and how much of it Codex LB could use with the value you are typing, so a
 reserve that would block the account right away shows as reached before you
-save. A reserve of `90%` stores a maximum-used limit of `10%`. A blank row keeps
-nothing back. Monthly-only accounts get a single **Monthly** row, and accounts
-whose windows are not known yet get a single **All windows** row; monthly
-windows never use the weekly reserve.
+save. A reserve of `90%` stores a maximum-used limit of `10%`, and a blank row
+keeps nothing back. Monthly-only accounts get a single **Monthly** row, accounts
+whose windows are not known yet get a single **All windows** row, and monthly
+windows never use the weekly reserve. The switch turns a saved reserve off
+without forgetting it; clear every row and save to remove it.
 
-The quota bars keep provider remaining visible and mark reserved quota with hatching. At 54% used with an 80% cap, the provider has 46% remaining: 20% is reserved and 26% is usable by Codex LB.
+Quota bars keep provider remaining visible and hatch the reserved part. At 54%
+used with an 80% cap, the provider has 46% remaining: 20% is reserved and 26% is
+usable by Codex LB.
 
-When enabled, the limit is a hard routing gate for every strategy, including
-sticky and single-account routing. Codex LB stops selecting the account once a
-current standard quota window reports usage at or above the configured
-percentage. It also stops selecting the account when current usage data is
-missing or stale (fail-closed) until a fresh observation restores eligibility.
-The account's upstream status is not changed.
+An enabled reserve is a hard routing gate for every strategy, including sticky
+and single-account routing, new turns on existing HTTP and WebSocket
+connections, and public, limit-reset, and quota-planner warmups. Codex LB stops
+using the account once a current standard window reports usage at or above the
+limit, or when current usage data is missing or stale, until a fresh
+observation arrives. A continuation pinned to a blocked account is rejected
+rather than moved to another account. The account's upstream status does not
+change, and work already sent upstream is not cancelled. Because usage is
+reported after requests finish, in-flight work can move usage past the limit
+before the gate sees it.
 
-The switch turns a saved reserve off without forgetting it; clear every row and
-save to remove it. Because upstream usage is observed after requests finish,
-delayed reporting and requests already in flight can move actual usage past the
-displayed limit before the gate sees it.
+An enabled `100%` limit is **not** the same as turning the reserve off: it still
+requires current usage data.
 
-The cap also applies to new turns on existing HTTP/WebSocket connections and to
-public, limit-reset, and quota-planner warmups. A continuation that requires a
-capped owner is rejected rather than silently moved to another account. An
-unavailable or deleted owner is reported separately from a reached cap.
-
-An enabled `100%` limit is **not** the same as disabling the feature: it still
-requires current telemetry and blocks at 100%. Missing telemetry is not treated
-as a real zero-percent measurement in usage history or demand calculations.
-
-After a save, the account list refreshes authoritative data. Older outstanding
-reads cannot revert the acknowledged policy, and overlapping policy edits are
-applied in order. Fresh owner checks read committed configuration directly;
-ordinary selection on another replica may briefly retain cached inputs until
-invalidation or cache expiry. Work already dispatched is not cancelled.
-
-`account_usage_limit_reached` means the local policy blocks the account (because
-the cap is reached or current telemetry is unavailable). A selection denial uses
-HTTP 429 with a `rate_limit_error` type and no upstream reset deadline.
-`account_usage_limit_authorization_failed` means the local authorization read
-could not be completed; retry after the database/service recovers. It is not an
-upstream HTTP response.
+`account_usage_limit_reached` (HTTP 429, type `rate_limit_error`, no reset
+deadline) means the local policy blocks the account.
+`account_usage_limit_authorization_failed` (HTTP 503) means Codex LB could not
+read the policy; retry once the database recovers. Neither is an upstream
+response.
 
 ---
 
