@@ -738,6 +738,16 @@ class UsageUpdater:
             secondary = normalized_windows.secondary
             monthly = normalized_windows.monthly
         standard_data_unavailable = primary is None and secondary is None and monthly is None
+        # No-data placeholders supersede older measurements only for an enabled
+        # policy, so it fails closed. Re-read a policy captured as disabled in
+        # case it was enabled during the fetch; disabled accounts keep earlier rows.
+        write_placeholders = (
+            standard_data_unavailable
+            or any(window is not None and window.used_percent is None for window in (primary, secondary, monthly))
+        ) and (bool(account.usage_limit_enabled) or await self._usage_limit_enabled_now(account))
+        if standard_data_unavailable and not write_placeholders:
+            additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
+            return AccountRefreshResult(usage_written=additional_synced)
         credits_has, credits_unlimited, credits_balance = _credits_snapshot(payload)
         snapshot_windows: list[UsageWindowWrite] = []
 
@@ -752,7 +762,7 @@ class UsageUpdater:
             )
 
         for window, usage_window in (("primary", primary), ("secondary", secondary), ("monthly", monthly)):
-            if usage_window is not None:
+            if usage_window is not None and (usage_window.used_percent is not None or write_placeholders):
                 carries_credits = window != "secondary"
                 snapshot_windows.append(
                     _standard_usage_window_write(
@@ -776,7 +786,7 @@ class UsageUpdater:
         invalidate_selection = usage_written
         try:
             if usage_written:
-                invalidate_selection = await self._usage_limit_enabled_after_snapshot(account)
+                invalidate_selection = await self._usage_limit_enabled_now(account)
             await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
         finally:
             if invalidate_selection:
@@ -784,7 +794,7 @@ class UsageUpdater:
         additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
         return AccountRefreshResult(usage_written=usage_written or (standard_data_unavailable and additional_synced))
 
-    async def _usage_limit_enabled_after_snapshot(self, account: Account) -> bool:
+    async def _usage_limit_enabled_now(self, account: Account) -> bool:
         if self._accounts_repo is None:
             return bool(account.usage_limit_enabled)
         try:
@@ -1222,7 +1232,7 @@ def _unavailable_standard_window_writes(
     # An entirely unavailable snapshot must also replace old weekly data,
     # including weekly-only observations persisted in the primary slot.
     window = "monthly" if usage_core.capacity_for_plan(account.plan_type, "monthly") is not None else "primary"
-    slots = ("primary", "secondary", "monthly") if account.usage_limit_enabled else ("primary", "secondary")
+    slots = ("primary", "secondary", "monthly")
     return [
         UsageWindowWrite(
             window=window,

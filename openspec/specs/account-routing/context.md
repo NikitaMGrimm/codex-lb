@@ -15,7 +15,7 @@ The stored policy is a default maximum-used percentage with optional 5-hour and 
 Decisions and constraints:
 
 - The limit is observation-bound. Delayed observations and work already sent upstream can overshoot it; nothing predicts a request's cost.
-- Missing or stale data blocks an enabled policy, because a reset deadline alone does not prove the window is empty. Unavailable placeholders are current-state evidence but never numeric history.
+- Missing or stale data blocks an enabled policy, because a reset deadline alone does not prove the window is empty. Unavailable placeholders are current-state evidence but never numeric history. They are written only while a policy is enabled (re-read when a poll returns, so an enable during the fetch still fails closed); a disabled account keeps its last measurements, as before this feature.
 - Toggles send only the enabled flag, so a stale tab cannot restore an older percentage. Enabling a policy that another client removed fails instead of restoring cached values.
 - Selection caches stay fast: capped observations invalidate selection immediately, and uncapped ones keep the throttled refresh. Final owner authorization reads committed policy, status, and telemetry in one database snapshot and never trusts the cache. Peer replicas rely on the existing invalidation and TTL fallback.
 - Shared transports authorize each new turn after their last wait, outside the bridge pending-response lock, with a bounded read. A denial affects only the unsent turn; dispatched work keeps its owner and settlement. A failed read returns HTTP 503 and keeps the transport.
