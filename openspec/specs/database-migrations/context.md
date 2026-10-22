@@ -103,3 +103,10 @@ upstream-only database gains disabled policy fields.
 The topology guard accepts a parallel branch only when the checkout joins it
 with every upstream head and keeps one canonical head; joining an older
 upstream revision while omitting a later head still fails.
+
+## VPS refresh convergence
+
+The VPS deployment retains its applied migration files unchanged. The no-op revision
+`20261022_190000_merge_vps_refresh_heads` joins the deployed attribution lineage
+with the refreshed account usage-limit PR. A synthetic deployed-head upgrade
+preserves the schema, saved policies, Pro ratio, and attribution references.
