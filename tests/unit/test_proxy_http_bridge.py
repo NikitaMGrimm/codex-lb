@@ -3118,55 +3118,6 @@ async def test_maybe_prewarm_http_bridge_session_success_path_reads_no_settings_
 
 
 @pytest.mark.asyncio
-async def test_maybe_prewarm_http_bridge_session_times_out_stalled_owner_authorization(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    request_state, session = _make_prewarm_candidate(_PREWARM_CANDIDATE_TEXT)
-    send_text = AsyncMock()
-    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
-    service._http_bridge_sessions[session.key] = session
-    row = DashboardSettings()
-    row.http_responses_session_bridge_codex_prewarm_enabled = True
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: with_dashboard_overrides(_make_app_settings()))
-    monkeypatch.setattr(
-        proxy_service,
-        "get_settings_cache",
-        lambda: SimpleNamespace(get=AsyncMock(return_value=row)),
-    )
-    monkeypatch.setattr(http_bridge_request_submit_module, "_HTTP_BRIDGE_OWNER_AUTHORIZATION_TIMEOUT_SECONDS", 0.01)
-    stalled_read_cancelled = asyncio.Event()
-
-    async def stalled_authorization(_account_id: str) -> OwnerAuthorization:
-        try:
-            await asyncio.Future()
-        finally:
-            stalled_read_cancelled.set()
-        raise AssertionError("stalled authorization returned")
-
-    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", stalled_authorization)
-
-    with dashboard_overrides_bound(row):
-        with pytest.raises(ProxyResponseError) as exc_info:
-            await asyncio.wait_for(
-                service._maybe_prewarm_http_bridge_session(
-                    session,
-                    request_state=request_state,
-                    text_data=request_state.request_text or "{}",
-                ),
-                timeout=1.0,
-            )
-
-    assert exc_info.value.payload["error"]["code"] == "account_usage_limit_authorization_failed"
-    assert stalled_read_cancelled.is_set()
-    assert request_state.prewarm_status == "error"
-    assert session.prewarmed is False
-    assert session.lifecycle_lock.locked() is False
-    assert session.response_create_gate.locked() is False
-    send_text.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_maybe_prewarm_http_bridge_session_reads_no_settings_for_an_ineligible_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -26157,7 +26108,11 @@ async def test_recovery_submit_owner_fence_rejection_retires_before_send() -> No
 
 
 @pytest.mark.asyncio
-async def test_recovery_submit_cancellation_after_alias_commit_restores_previous_owner() -> None:
+@pytest.mark.parametrize("interruption", ["cancel", "policy_denied", "policy_read_failed"])
+async def test_recovery_submit_interruption_after_alias_commit_restores_previous_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
+) -> None:
     scheduler = _RecordingVirtualScheduler(VirtualClock())
     service = proxy_service.ProxyService(cast(Any, nullcontext()), scheduler=scheduler)
     key = _make_account_neutral_replay_session_key("alias-commit-cancel")
@@ -26170,10 +26125,24 @@ async def test_recovery_submit_cancellation_after_alias_commit_restores_previous
     )
     session.durable_session_id = "durable-recovery"
     session.durable_owner_epoch = 4
+    lease = proxy_service.AccountLease("lease-recovery", session.account.id, "stream", time.monotonic())
+    session.account_lease = lease
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
     service._http_bridge_sessions[key] = session
     alias_owner = {"http_turn_commit_cancel": "durable-predecessor"}
     alias_committed = asyncio.Event()
     release_registration = asyncio.Event()
+
+    async def authorize_account_fresh(_self: object, _account_id: str) -> OwnerAuthorization:
+        assert not session.pending_lock.locked()
+        if alias_committed.is_set() and interruption != "cancel":
+            if interruption == "policy_read_failed":
+                return OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
+            return OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.REACHED)
+        return OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)
+
+    monkeypatch.setattr(LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
 
     async def register_recovery_turn_state(**_kwargs: Any) -> DurableBridgeAliasRegistrationReceipt:
         alias_owner["http_turn_commit_cancel"] = "durable-recovery"
@@ -26231,12 +26200,23 @@ async def test_recovery_submit_cancellation_after_alias_commit_restores_previous
     )
     try:
         await asyncio.wait_for(alias_committed.wait(), timeout=1.0)
-        submit.cancel()
-        await asyncio.sleep(0)
-        assert not submit.done()
+        if interruption == "cancel":
+            submit.cancel()
+            await asyncio.sleep(0)
+            assert not submit.done()
         release_registration.set()
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(submit, timeout=1.0)
+        if interruption == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(submit, timeout=1.0)
+        else:
+            with pytest.raises(ProxyResponseError) as exc_info:
+                await asyncio.wait_for(submit, timeout=1.0)
+            expected_code = (
+                "account_usage_limit_reached"
+                if interruption == "policy_denied"
+                else "account_usage_limit_authorization_failed"
+            )
+            assert exc_info.value.payload["error"]["code"] == expected_code
     finally:
         release_registration.set()
         if not submit.done():
@@ -26245,10 +26225,18 @@ async def test_recovery_submit_cancellation_after_alias_commit_restores_previous
 
     assert alias_owner["http_turn_commit_cancel"] == "durable-predecessor"
     send_text.assert_not_awaited()
-    close.assert_awaited_once()
-    release_live_session.assert_awaited_once()
-    assert session.closed is True
+    release_account_lease.assert_any_await(lease)
+    if interruption == "policy_read_failed":
+        close.assert_not_awaited()
+        release_live_session.assert_not_awaited()
+        assert session.closed is False
+    else:
+        close.assert_awaited_once()
+        release_live_session.assert_awaited_once()
+        assert session.closed is True
     assert session.queued_request_count == 0
+    assert session.admission_waiter_count == 0
+    assert session.response_create_gate.locked() is False
     assert session.pending_requests == deque()
     # Registration and its cancellation rollback are both scheduler-owned.
     assert scheduler.task_coroutines.count("_register_http_bridge_recovery_turn_state_locked") == 1
@@ -26302,123 +26290,6 @@ async def test_recovery_alias_rollback_restores_live_predecessor_index() -> None
     assert alias in previous.downstream_turn_state_aliases
     assert previous.downstream_turn_state == alias
     assert service._http_bridge_turn_state_index[alias_key] == previous_key
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("final_authorization", "expected_code", "expected_retirement"),
-    [
-        (
-            OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, AccountUsageLimitState.REACHED),
-            "account_usage_limit_reached",
-            True,
-        ),
-        (
-            OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED),
-            "account_usage_limit_authorization_failed",
-            False,
-        ),
-    ],
-)
-async def test_recovery_final_authorization_failure_rolls_back_alias_before_dispatch(
-    monkeypatch: pytest.MonkeyPatch,
-    final_authorization: OwnerAuthorization,
-    expected_code: str,
-    expected_retirement: bool,
-) -> None:
-    service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    key = _make_account_neutral_replay_session_key("alias-final-authorization")
-    send_text = AsyncMock()
-    close = AsyncMock()
-    session = _make_bridge_session(key=key)
-    session.upstream = cast(
-        UpstreamWebSocket,
-        SimpleNamespace(send_text=send_text, close=close),
-    )
-    lease = proxy_service.AccountLease(
-        "lease-final-authorization",
-        session.account.id,
-        "stream",
-        time.monotonic(),
-    )
-    session.account_lease = lease
-    session.durable_session_id = "durable-final-authorization"
-    session.durable_owner_epoch = 4
-    service._http_bridge_sessions[key] = session
-    receipt = DurableBridgeAliasRegistrationReceipt(
-        status=DurableBridgeAliasRegistration.REGISTERED,
-        session_id="durable-final-authorization",
-        api_key_scope="__anonymous__",
-        alias_kind="turn_state",
-        alias_value="http_turn_final_authorization",
-        instance_id="test-instance",
-        owner_epoch=4,
-        previous_alias_session_id="durable-predecessor",
-        previous_alias_owner_epoch=1,
-        previous_alias_account_id="acc-predecessor",
-        previous_latest_turn_state=None,
-    )
-    register_recovery_turn_state = AsyncMock(return_value=receipt)
-    rollback_registration = AsyncMock(return_value=True)
-    release_live_session = AsyncMock(return_value=None)
-    service._durable_bridge = cast(
-        Any,
-        SimpleNamespace(
-            register_recovery_turn_state=register_recovery_turn_state,
-            rollback_recovery_turn_state_registration=rollback_registration,
-            release_live_session=release_live_session,
-            lookup_retry_circuit=AsyncMock(return_value=None),
-        ),
-    )
-    usage_gate = AsyncMock(
-        side_effect=[
-            OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.AVAILABLE),
-            final_authorization,
-        ]
-    )
-    release_account_lease = AsyncMock()
-    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", usage_gate)
-    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="req-recovery-final-authorization",
-        model="gpt-5.6-sol",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=time.monotonic(),
-        awaiting_response_created=True,
-        event_queue=asyncio.Queue(),
-        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hi"}',
-        transport="http",
-        skip_request_log=True,
-    )
-
-    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
-        await service._submit_http_bridge_request(
-            session,
-            request_state=request_state,
-            text_data=request_state.request_text or "{}",
-            queue_limit=1,
-            recovery_turn_state="http_turn_final_authorization",
-        )
-
-    assert exc_info.value.payload["error"]["code"] == expected_code
-    assert usage_gate.await_count == 2
-    rollback_registration.assert_awaited_once_with(receipt=receipt)
-    send_text.assert_not_awaited()
-    release_account_lease.assert_any_await(lease)
-    if expected_retirement:
-        close.assert_awaited_once()
-        release_live_session.assert_awaited_once()
-    else:
-        close.assert_not_awaited()
-        release_live_session.assert_not_awaited()
-    assert session.closed is expected_retirement
-    assert session.upstream_control.retire_after_drain is expected_retirement
-    if not expected_retirement:
-        assert service._http_bridge_sessions[key] is session
-    assert session.queued_request_count == 0
-    assert session.pending_requests == deque()
 
 
 @pytest.mark.asyncio
@@ -35907,6 +35778,76 @@ async def test_http_bridge_reader_retirement_skips_concurrent_prewarm_waiter(
             prewarm_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await prewarm_task
+
+
+@pytest.mark.asyncio
+async def test_prewarm_policy_change_during_dispatch_wait_rejects_unsent_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="prewarm-policy-dispatch")
+    session.codex_session = True
+    session.prewarm_lock = anyio.Lock()
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-prewarm-policy-dispatch",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"new"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_codex_prewarm_enabled=True),
+    )
+    dispatch_lock = session.lifecycle_lock
+    dispatch_waiting = asyncio.Event()
+
+    class ObservedDispatchLock:
+        async def __aenter__(self):
+            dispatch_waiting.set()
+            await dispatch_lock.acquire()
+
+        async def __aexit__(self, *_args):
+            dispatch_lock.release()
+
+    session.lifecycle_lock = cast(Any, ObservedDispatchLock())
+    await dispatch_lock.acquire()
+    lock_held = True
+    prewarm_task = asyncio.create_task(
+        service._maybe_prewarm_http_bridge_session(
+            session, request_state=request_state, text_data=request_state.request_text or "{}"
+        )
+    )
+    try:
+        await asyncio.wait_for(dispatch_waiting.wait(), timeout=1.0)
+        monkeypatch.setattr(
+            LoadBalancer,
+            "authorize_account_fresh",
+            AsyncMock(return_value=OwnerAuthorization(OwnerAuthorizationKind.USAGE_POLICY_BLOCKED)),
+        )
+        dispatch_lock.release()
+        lock_held = False
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await asyncio.wait_for(prewarm_task, timeout=1.0)
+        assert exc_info.value.payload["error"]["code"] == "account_usage_limit_reached"
+        send_text.assert_not_awaited()
+        assert session.prewarmed is False
+        assert session.pending_requests == deque()
+        assert session.response_create_gate.locked() is False
+    finally:
+        if lock_held:
+            dispatch_lock.release()
+        if not prewarm_task.done():
+            prewarm_task.cancel()
+        await asyncio.gather(prewarm_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -13,14 +13,12 @@ class SelectionInputs(SelectionInputsProtocol):
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_monthly: dict[str, UsageHistory]
-    # Ownership ambiguity is resolved before transient additional-quota,
-    # exclusion, runtime-health, budget, and account-cap filters. Keep that
-    # stronger candidate pool alongside the effective routing pool.
+    # Resolve ownership before transient routing filters; keep that stronger
+    # candidate pool alongside the effective routing pool.
     continuity_owner_candidates: list[Account] | None = None
-    # Sticky-row mutation is authorized by account assignment and security
-    # policy, before model/service-tier eligibility. Keep this separate from
-    # continuity ambiguity: a model-ineligible account can still own the raw
-    # row that this authenticated request is allowed to retire.
+    # Sticky mutation authority precedes model/service-tier eligibility; keep
+    # it separate because a model-ineligible account can still own the raw row
+    # this authenticated request may retire.
     sticky_mutation_authority_account_ids: frozenset[str] | None = None
     standard_latest_primary: dict[str, UsageHistory] = field(default_factory=dict)
     standard_latest_secondary: dict[str, UsageHistory] = field(default_factory=dict)
@@ -33,7 +31,8 @@ class SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
-
+    # C2-3 resilience toggles: resolved once per selection from the dashboard
+    # snapshot passed to ``select_account``; None = inherit the env alias.
     soft_drain_enabled: bool | None = None
 
     @property

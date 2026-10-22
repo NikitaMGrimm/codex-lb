@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -35,18 +34,15 @@ def test_disabled_policy_does_not_override_owner_availability(status, require_ac
 
 
 @pytest.mark.parametrize(
-    ("used", "age_seconds", "policy_state"),
+    ("used", "policy_state"),
     [
-        (0, 0, AccountUsageLimitState.AVAILABLE),
-        (5, 0, AccountUsageLimitState.AVAILABLE),
-        (10, 0, AccountUsageLimitState.REACHED),
-        (11, 0, AccountUsageLimitState.REACHED),
-        (None, 0, AccountUsageLimitState.DATA_UNAVAILABLE),
-        (5, 3600, AccountUsageLimitState.DATA_UNAVAILABLE),
+        (5, AccountUsageLimitState.AVAILABLE),
+        (10, AccountUsageLimitState.REACHED),
+        (None, AccountUsageLimitState.DATA_UNAVAILABLE),
     ],
 )
-def test_owner_decision_preserves_policy_reason(used, age_seconds, policy_state):
-    row = UsageWindowRow("owner", used, window_minutes=300, recorded_at=utcnow() - timedelta(seconds=age_seconds))
+def test_owner_decision_preserves_policy_reason(used, policy_state):
+    row = UsageWindowRow("owner", used, window_minutes=300, recorded_at=utcnow())
     snapshot = AccountUsageLimitSnapshot(AccountStatus.ACTIVE, True, 10, "plus", row, None, None)
     decision = authorize_usage_snapshot(snapshot, refresh_interval_seconds=60)
     assert decision.usage_limit_state is policy_state

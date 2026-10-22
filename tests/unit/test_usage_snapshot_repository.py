@@ -90,7 +90,8 @@ async def test_account_usage_limit_snapshot_is_one_account_scoped_statement(
 ) -> None:
     async with session_factory() as session:
         account = _account("acc_usage_limit")
-        account.usage_limit_enabled = True
+        # A disabled policy still loads windows: warmups gate on them.
+        account.usage_limit_enabled = False
         account.usage_limit_percent = 42.0
         older = datetime(2026, 7, 22, 11, 0, tzinfo=timezone.utc)
         newer = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
@@ -136,40 +137,13 @@ async def test_account_usage_limit_snapshot_is_one_account_scoped_statement(
 
         assert statement_count == 1
         assert snapshot is not None
-        assert snapshot.enabled is True
+        assert snapshot.enabled is False
         assert snapshot.limit_percent == 42.0
         assert snapshot.primary is not None
         assert snapshot.primary.used_percent == 20.0
         assert snapshot.secondary is not None
         assert snapshot.secondary.used_percent == 30.0
         assert snapshot.monthly is None
-
-
-@pytest.mark.asyncio
-async def test_account_usage_limit_snapshot_keeps_windows_for_disabled_policy(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with session_factory() as session:
-        account = _account("acc_usage_limit_disabled")
-        account.usage_limit_enabled = False
-        session.add(account)
-        session.add(
-            UsageHistory(
-                account_id=account.id,
-                used_percent=20.0,
-                window="primary",
-                window_minutes=10080,
-                recorded_at=datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc),
-            )
-        )
-        await session.commit()
-
-        snapshot = await UsageRepository(session).account_usage_limit_snapshot(account.id)
-
-        assert snapshot is not None
-        assert snapshot.enabled is False
-        assert snapshot.primary is not None
-        assert snapshot.primary.window_minutes == 10080
 
 
 @pytest.mark.asyncio

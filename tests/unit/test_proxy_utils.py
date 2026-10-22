@@ -4224,126 +4224,76 @@ async def test_opportunistic_admission_uses_api_key_enforced_model():
 
 
 @pytest.mark.asyncio
-async def test_opportunistic_admission_preserves_local_account_usage_limit_denial():
-    api_key = ApiKeyData(
-        id="key_opportunistic_usage_limit",
-        name="opportunistic usage limit",
-        key_prefix="sk-opportunistic",
-        allowed_models=None,
-        enforced_model=None,
-        enforced_reasoning_effort=None,
-        enforced_service_tier=None,
-        traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
-        expires_at=None,
-        is_active=True,
-        created_at=utcnow(),
-        last_used_at=None,
-    )
-    selection = AccountSelection(
-        account=None,
-        error_message="Account usage limit reached; reserved quota is unavailable",
-        error_code="account_usage_limit_reached",
-    )
-    service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
-    context = SimpleNamespace(service=service)
-    request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
-
-    response = await proxy_api._opportunistic_admission_denial(
-        request,
-        cast(proxy_api.ProxyContext, context),
-        api_key,
-        model="gpt-5.1",
-    )
-
-    assert response is not None
-    assert response.status_code == 429
-    body = json.loads(bytes(response.body))
-    assert body["error"]["code"] == "account_usage_limit_reached"
-    assert body["error"]["type"] == "rate_limit_error"
-    assert body["error"]["message"] == "Account usage limit reached; reserved quota is unavailable"
-    assert "resets_at" not in body["error"]
-    assert "Retry-After" not in response.headers
-
-
-@pytest.mark.asyncio
-async def test_opportunistic_admission_keeps_setup_failures_on_burn_window_contract():
+@pytest.mark.parametrize(
+    ("selection", "expected_error", "retry_after"),
+    [
+        (
+            AccountSelection(
+                account=None,
+                error_message="Account usage limit reached; reserved quota is unavailable",
+                error_code="account_usage_limit_reached",
+            ),
+            {
+                "code": "account_usage_limit_reached",
+                "message": "Account usage limit reached; reserved quota is unavailable",
+                "type": "rate_limit_error",
+            },
+            None,
+        ),
+        (
+            AccountSelection(
+                account=None,
+                error_message="Rate limit exceeded. Try again in 1h",
+                error_code="usage_limit_reached",
+                resets_at=1_700_003_600,
+            ),
+            {
+                "code": "usage_limit_reached",
+                "message": "Rate limit exceeded. Try again in 1h",
+                "resets_at": 1_700_003_600,
+                "type": "usage_limit_reached",
+            },
+            None,
+        ),
+        (
+            AccountSelection(
+                account=None,
+                error_message="No account plan supports model gpt-5.4",
+                error_code="no_plan_support_for_model",
+            ),
+            {
+                "code": "rate_limit_exceeded",
+                "message": "opportunistic burn window closed: No account plan supports model gpt-5.4",
+                "type": "rate_limit_error",
+            },
+            str(proxy_api._OPPORTUNISTIC_RETRY_AFTER_SECONDS),
+        ),
+    ],
+    ids=["local-usage-limit", "upstream-usage-limit", "setup-failure"],
+)
+async def test_opportunistic_admission_denial_preserves_error_contract(selection, expected_error, retry_after):
     api_key = cast(
         ApiKeyData,
         SimpleNamespace(
-            id="key_opportunistic_setup_failure",
+            id="key_opportunistic_denial",
             traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
             enforced_model=None,
         ),
     )
-    selection = AccountSelection(
-        account=None,
-        error_message="No account plan supports model gpt-5.4",
-        error_code="no_plan_support_for_model",
-    )
     service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
-    context = SimpleNamespace(service=service)
     request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
 
     response = await proxy_api._opportunistic_admission_denial(
         request,
-        cast(proxy_api.ProxyContext, context),
+        cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
         api_key,
         model="gpt-5.4",
     )
 
     assert response is not None
     assert response.status_code == 429
-    assert json.loads(bytes(response.body))["error"] == {
-        "code": "rate_limit_exceeded",
-        "message": "opportunistic burn window closed: No account plan supports model gpt-5.4",
-        "type": "rate_limit_error",
-    }
-    assert response.headers["Retry-After"] == str(proxy_api._OPPORTUNISTIC_RETRY_AFTER_SECONDS)
-
-
-@pytest.mark.asyncio
-async def test_opportunistic_admission_preserves_upstream_usage_limit_denial():
-    api_key = ApiKeyData(
-        id="key_opportunistic_upstream_usage_limit",
-        name="opportunistic upstream usage limit",
-        key_prefix="«redacted:sk-…»",
-        allowed_models=None,
-        enforced_model=None,
-        enforced_reasoning_effort=None,
-        enforced_service_tier=None,
-        traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
-        expires_at=None,
-        is_active=True,
-        created_at=utcnow(),
-        last_used_at=None,
-    )
-    selection = AccountSelection(
-        account=None,
-        error_message="Rate limit exceeded. Try again in 1h",
-        error_code="usage_limit_reached",
-        resets_at=1_700_003_600,
-    )
-    service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
-    context = SimpleNamespace(service=service)
-    request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
-
-    response = await proxy_api._opportunistic_admission_denial(
-        request,
-        cast(proxy_api.ProxyContext, context),
-        api_key,
-        model="gpt-5.1",
-    )
-
-    assert response is not None
-    assert response.status_code == 429
-    body = json.loads(bytes(response.body))
-    assert body["error"] == {
-        "code": "usage_limit_reached",
-        "message": "Rate limit exceeded. Try again in 1h",
-        "resets_at": 1_700_003_600,
-        "type": "usage_limit_reached",
-    }
-    assert "Retry-After" not in response.headers
+    assert json.loads(bytes(response.body))["error"] == expected_error
+    assert response.headers.get("Retry-After") == retry_after
 
 
 @pytest.mark.asyncio
@@ -4438,47 +4388,25 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch, po
         limited.usage_limit_percent = 10.0
         accounts.append(limited)
     now = utcnow()
-    latest_primary: dict[str, UsageHistory | AdditionalUsageHistory] = {
-        account.id: UsageHistory(
-            id=1,
-            account_id=account.id,
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    def usage(row_id: int, account_id: str, window: str) -> UsageHistory:
+        return UsageHistory(
+            id=row_id,
+            account_id=account_id,
             recorded_at=now,
-            window="primary",
+            window=window,
             used_percent=10.0,
-            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 3600,
-            window_minutes=300,
+            reset_at=now_epoch + (3600 if window == "primary" else 86400),
+            window_minutes=300 if window == "primary" else 10080,
         )
+
+    latest_primary: dict[str, UsageHistory | AdditionalUsageHistory] = {
+        item.id: usage(2 * index + 1, item.id, "primary") for index, item in enumerate(accounts)
     }
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory] = {
-        account.id: UsageHistory(
-            id=2,
-            account_id=account.id,
-            recorded_at=now,
-            window="secondary",
-            used_percent=10.0,
-            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 86400,
-            window_minutes=10080,
-        )
+        item.id: usage(2 * index + 2, item.id, "secondary") for index, item in enumerate(accounts)
     }
-    if policy_blocked_peer:
-        latest_primary[limited.id] = UsageHistory(
-            id=3,
-            account_id=limited.id,
-            recorded_at=now,
-            window="primary",
-            used_percent=10.0,
-            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 3600,
-            window_minutes=300,
-        )
-        latest_secondary[limited.id] = UsageHistory(
-            id=4,
-            account_id=limited.id,
-            recorded_at=now,
-            window="secondary",
-            used_percent=10.0,
-            reset_at=int(now.replace(tzinfo=timezone.utc).timestamp()) + 86400,
-            window_minutes=10080,
-        )
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_settings_cache",
@@ -38840,7 +38768,7 @@ async def test_proxy_responses_websocket_releases_reservation_on_local_account_c
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=reservation,
-        started_at=10.0,
+        started_at=time.monotonic(),
         request_text=request_text,
         awaiting_response_created=True,
         affinity_policy=affinity,
@@ -50924,7 +50852,7 @@ async def test_http_bridge_session_events_keepalive_backstop_uses_replay_downstr
 @pytest.mark.asyncio
 async def test_http_bridge_prewarm_times_out_on_silent_upstream(monkeypatch):
     request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    service = proxy_service.ProxyService(_repo_factory(request_logs, accounts=[_make_account("acc_prewarm_timeout")]))
     settings = _make_proxy_settings()
     settings.http_responses_session_bridge_codex_prewarm_enabled = True
 
@@ -53039,21 +52967,19 @@ def test_maybe_dump_oversized_response_create_dedups_via_product_path(monkeypatc
     assert len(list(dump_dir.glob("*.meta.json"))) == 1
 
 
-@pytest.mark.asyncio
-async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
-    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
-    # This test owns network/operation behavior, not lease reacquisition. Mock
-    # the explicit authorization boundary without adding a partial balancer.
+def _allow_http_bridge_owner(monkeypatch: pytest.MonkeyPatch, service: proxy_service.ProxyService) -> None:
+    # These tests own network/operation behavior, not owner authorization.
     monkeypatch.setattr(
         service,
         "_fresh_http_bridge_owner_authorization",
-        AsyncMock(
-            return_value=OwnerAuthorization(
-                OwnerAuthorizationKind.ALLOWED,
-                AccountUsageLimitState.DISABLED,
-            )
-        ),
+        AsyncMock(return_value=OwnerAuthorization(OwnerAuthorizationKind.ALLOWED, AccountUsageLimitState.DISABLED)),
     )
+
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    _allow_http_bridge_owner(monkeypatch, service)
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     original_text = json.dumps(
@@ -53143,18 +53069,7 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
 @pytest.mark.asyncio
 async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replayed(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
-    # This test owns network/operation behavior, not lease reacquisition. Mock
-    # the explicit authorization boundary without adding a partial balancer.
-    monkeypatch.setattr(
-        service,
-        "_fresh_http_bridge_owner_authorization",
-        AsyncMock(
-            return_value=OwnerAuthorization(
-                OwnerAuthorizationKind.ALLOWED,
-                AccountUsageLimitState.DISABLED,
-            )
-        ),
-    )
+    _allow_http_bridge_owner(monkeypatch, service)
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     request_state = proxy_service._WebSocketRequestState(
@@ -53230,18 +53145,7 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
 @pytest.mark.asyncio
 async def test_submit_http_bridge_marks_ambiguous_operation_before_releasing_owner(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
-    # This test owns network/operation behavior, not lease reacquisition. Mock
-    # the explicit authorization boundary without adding a partial balancer.
-    monkeypatch.setattr(
-        service,
-        "_fresh_http_bridge_owner_authorization",
-        AsyncMock(
-            return_value=OwnerAuthorization(
-                OwnerAuthorizationKind.ALLOWED,
-                AccountUsageLimitState.DISABLED,
-            )
-        ),
-    )
+    _allow_http_bridge_owner(monkeypatch, service)
     events: list[str] = []
     service._durable_bridge = SimpleNamespace(
         mark_operation_unknown=AsyncMock(side_effect=lambda **_kwargs: events.append("mark") or True),
@@ -53310,18 +53214,7 @@ async def test_submit_http_bridge_marks_ambiguous_operation_before_releasing_own
 @pytest.mark.asyncio
 async def test_submit_http_bridge_preflight_failure_keeps_operation_pre_dispatch(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
-    # This test owns network/operation behavior, not lease reacquisition. Mock
-    # the explicit authorization boundary without adding a partial balancer.
-    monkeypatch.setattr(
-        service,
-        "_fresh_http_bridge_owner_authorization",
-        AsyncMock(
-            return_value=OwnerAuthorization(
-                OwnerAuthorizationKind.ALLOWED,
-                AccountUsageLimitState.DISABLED,
-            )
-        ),
-    )
+    _allow_http_bridge_owner(monkeypatch, service)
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     request_state = proxy_service._WebSocketRequestState(

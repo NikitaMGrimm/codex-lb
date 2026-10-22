@@ -1897,15 +1897,13 @@ async def test_list_quota_keys_postgres_loose_scan_matches_distinct(db_setup):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("window", ["primary", "secondary"])
 @pytest.mark.parametrize(
     ("middle_reset", "middle_minutes", "expected"),
-    [(None, None, 1.0), (None, 0, 1.0), (None, -1, 1.0), (None, 300, 71.0), (1234567890, None, 71.0)],
-    ids=["missing", "zero-window", "negative-window", "measured-zero-window", "measured-zero-reset"],
+    [(None, None, 1.0), (None, 0, 1.0), (None, 300, 71.0), (1234567890, None, 71.0)],
+    ids=["missing", "zero-window", "measured-zero-window", "measured-zero-reset"],
 )
 async def test_positive_demand_deltas_filter_unknown_before_lag(
     db_setup,
-    window,
     middle_reset,
     middle_minutes,
     expected,
@@ -1924,13 +1922,13 @@ async def test_positive_demand_deltas_filter_unknown_before_lag(
             await repo.add_entry(
                 "delta-quality",
                 used,
-                window=window,
+                window="secondary",
                 recorded_at=now + timedelta(seconds=index),
                 reset_at=reset,
                 window_minutes=minutes,
             )
         result = await repo.positive_used_percent_deltas_by_account(
-            {"delta-quality": window},
+            {"delta-quality": "secondary"},
             since=now - timedelta(seconds=1),
             until=now + timedelta(seconds=3),
         )

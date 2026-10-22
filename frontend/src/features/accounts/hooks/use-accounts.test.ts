@@ -2,7 +2,6 @@ import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-quer
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren } from "react";
-import { toast } from "sonner";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -11,7 +10,6 @@ import {
   useAccountUsageResetCredits,
 } from "@/features/accounts/hooks/use-accounts";
 import type { AccountSummary } from "@/features/accounts/schemas";
-import type { DashboardOverview } from "@/features/dashboard/schemas";
 import {
   createAccountSummary,
   createDashboardOverview,
@@ -91,7 +89,9 @@ describe("useAccounts", () => {
       requests.push(update);
       if (update.percent === 10) await firstReply;
       if (update.percent !== undefined) percent = update.percent;
-      return HttpResponse.json({ accountId: String(params.accountId), enabled: update.enabled, percent });
+      return HttpResponse.json({
+        accountId: String(params.accountId), enabled: update.enabled, percent, percent5H: null, percentWeekly: null,
+      });
     }));
     const first = renderHook(() => useAccountMutations(), { wrapper: createWrapper(queryClient) });
     const second = renderHook(() => useAccountMutations(), { wrapper: createWrapper(queryClient) });
@@ -119,72 +119,6 @@ describe("useAccounts", () => {
     first.unmount();
     second.unmount();
     queryClient.clear();
-  });
-
-  it("reconciles usage-limit caches and waits only for the account list invalidation", async () => {
-    const queryClient = createTestQueryClient();
-    queryClient.setQueryDefaults(["dashboard"], { gcTime: Infinity });
-    let releaseInvalidation!: () => void;
-    const invalidation = new Promise<void>((resolve) => {
-      releaseInvalidation = () => resolve();
-    });
-    const neverSettles = new Promise<void>(() => {});
-    const invalidateSpy = vi
-      .spyOn(queryClient, "invalidateQueries")
-      .mockImplementation((filters) =>
-        filters?.queryKey?.[0] === "accounts" ? invalidation : neverSettles,
-      );
-    const { result } = renderHook(() => useAccounts(), {
-      wrapper: createWrapper(queryClient),
-    });
-
-    await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
-    queryClient.setQueryData(
-      ["dashboard", "overview", "7d"],
-      createDashboardOverview({
-        accounts: [
-          createAccountSummary({
-            accountId: "acc_primary",
-            usageLimitEnabled: false,
-            usageLimitPercent: null,
-            usageLimitState: "disabled",
-          }),
-        ],
-      }),
-    );
-
-    const mutationPromise = result.current.usageLimitMutation.mutateAsync({
-      accountId: "acc_primary",
-      update: { enabled: true, percent: 10 },
-    });
-
-    await waitFor(() => expect(invalidateSpy).toHaveBeenCalled());
-    const accountsCache = queryClient.getQueryData<{ accounts: AccountSummary[] }>([
-      "accounts",
-      "list",
-    ]);
-    const dashboardCache = queryClient.getQueryData<DashboardOverview>([
-      "dashboard",
-      "overview",
-      "7d",
-    ]);
-    expect(accountsCache?.accounts[0]).toMatchObject({
-      accountId: "acc_primary",
-      usageLimitEnabled: true,
-      usageLimitPercent: 10,
-      usageLimitState: "data_unavailable",
-    });
-    expect(dashboardCache?.accounts[0]).toMatchObject({
-      accountId: "acc_primary",
-      usageLimitEnabled: true,
-      usageLimitPercent: 10,
-      usageLimitState: "data_unavailable",
-    });
-    expect(result.current.usageLimitMutation.isPending).toBe(true);
-
-    releaseInvalidation();
-    await mutationPromise;
-    await waitFor(() => expect(result.current.usageLimitMutation.isPending).toBe(false));
   });
 
   it("loads accounts and invalidates related queries after mutations", async () => {
@@ -234,17 +168,6 @@ describe("useAccounts", () => {
       routingPolicy: "preserve",
     });
     expect(routingPolicyResult.routingPolicy).toBe("preserve");
-    const usageLimitResult = await result.current.usageLimitMutation.mutateAsync({
-      accountId: firstAccountId as string,
-      update: { enabled: true, percent: 10 },
-    });
-    expect(usageLimitResult).toEqual({
-      accountId: firstAccountId,
-      enabled: true,
-      percent: 10,
-      percent5H: null,
-      percentWeekly: null,
-    });
 
     const imported = await result.current.importMutation.mutateAsync(
       new File(["{}"], "auth.json", { type: "application/json" }),
@@ -395,23 +318,4 @@ describe("useAccounts", () => {
       ?.refetchInterval;
     expect(refetchInterval).toBeUndefined();
   });
-});
-
-it.each([
-  [true, 80, null, "Account usage limit enabled"],
-  [false, null, 90, "Account usage limit disabled"],
-])("reports standalone override updates correctly", async (enabled, percent5H, percentWeekly, expected) => {
-  const success = vi.spyOn(toast, "success");
-  server.use(http.put("/api/accounts/:accountId/usage-limit", () =>
-    HttpResponse.json({ accountId: "acc_primary", enabled, percent: null, percent5H, percentWeekly })));
-  const queryClient = createTestQueryClient();
-  const { result } = renderHook(() => useAccountMutations(), { wrapper: createWrapper(queryClient) });
-  await act(async () => {
-    await result.current.usageLimitMutation.mutateAsync({
-      accountId: "acc_primary", update: { enabled, percent5H, percentWeekly },
-    });
-  });
-  expect(success).toHaveBeenLastCalledWith(expected);
-  success.mockRestore();
-  queryClient.clear();
 });

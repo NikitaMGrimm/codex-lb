@@ -919,43 +919,13 @@ def _make_account(account_id: str, chatgpt_account_id: str, email: str = "a@exam
 
 
 @pytest.mark.asyncio
-async def test_snapshot_crossing_enabled_usage_limit_invalidates_selection_cache(
+@pytest.mark.parametrize("usage_limit_enabled", [True, False])
+async def test_committed_snapshot_invalidates_selection_cache_only_for_enabled_usage_limit(
     monkeypatch: pytest.MonkeyPatch,
+    usage_limit_enabled: bool,
 ) -> None:
     account = _make_account("acc_limit_cache_bump", "workspace_limit_cache_bump")
-    account.usage_limit_enabled = True
-    account.usage_limit_percent = 50.0
-    repo = StubUsageRepository(return_rows=True)
-    updater = UsageUpdater(repo)
-    invalidations: list[bool] = []
-    monkeypatch.setattr(
-        get_account_selection_cache(),
-        "invalidate",
-        lambda *args, **kwargs: invalidations.append(True),
-    )
-
-    async def _fetch_usage(**kwargs: object) -> UsagePayload:
-        return UsagePayload(
-            plan_type="plus",
-            rate_limit=RateLimitPayload(
-                primary_window=UsageWindow(
-                    used_percent=80.0, reset_at=int(time.time()) + 3600, limit_window_seconds=300
-                )
-            ),
-        )
-
-    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
-
-    result = await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
-
-    assert result.usage_written is True
-    assert invalidations == [True]
-
-
-@pytest.mark.asyncio
-async def test_snapshot_below_enabled_usage_limit_invalidates_selection_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    account = _make_account("acc_limit_cache_keep", "workspace_limit_cache_keep")
-    account.usage_limit_enabled = True
+    account.usage_limit_enabled = usage_limit_enabled
     account.usage_limit_percent = 50.0
     repo = StubUsageRepository(return_rows=True)
     updater = UsageUpdater(repo)
@@ -981,12 +951,14 @@ async def test_snapshot_below_enabled_usage_limit_invalidates_selection_cache(mo
     result = await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
 
     assert result.usage_written is True
-    assert invalidations == [True]
+    assert invalidations == ([True] if usage_limit_enabled else [])
 
 
 @pytest.mark.asyncio
-async def test_committed_limit_snapshot_invalidates_when_status_recovery_fails(
+@pytest.mark.parametrize("interruption", ["recovery_error", "policy_cancel"])
+async def test_committed_limit_snapshot_invalidates_when_post_commit_work_is_interrupted(
     monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
 ) -> None:
     account = _make_account("acc_limit_recovery_failure", "workspace_limit_recovery_failure")
     account.usage_limit_enabled = True
@@ -999,11 +971,18 @@ async def test_committed_limit_snapshot_invalidates_when_status_recovery_fails(
         "invalidate",
         lambda *args, **kwargs: invalidations.append(True),
     )
-    monkeypatch.setattr(
-        updater,
-        "_recover_quota_status_from_usage",
-        AsyncMock(side_effect=RuntimeError("status recovery failed")),
-    )
+    if interruption == "recovery_error":
+        monkeypatch.setattr(
+            updater,
+            "_recover_quota_status_from_usage",
+            AsyncMock(side_effect=RuntimeError("status recovery failed")),
+        )
+    else:
+        monkeypatch.setattr(
+            updater,
+            "_usage_limit_enabled_now",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        )
 
     async def _fetch_usage(**kwargs: object) -> UsagePayload:
         del kwargs
@@ -1020,7 +999,8 @@ async def test_committed_limit_snapshot_invalidates_when_status_recovery_fails(
 
     monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
 
-    with pytest.raises(RuntimeError, match="status recovery failed"):
+    expected_error = RuntimeError if interruption == "recovery_error" else asyncio.CancelledError
+    with pytest.raises(expected_error):
         await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
 
     assert repo.snapshot_calls
@@ -1089,7 +1069,7 @@ async def test_enable_during_refresh_persists_authoritative_observation_and_rein
     assert result.usage_written is True
     assert invalidations == ["invalidated", "invalidated"]
     written = usage_repo.snapshot_calls[-1].windows
-    assert len(written) == (2 if observation == "absent-window" else 1)
+    assert len(written) == (3 if observation == "absent-window" else 1)
     assert written[0].window == "primary"
     if observation == "measured":
         assert written[0].used_percent == pytest.approx(80.0)
@@ -1135,65 +1115,6 @@ async def test_present_window_without_used_percent_persists_no_data_placeholder(
             window_minutes=None,
         ),
     )
-
-
-@pytest.mark.asyncio
-async def test_null_usage_window_is_authoritative_even_when_captured_limit_is_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    account = _make_account("acc_no_limit_no_data", "workspace_no_limit_no_data")
-    repo = StubUsageRepository(return_rows=True)
-    updater = UsageUpdater(repo)
-
-    async def _fetch_usage(**kwargs: object) -> UsagePayload:
-        del kwargs
-        return UsagePayload(
-            plan_type="plus",
-            rate_limit=RateLimitPayload(
-                primary_window=UsageWindow(
-                    used_percent=None,
-                    reset_at=int(time.time()) + 3600,
-                    limit_window_seconds=300,
-                )
-            ),
-        )
-
-    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
-
-    result = await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
-
-    assert result.usage_written is True
-    assert repo.snapshot_calls[0].windows == (UsageWindowWrite(window="primary", used_percent=0.0),)
-
-
-@pytest.mark.asyncio
-async def test_snapshot_crossing_disabled_usage_limit_keeps_selection_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    account = _make_account("acc_limit_cache_off", "workspace_limit_cache_off")
-    repo = StubUsageRepository(return_rows=True)
-    updater = UsageUpdater(repo)
-    invalidations: list[bool] = []
-    monkeypatch.setattr(
-        get_account_selection_cache(),
-        "invalidate",
-        lambda *args, **kwargs: invalidations.append(True),
-    )
-
-    async def _fetch_usage(**kwargs: object) -> UsagePayload:
-        return UsagePayload(
-            plan_type="plus",
-            rate_limit=RateLimitPayload(
-                primary_window=UsageWindow(
-                    used_percent=80.0, reset_at=int(time.time()) + 3600, limit_window_seconds=300
-                )
-            ),
-        )
-
-    monkeypatch.setattr(usage_updater_module, "fetch_usage", _fetch_usage)
-
-    result = await updater._refresh_account(account, usage_account_id=account.chatgpt_account_id)
-
-    assert result.usage_written is True
-    assert invalidations == []
 
 
 def _route() -> ResolvedUpstreamRoute:
@@ -3297,6 +3218,33 @@ async def test_usage_updater_keeps_account_active_on_bare_402_or_404(
 
 
 @pytest.mark.asyncio
+async def test_usage_updater_deactivated_workspace_excludes_only_its_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return usage_client_module._usage_payload_or_raise(
+            {"error": {"code": "deactivated_workspace", "message": "Workspace has been deactivated"}},
+            402,
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+    routing_unavailable_calls: list[str] = []
+    monkeypatch.setattr(usage_updater_module, "mark_account_routing_unavailable", routing_unavailable_calls.append)
+    unavailable = _make_account("workspace_a", "workspace_a", email="shared@example.test")
+    healthy = _make_account("workspace_b", "workspace_b", email="shared@example.test")
+    unavailable.chatgpt_user_id = healthy.chatgpt_user_id = "shared_user"
+    accounts_repo = StubAccountsRepository()
+    accounts_repo.accounts_by_id.update({unavailable.id: unavailable, healthy.id: healthy})
+    updater = UsageUpdater(StubUsageRepository(), accounts_repo=accounts_repo)
+
+    assert await updater.refresh_accounts([unavailable], latest_usage={}) is False
+    assert unavailable.status == AccountStatus.DEACTIVATED
+    assert unavailable.deactivation_reason == "Usage API error: HTTP 402 - Workspace has been deactivated"
+    assert healthy.status == AccountStatus.ACTIVE
+    assert healthy.deactivation_reason is None
+    assert routing_unavailable_calls == [unavailable.id]
+    assert [update["account_id"] for update in accounts_repo.status_updates] == [unavailable.id]
+
+
+@pytest.mark.asyncio
 async def test_usage_updater_does_not_deactivate_on_403(monkeypatch) -> None:
     from app.core.clients.usage import UsageFetchError
 
@@ -3679,9 +3627,7 @@ async def test_forced_usage_refresh_syncs_free_to_plus_upgrade_without_workspace
     assert usage_written is False
     assert acc.plan_type == "plus"
     assert accounts_repo.metadata_updates[0]["plan_type"] == "plus"
-    assert len(usage_repo.entries) == 2
-    assert usage_repo.entries[0].window == "primary"
-    assert usage_repo.entries[0].used_percent == 0.0
+    assert usage_repo.entries == []
 
 
 @pytest.mark.asyncio
@@ -3714,6 +3660,24 @@ async def test_usage_updater_computes_reset_at_from_reset_after_seconds(monkeypa
     entry = usage_repo.entries[0]
     assert entry.window == "primary"
     assert entry.reset_at == 1120
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_refresh_accounts_returns_false_when_rate_limit_missing(monkeypatch) -> None:
+
+    async def stub_fetch_usage(**_: Any) -> UsagePayload:
+        return UsagePayload.model_validate({})
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    updater = UsageUpdater(usage_repo, accounts_repo=None)
+    acc = _make_account("acc_no_rate", "workspace_no_rate", email="no-rate@example.com")
+
+    refreshed = await updater.refresh_accounts([acc], latest_usage={})
+
+    assert refreshed is False
+    assert len(usage_repo.entries) == 0
 
 
 @pytest.mark.asyncio
@@ -3846,11 +3810,7 @@ async def test_usage_updater_refresh_accounts_returns_true_when_partial_write(mo
     refreshed = await updater.refresh_accounts([acc_skip, acc_write], latest_usage={})
 
     assert refreshed is True
-    assert len(usage_repo.entries) == 3
-    assert usage_repo.entries[0].account_id == acc_skip.id
-    assert usage_repo.entries[0].used_percent == 0.0
-    assert usage_repo.entries[0].window == "primary"
-    assert usage_repo.entries[-1].account_id == acc_write.id
+    assert len(usage_repo.entries) == 1
 
 
 @pytest.mark.asyncio
@@ -4183,12 +4143,10 @@ async def test_additional_rate_limits_sync_even_when_main_rate_limit_missing(mon
 
     refreshed = await updater.refresh_accounts([acc], latest_usage={})
 
-    # Additional-only accounts persist an unavailable standard placeholder and
-    # mark themselves as fresh to prevent tight re-polling (R6-F1).
+    # Additional-only accounts write additional data and mark themselves as fresh
+    # to prevent tight re-polling (R6-F1).
     assert refreshed is True
-    assert len(usage_repo.entries) == 2
-    assert usage_repo.entries[0].window == "primary"
-    assert usage_repo.entries[0].used_percent == 0.0
+    assert usage_repo.entries == []
     assert len(additional_repo.entries) == 1
     assert additional_repo.entries[0].limit_name == "o-pro"
 

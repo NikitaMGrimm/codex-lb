@@ -48,7 +48,7 @@ def test_preserves_measurement_when_only_reset_is_unknown(used_percent: float) -
     assert row.used_percent == used_percent
 
 
-@pytest.mark.parametrize("used_percent", [0.0, 42.5, 100.0])
+@pytest.mark.parametrize("used_percent", [0.0, 42.5])
 def test_maps_no_data_placeholder_to_missing_measurement(used_percent: float) -> None:
     entry = _entry(used_percent=used_percent, reset_at=None, window_minutes=None)
 

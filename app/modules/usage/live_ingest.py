@@ -75,11 +75,7 @@ class _QueuedSnapshot:
     snapshot: LiveRateLimitSnapshot
 
 
-def _fingerprint(
-    snapshot: LiveRateLimitSnapshot,
-    *,
-    exact_usage: bool = False,
-) -> tuple[object, ...]:
+def _fingerprint(snapshot: LiveRateLimitSnapshot, *, exact_usage: bool) -> tuple[object, ...]:
     def window_key(window: LiveUsageWindow | None) -> tuple[object, ...] | None:
         if window is None:
             return None
@@ -164,21 +160,14 @@ class LiveUsageIngestor:
                 except asyncio.CancelledError:
                     pass
 
-    def _should_skip(
-        self,
-        account_id: str,
-        snapshot: LiveRateLimitSnapshot,
-        *,
-        exact_usage: bool,
-    ) -> bool:
+    def _should_skip(self, account_id: str, snapshot: LiveRateLimitSnapshot, *, exact_usage: bool) -> bool:
+        # An enabled usage policy compares exact percentages so a change that
+        # crosses a fractional cap is never coalesced away.
         previous = self._last_write.get(account_id)
         if previous is None:
             return False
         previous_snapshot, written_at = previous
-        if _fingerprint(previous_snapshot, exact_usage=exact_usage) != _fingerprint(
-            snapshot,
-            exact_usage=exact_usage,
-        ):
+        if _fingerprint(previous_snapshot, exact_usage=exact_usage) != _fingerprint(snapshot, exact_usage=exact_usage):
             return False
         return time.monotonic() - written_at < self._write_min_interval_seconds
 
@@ -253,21 +242,21 @@ class LiveUsageIngestor:
             )
 
         async with get_background_session() as session:
-            usage_repo = UsageRepository(session)
-            settlement = await usage_repo.settle_live_account_snapshot(
+            settlement = await UsageRepository(session).settle_live_account_snapshot(
                 account_id=item.account_id,
                 chatgpt_account_id=item.chatgpt_account_id,
                 windows=windows,
                 should_skip=lambda resolved, usage_limit_enabled: self._should_skip(
-                    resolved,
-                    snapshot,
-                    exact_usage=usage_limit_enabled,
+                    resolved, snapshot, exact_usage=usage_limit_enabled
                 ),
             )
         if settlement is None:
             return
-        account_id = settlement.account_id
-        self._last_write[account_id] = (snapshot, time.monotonic())
+        self._last_write[settlement.account_id] = (snapshot, time.monotonic())
+        if settlement.usage_limit_enabled:
+            # Hard policy admission must observe committed telemetry before
+            # the ordinary selection/header refresh throttle expires.
+            get_account_selection_cache().invalidate()
         await self._invalidate_caches_throttled()
 
     async def _invalidate_caches_throttled(self) -> None:

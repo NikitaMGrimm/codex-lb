@@ -53,6 +53,7 @@ _USAGE_LIMIT_UNAVAILABLE_STATUSES = (
     AccountStatus.PAUSED,
     AccountStatus.DEACTIVATED,
 )
+_SNAPSHOT_WINDOW_FIELDS = ("used_percent", "reset_at", "window_minutes", "recorded_at")
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,26 +96,8 @@ class AccountUsageLimitSnapshot:
     limit_weekly_percent: float | None = None
 
 
-def _projected_usage_window(
-    account_id: str,
-    *,
-    used_percent: float | None,
-    reset_at: int | None,
-    window_minutes: int | None,
-    recorded_at: datetime | None,
-) -> UsageWindowRow | None:
-    if used_percent is None or recorded_at is None:
-        return None
-    row = UsageWindowRow(
-        account_id=account_id,
-        used_percent=float(used_percent),
-        reset_at=int(reset_at) if reset_at is not None else None,
-        window_minutes=int(window_minutes) if window_minutes is not None else None,
-        recorded_at=recorded_at,
-    )
-    if usage_core.is_no_data_placeholder(row):
-        return replace(row, used_percent=None)
-    return row
+def _live_snapshot_settlement(owner: Any) -> LiveSnapshotSettlement:
+    return LiveSnapshotSettlement(account_id=owner.id, usage_limit_enabled=bool(owner.usage_limit_enabled))
 
 
 class LiveSnapshotOwnerIdentityRelockError(RuntimeError):
@@ -771,73 +754,62 @@ class UsageRepository:
     async def account_usage_limit_snapshot(self, account_id: str) -> AccountUsageLimitSnapshot | None:
         """Read one account's usage-limit policy and standard windows atomically."""
 
-        should_load_windows = Account.status.notin_(_USAGE_LIMIT_UNAVAILABLE_STATUSES)
-
-        def latest_id(window: str):
-            return (
+        stmt = (
+            select(
+                Account.status,
+                Account.usage_limit_enabled,
+                Account.usage_limit_percent,
+                Account.usage_limit_5h_percent,
+                Account.usage_limit_weekly_percent,
+                Account.plan_type,
+            )
+            .select_from(Account)
+            .where(Account.id == account_id, Account.delete_requested_at.is_(None))
+        )
+        for window in ("primary", "secondary", "monthly"):
+            history = aliased(UsageHistory, name=f"usage_limit_{window}")
+            latest_id = (
                 select(UsageHistory.id)
                 .where(
                     UsageHistory.account_id == Account.id,
                     _window_clause(window),
-                    should_load_windows,
+                    Account.status.notin_(_USAGE_LIMIT_UNAVAILABLE_STATUSES),
                 )
                 .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
                 .limit(1)
                 .correlate(Account)
                 .scalar_subquery()
             )
-
-        primary = aliased(UsageHistory, name="usage_limit_primary")
-        secondary = aliased(UsageHistory, name="usage_limit_secondary")
-        monthly = aliased(UsageHistory, name="usage_limit_monthly")
-        stmt = (
-            select(
-                Account.status,
-                Account.usage_limit_enabled,
-                Account.usage_limit_percent,
-                Account.plan_type,
-                Account.usage_limit_5h_percent,
-                Account.usage_limit_weekly_percent,
-                primary.used_percent.label("primary_used_percent"),
-                primary.reset_at.label("primary_reset_at"),
-                primary.window_minutes.label("primary_window_minutes"),
-                primary.recorded_at.label("primary_recorded_at"),
-                secondary.used_percent.label("secondary_used_percent"),
-                secondary.reset_at.label("secondary_reset_at"),
-                secondary.window_minutes.label("secondary_window_minutes"),
-                secondary.recorded_at.label("secondary_recorded_at"),
-                monthly.used_percent.label("monthly_used_percent"),
-                monthly.reset_at.label("monthly_reset_at"),
-                monthly.window_minutes.label("monthly_window_minutes"),
-                monthly.recorded_at.label("monthly_recorded_at"),
+            stmt = stmt.outerjoin(history, history.id == latest_id).add_columns(
+                *(getattr(history, field).label(f"{window}_{field}") for field in _SNAPSHOT_WINDOW_FIELDS)
             )
-            .select_from(Account)
-            .outerjoin(primary, primary.id == latest_id("primary"))
-            .outerjoin(secondary, secondary.id == latest_id("secondary"))
-            .outerjoin(monthly, monthly.id == latest_id("monthly"))
-            .where(Account.id == account_id, Account.delete_requested_at.is_(None))
-        )
         row = (await self._session.execute(stmt)).one_or_none()
         if row is None:
             return None
         values = row._mapping
 
         def projected(window: str) -> UsageWindowRow | None:
-            return _projected_usage_window(
-                account_id,
+            if values[f"{window}_used_percent"] is None:
+                return None
+            window_row = UsageWindowRow(
+                account_id=account_id,
                 used_percent=values[f"{window}_used_percent"],
                 reset_at=values[f"{window}_reset_at"],
                 window_minutes=values[f"{window}_window_minutes"],
                 recorded_at=values[f"{window}_recorded_at"],
             )
+            # Same projection as usage_history_to_window_row(): a placeholder is not 0% used.
+            if usage_core.is_no_data_placeholder(window_row):
+                return replace(window_row, used_percent=None)
+            return window_row
 
         return AccountUsageLimitSnapshot(
-            status=row[0],
-            enabled=bool(row[1]),
-            limit_percent=row[2],
+            status=row.status,
+            enabled=bool(row.usage_limit_enabled),
+            limit_percent=row.usage_limit_percent,
             limit_5h_percent=row.usage_limit_5h_percent,
             limit_weekly_percent=row.usage_limit_weekly_percent,
-            plan_type=row[3],
+            plan_type=row.plan_type,
             primary=projected("primary"),
             secondary=projected("secondary"),
             monthly=projected("monthly"),
@@ -943,10 +915,7 @@ class UsageRepository:
                             if locked.chatgpt_account_id and locked.chatgpt_account_id not in locked_identity_values:
                                 identity_to_relock = locked.chatgpt_account_id
                             else:
-                                return LiveSnapshotSettlement(
-                                    account_id=locked.id,
-                                    usage_limit_enabled=bool(locked.usage_limit_enabled),
-                                )
+                                return _live_snapshot_settlement(locked)
 
             if identity_to_relock is not None:
                 if relocked:
@@ -968,12 +937,9 @@ class UsageRepository:
                     .where(Account.chatgpt_account_id == fallback_identity)
                     .with_for_update(key_share=True)
                 )
-                matches = list((await self._session.execute(upstream_stmt)).all())
+                matches = (await self._session.execute(upstream_stmt)).all()
                 if len(matches) == 1:
-                    return LiveSnapshotSettlement(
-                        account_id=matches[0].id,
-                        usage_limit_enabled=bool(matches[0].usage_limit_enabled),
-                    )
+                    return _live_snapshot_settlement(matches[0])
             return None
 
     async def settle_live_account_snapshot(
@@ -1006,25 +972,17 @@ class UsageRepository:
                             )
                         ).one_or_none()
                         if resolved is not None:
-                            settlement = LiveSnapshotSettlement(
-                                account_id=resolved.id,
-                                usage_limit_enabled=bool(resolved.usage_limit_enabled),
-                            )
+                            settlement = _live_snapshot_settlement(resolved)
                     if settlement is None and chatgpt_account_id:
-                        matches = list(
-                            (
-                                await self._session.execute(
-                                    select(Account.id, Account.usage_limit_enabled).where(
-                                        Account.chatgpt_account_id == chatgpt_account_id
-                                    )
+                        matches = (
+                            await self._session.execute(
+                                select(Account.id, Account.usage_limit_enabled).where(
+                                    Account.chatgpt_account_id == chatgpt_account_id
                                 )
-                            ).all()
-                        )
-                        if len(matches) == 1:
-                            settlement = LiveSnapshotSettlement(
-                                account_id=matches[0].id,
-                                usage_limit_enabled=bool(matches[0].usage_limit_enabled),
                             )
+                        ).all()
+                        if len(matches) == 1:
+                            settlement = _live_snapshot_settlement(matches[0])
                 else:
                     settlement = await self._resolve_postgresql_live_snapshot_owner(
                         account_id,

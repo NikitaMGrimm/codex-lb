@@ -93,6 +93,7 @@ from app.modules.proxy._load_balancer.model_eligibility import (
     _mapped_model_has_registry_entry as _mapped_model_has_registry_entry_impl,
 )
 from app.modules.proxy._load_balancer.opportunistic_admission import (
+    OPPORTUNISTIC_BURN_WINDOW_CLOSED,
     OpportunisticAdmissionRequest,
     apply_lease_release,
     detached_runtime_snapshot,
@@ -105,6 +106,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     StickySelectionRequest,
     _clone_account,
+    _release_selection_resources,
     _StickySelectionOutcome,
     prepare_selection_states,
     run_sticky_selection_path,
@@ -141,6 +143,8 @@ from app.modules.proxy._load_balancer.tunables import (
     resolve_routing_tunables,
 )
 from app.modules.proxy._load_balancer.types import (
+    SELECTION_STATE_CHANGED,
+    SELECTION_STATE_CHANGED_MESSAGE,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
@@ -169,7 +173,6 @@ from app.modules.proxy.fair_share import (
     evaluate_stream_fair_share,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
-from app.modules.proxy.selection_errors import OPPORTUNISTIC_BURN_WINDOW_CLOSED
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
@@ -360,7 +363,10 @@ class LoadBalancer:
 
     async def authorize_account_fresh(self, account_id: str) -> OwnerAuthorization:
         return await load_fresh_owner_authorization(
-            self._repo_factory, account_id, refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS
+            self._repo_factory,
+            account_id,
+            refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
+            now=self._clock.now(),
         )
 
     def _acquire_account_lease_locked(
@@ -852,6 +858,7 @@ class LoadBalancer:
                 ),
             )
             selection_inputs = unbound_outcome.selection_inputs
+            selection_inputs_generation = unbound_outcome.selection_inputs_generation
             selected_snapshot = unbound_outcome.selected_snapshot
             selected_lease = unbound_outcome.selected_lease
             error_message = unbound_outcome.error_message
@@ -881,9 +888,18 @@ class LoadBalancer:
                             sticky_seed_kind,
                         )
                 except BaseException:
-                    await self.release_account_lease(selected_lease)
+                    await _release_selection_resources(self, selected_lease, None)
                     selected_lease = None
                     raise
+                if self._selection_inputs_cache.generation != selection_inputs_generation:
+                    # The seed may already be visible to a sibling; keep its
+                    # owner while rejecting this superseded admission.
+                    await _release_selection_resources(self, selected_lease, None)
+                    return AccountSelection(
+                        account=None,
+                        error_message=SELECTION_STATE_CHANGED_MESSAGE,
+                        error_code=SELECTION_STATE_CHANGED,
+                    )
         else:
             sticky_outcome = await run_sticky_selection_path(
                 self,
@@ -1120,7 +1136,6 @@ class LoadBalancer:
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
-        clone_cached: bool = True,
     ) -> _SelectionInputs:
         mapped_limit_name = _gated_limit_name_for_model(model)
         effective_limit_name = additional_limit_name or mapped_limit_name
@@ -1141,7 +1156,7 @@ class LoadBalancer:
         )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
-            return _clone_selection_inputs(cached) if clone_cached else cached
+            return _clone_selection_inputs(cached)
 
         load_generation = self._selection_inputs_cache.generation
 
@@ -1815,6 +1830,13 @@ class LoadBalancer:
                 monthly_entry=monthly_entry,
                 secondary_entry=secondary_entry,
             )
+            # Repository teardown rolls back reads and expires ORM rows. Keep
+            # loaded snapshots for normalization after the session has closed.
+            account = _clone_account(account)
+            primary_entry = clone_row(primary_entry) if primary_entry is not None else None
+            effective_secondary_entry = (
+                clone_row(effective_secondary_entry) if effective_secondary_entry is not None else None
+            )
             now = self._clock.time()
             normalized_usage = _normalize_usage_inputs(
                 account=account,
@@ -2112,6 +2134,7 @@ def _build_states(
             secondary=_standard_usage_entry(latest_secondary, standard_latest_secondary, account.id),
             monthly=latest_monthly.get(account.id),
             refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
+            now=datetime.fromtimestamp(now, timezone.utc),
         )
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override

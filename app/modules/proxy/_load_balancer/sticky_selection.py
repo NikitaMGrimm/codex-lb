@@ -22,14 +22,13 @@ from app.core.balancer import (
     SelectionResult,
     TrafficClass,
     evaluate_routing_pool,
-    routing_eligible_states,
     select_account,
 )
 from app.core.balancer.logic import (
     ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
     ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
 )
-from app.core.clock import REAL_SCHEDULER, Clock
+from app.core.clock import Clock, scheduler_for
 from app.core.crypto import TokenEncryptor
 from app.core.utils.shared_future import _await_result_deferring_cancellation
 from app.core.utils.time import utcnow
@@ -46,6 +45,8 @@ from app.modules.proxy._load_balancer.overload_backoff import (
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
+    SELECTION_STATE_CHANGED,
+    SELECTION_STATE_CHANGED_MESSAGE,
     AccountConcurrencyCaps,
     AccountLease,
     AccountLeaseKind,
@@ -326,7 +327,7 @@ async def _release_selection_resources(
             return exc
         return None
 
-    error, cancellation = await _await_result_deferring_cancellation(release(), scheduler=REAL_SCHEDULER)
+    error, cancellation = await _await_result_deferring_cancellation(release(), scheduler=scheduler_for(owner))
     if cancellation is not None:
         if error is not None:
             logger.warning("Selection cleanup failed during cancellation", exc_info=error)
@@ -335,13 +336,30 @@ async def _release_selection_resources(
         raise error
 
 
-async def _final_attempt_authorization_failure(owner: StickySelectionOwner, account_id: str) -> SelectionResult:
-    authorization = await owner.authorize_account_fresh(account_id)
+async def _discard_superseded_attempt(
+    owner: StickySelectionOwner,
+    account_id: str,
+    lease: AccountLease | None,
+    probe: ProbeReservation | None,
+    *,
+    final_attempt: bool,
+) -> SelectionResult | None:
+    """Release an attempt whose selection inputs changed before it was returned.
+
+    Earlier attempts retry from fresh inputs (``None``). The final attempt
+    reads the owner directly so a specific owner or policy denial is reported.
+    """
+    try:
+        if not final_attempt:
+            return None
+        authorization = await owner.authorize_account_fresh(account_id)
+    finally:
+        await _release_selection_resources(owner, lease, probe)
     match authorization.kind:
         case OwnerAuthorizationKind.ALLOWED:
             # A fresh owner policy cannot validate the superseded model,
             # security, API-key and capacity selection inputs.
-            return SelectionResult(None, "Account selection changed repeatedly; retry later.", "no_accounts")
+            return SelectionResult(None, SELECTION_STATE_CHANGED_MESSAGE, SELECTION_STATE_CHANGED)
         case OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
             return SelectionResult(
                 None, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
@@ -572,6 +590,9 @@ async def run_sticky_selection_path(
     )
     attempt = 0
     suppress_recovery_probe_candidates = False
+    # The post-persistence fence needs its own budget: probe suppression
+    # resets ``attempt``, so sharing it could retry forever under churn.
+    post_persist_generation_retries = 0
     pending_initial_owner_lookup = request.initial_sticky_owner_lookup
     while True:
         attempt += 1
@@ -703,12 +724,10 @@ async def run_sticky_selection_path(
             # Error-backoff peers stay counted: the selector can still
             # admit them through controlled backoff fallback, so dropping
             # them here would disable the gate under pool-wide backoff.
-            pool = evaluate_routing_pool(states, traffic_class=traffic_class)
+            pool = evaluate_routing_pool(states, traffic_class=traffic_class, now=owner._clock.time())
             fair_share_candidate_ids = [state.account_id for state in pool.capacity_candidates]
-            # Congestion relief cannot make a hard-pinned owner eligible when
-            # the operator's usage policy blocks it. Let the canonical owner
-            # selector surface that terminal policy result instead of parking
-            # the request in a fair-share capacity wait.
+            # A policy-blocked hard owner reports its policy denial instead of
+            # waiting on peer-pool fair share.
             hard_owner_usage_limit_blocked = hard_sticky and any(
                 state.account_id == sticky_existing_account_id and state.usage_limit_state.blocks_account_use
                 for state in states
@@ -784,6 +803,7 @@ async def run_sticky_selection_path(
                     caps=caps,
                     stream_reserve_slots=0,
                     traffic_class=traffic_class,
+                    now=owner._clock.time(),
                 )
                 selection_states = response_create_states or selection_states
             # Cap spillover is request-local: the mapping is preserved so the
@@ -1251,30 +1271,19 @@ async def run_sticky_selection_path(
                 )
             await asyncio.sleep(0)
             continue
-        selection_generation_changed = (
-            selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation
-        )
-        final_authorization_failure: SelectionResult | None = None
-        if selection_generation_changed and attempt >= MAX_SELECTION_ATTEMPTS:
-            assert selected_snapshot is not None
-            try:
-                final_authorization_failure = await _final_attempt_authorization_failure(
-                    owner,
-                    selected_snapshot.id,
-                )
-            except BaseException:
-                await _release_selection_resources(owner, selected_lease, probe_reservation)
-                selected_lease = None
-                raise
-        if selection_generation_changed and (
-            attempt < MAX_SELECTION_ATTEMPTS or final_authorization_failure is not None
-        ):
+        if selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation:
             # Account or usage data changed after this attempt loaded its
             # selection snapshot. The lease and any probe reservation are
             # still provisional, and the sticky mutation has not been written
             # yet, so discard the attempt and re-evaluate the hard gates from a
             # fresh snapshot before publishing affinity or returning admission.
-            await _release_selection_resources(owner, selected_lease, probe_reservation)
+            final_authorization_failure = await _discard_superseded_attempt(
+                owner,
+                selected_snapshot.id,
+                selected_lease,
+                probe_reservation,
+                final_attempt=attempt >= MAX_SELECTION_ATTEMPTS,
+            )
             selected_lease = None
             if final_authorization_failure is not None:
                 selected_snapshot = None
@@ -1356,7 +1365,10 @@ async def run_sticky_selection_path(
             try:
                 async with owner._runtime_lock:
                     assert probe_reservation is not None
-                    reservation_committed = owner._commit_due_probe_reservation_locked(probe_reservation)
+                    reservation_committed = (
+                        owner._selection_inputs_cache.generation == selection_inputs_generation
+                        and owner._commit_due_probe_reservation_locked(probe_reservation)
+                    )
                     if reservation_committed:
                         owner._sync_committed_probe_state_locked(
                             probe_reservation,
@@ -1427,7 +1439,10 @@ async def run_sticky_selection_path(
             try:
                 assert probe_reservation is not None
                 async with owner._runtime_lock:
-                    reservation_committed = owner._commit_due_probe_reservation_locked(probe_reservation)
+                    reservation_committed = (
+                        owner._selection_inputs_cache.generation == selection_inputs_generation
+                        and owner._commit_due_probe_reservation_locked(probe_reservation)
+                    )
                     if reservation_committed:
                         owner._sync_committed_probe_state_locked(
                             probe_reservation,
@@ -1498,9 +1513,35 @@ async def run_sticky_selection_path(
                 except BaseException:
                     # Never leak the local concurrency lease when sticky
                     # persistence fails.
-                    await owner.release_account_lease(selected_lease)
+                    await _release_selection_resources(owner, selected_lease, probe_reservation)
                     selected_lease = None
                     raise
+        if selected_snapshot is not None and owner._selection_inputs_cache.generation != selection_inputs_generation:
+            # Affinity may already be committed. Keep that owner, but release
+            # the provisional admission and retry from fresh inputs so the
+            # committed owner passes every gate again.
+            await _release_selection_resources(owner, selected_lease, probe_reservation)
+            selected_lease = None
+            if post_persist_generation_retries >= MAX_SELECTION_ATTEMPTS:
+                return _direct_error(
+                    account=None,
+                    error_message=SELECTION_STATE_CHANGED_MESSAGE,
+                    error_code=SELECTION_STATE_CHANGED,
+                )
+            post_persist_generation_retries += 1
+            selection_inputs, selection_inputs_generation = await load_selection_inputs()
+            if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                return _direct_error(
+                    account=None,
+                    error_message=selection_inputs.error_message,
+                    error_code=selection_inputs.error_code,
+                )
+            selected_snapshot = None
+            error_message = None
+            selected_states = []
+            selected_account_map = {}
+            await asyncio.sleep(0)
+            continue
         if sticky_outcome.isolation_release is not None:
             # Here, not at selection: the candidate can still be lost to a
             # concurrent lease or the attempt retried on stale state, and this
@@ -2254,8 +2295,9 @@ def _filter_states_for_usage_limit_and_account_caps(
     stream_reserve_slots: int = 0,
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     pool: RoutingPoolEvaluation | None = None,
+    now: float | None = None,
 ) -> tuple[list[AccountState], bool]:
-    evaluation = pool if pool is not None else evaluate_routing_pool(states, traffic_class=traffic_class)
+    evaluation = pool if pool is not None else evaluate_routing_pool(states, traffic_class=traffic_class, now=now)
     admitted = _filter_states_for_account_caps(
         evaluation.routable_candidates,
         lease_kind=lease_kind,
@@ -2324,7 +2366,7 @@ def _pool_has_available_account_without_backoff(
     # classify on copies so cap-error reporting cannot mutate the real
     # selection snapshot before sticky persistence. Keep the pool intact:
     # opportunistic admission compares candidates with one another.
-    return bool(routing_eligible_states(states, now=now, traffic_class=traffic_class))
+    return bool(evaluate_routing_pool(states, now=now, traffic_class=traffic_class).normal_candidates)
 
 
 def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
@@ -2411,24 +2453,11 @@ def _select_account_preferring_budget_safe(
     all_states = list(states)
     usage_limit_blocked = [state for state in all_states if state.usage_limit_state.blocks_account_use]
     state_list = [state for state in all_states if not state.usage_limit_state.blocks_account_use]
-    if not state_list:
-        return select_account(
-            all_states,
-            prefer_earlier_reset=prefer_earlier_reset,
-            prefer_earlier_reset_window=prefer_earlier_reset_window,
-            routing_strategy=routing_strategy,
-            allow_backoff_fallback=allow_backoff_fallback,
-            deterministic_probe=deterministic_probe,
-            relative_availability_power=relative_availability_power,
-            relative_availability_top_k=relative_availability_top_k,
-            traffic_class=traffic_class,
-            ignore_standard_quota=ignore_standard_quota,
-            routing_costs=routing_costs_by_account_id,
-            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
-            usage_exhaustion_states=usage_exhaustion_states,
-            selection_seed=selection_seed,
-        )
-    if selection_seed is None and routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
+    if (
+        state_list
+        and selection_seed is None
+        and routing_strategy not in ("sequential_drain", "reset_drain", "single_account")
+    ):
         # This pass must precede budget-safe and routing-policy shortcuts below;
         # otherwise a healthy preferred account can starve PROBING indefinitely.
         #
@@ -2518,12 +2547,13 @@ def _select_account_preferring_budget_safe(
         if state.routing_policy != ROUTING_POLICY_PRESERVE and not state_budget_threshold(state)
     ]
     if preferred_states:
-        selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list
-        terminal_pool = (
-            [*selection_pool, *usage_limit_blocked] if len(preferred_states) == len(state_list) else selection_pool
+        # A narrowed pool falls through below; only a terminal selection needs
+        # policy-blocked accounts as error evidence.
+        selection_pool = (
+            preferred_states if len(preferred_states) != len(state_list) else [*state_list, *usage_limit_blocked]
         )
         preferred = select_account(
-            terminal_pool,
+            selection_pool,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,

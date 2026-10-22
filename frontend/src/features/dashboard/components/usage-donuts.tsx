@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { DonutChartItem, DonutChartProps } from "@/components/donut-chart";
@@ -21,6 +21,24 @@ export type UsageDonutsProps = {
 	safeLineSecondary?: SafeLineView | null;
 };
 
+// Reserved credits are one hatched slice so they read as neither usable nor consumed.
+function chartItems(items: RemainingItem[], reservedLabel: string): DonutChartItem[] {
+	const reserved = items.reduce((sum, item) => sum + (item.reservedValue ?? 0), 0);
+	return [
+		...items.map((item) => ({
+			id: item.accountId,
+			label: item.label,
+			labelSuffix: item.labelSuffix,
+			isEmail: item.isEmail,
+			value: item.value,
+			color: item.color,
+		})),
+		...(reserved > 0
+			? [{ id: "__reserved__", label: reservedLabel, value: reserved, color: "#888888", hatched: true }]
+			: []),
+	];
+}
+
 export function UsageDonuts({
 	primaryItems,
 	secondaryItems,
@@ -32,28 +50,18 @@ export function UsageDonuts({
 	safeLineSecondary,
 }: UsageDonutsProps) {
 	const { t } = useTranslation();
-  const chartItems = (items: RemainingItem[]): DonutChartItem[] => {
-    const reserved = items.reduce((sum, item) => sum + (item.reservedValue ?? 0), 0);
-    return [
-      ...items.map((item) => ({
-        id: item.accountId, label: item.label, labelSuffix: item.labelSuffix,
-        isEmail: item.isEmail, value: item.value, color: item.color,
-      })),
-      ...(reserved > 0 ? [{
-        id: "__reserved__", label: t("accounts.usageLimit.reserved"), value: reserved,
-        color: "#888888", hatched: true,
-      }] : []),
-    ];
-  };
-  const primaryChartItems = chartItems(primaryItems);
-  const secondaryChartItems = chartItems(secondaryItems);
+	const reservedLabel = t("accounts.usageLimit.reserved");
+	const primaryChartItems = useMemo(() => chartItems(primaryItems, reservedLabel), [primaryItems, reservedLabel]);
+	const secondaryChartItems = useMemo(() => chartItems(secondaryItems, reservedLabel), [secondaryItems, reservedLabel]);
+	const reserveExplanation = (items: DonutChartItem[]) =>
+		items.some((item) => item.hatched) ? t("accounts.usageLimit.donutExplanation") : undefined;
 
 	return (
 		<Suspense fallback={<div className="grid gap-4 lg:grid-cols-2" />}>
 			<div className="grid min-w-0 gap-4 lg:grid-cols-2">
 			<DonutChart
 				title={t("dashboard.usage.fiveHourCredits")}
-                subtitle={primaryItems.some((item) => (item.reservedValue ?? 0) > 0) ? t("accounts.usageLimit.donutExplanation") : undefined}
+				subtitle={reserveExplanation(primaryChartItems)}
 				items={primaryChartItems}
 				total={primaryTotal}
 				centerValue={primaryCenterValue}
@@ -62,7 +70,7 @@ export function UsageDonuts({
 			/>
 			<DonutChart
 				title={t("dashboard.usage.weeklyCredits")}
-                subtitle={secondaryItems.some((item) => (item.reservedValue ?? 0) > 0) ? t("accounts.usageLimit.donutExplanation") : undefined}
+				subtitle={reserveExplanation(secondaryChartItems)}
 				items={secondaryChartItems}
 				total={secondaryTotal}
 				centerValue={secondaryCenterValue}

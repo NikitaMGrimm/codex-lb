@@ -238,35 +238,16 @@ class _WarmupMixin:
                 api_key=api_key,
             )
             target_account_ids = [account.id for account in target_accounts]
-            latest_primary = await repos.usage.latest_by_account(
-                window="primary",
-                account_ids=target_account_ids,
-            )
-            latest_secondary = await repos.usage.latest_by_account(
-                window="secondary",
-                account_ids=target_account_ids,
-            )
-            latest_monthly = await repos.usage.latest_by_account(
-                window="monthly",
-                account_ids=target_account_ids,
-            )
+            latest_by_window = {
+                window: await repos.usage.latest_by_account(window=window, account_ids=target_account_ids)
+                for window in ("primary", "secondary", "monthly")
+            }
             standard_usage_by_account = {
                 account.id: _WarmupUsageSnapshot(
-                    primary=(
-                        usage_history_to_window_row(latest_primary[account.id])
-                        if account.id in latest_primary
-                        else None
-                    ),
-                    secondary=(
-                        usage_history_to_window_row(latest_secondary[account.id])
-                        if account.id in latest_secondary
-                        else None
-                    ),
-                    monthly=(
-                        usage_history_to_window_row(latest_monthly[account.id])
-                        if account.id in latest_monthly
-                        else None
-                    ),
+                    **{
+                        window: usage_history_to_window_row(latest[account.id]) if account.id in latest else None
+                        for window, latest in latest_by_window.items()
+                    }
                 )
                 for account in target_accounts
             }
@@ -285,27 +266,19 @@ class _WarmupMixin:
                 failed=failed,
             )
 
-        usage_limit_states = {
-            account.id: _evaluate_warmup_usage_limit(account, standard_usage_by_account[account.id])
-            for account in target_accounts
-        }
-        policy_eligible_accounts = [
-            account for account in target_accounts if not usage_limit_states[account.id].blocks_account_use
-        ]
+        policy_eligible_accounts: list[_WarmupAccountSnapshot] = []
+        for account in target_accounts:
+            if _evaluate_warmup_usage_limit(account, standard_usage_by_account[account.id]).blocks_account_use:
+                skipped.append(
+                    WarmupSkippedAccountData(account_id=account.id, reason=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE)
+                )
+            else:
+                policy_eligible_accounts.append(account)
         eligible_accounts = [
             account
             for account in policy_eligible_accounts
             if _is_warmup_usage_eligible(standard_usage_by_account[account.id].primary)
         ]
-        policy_eligible_ids = {account.id for account in policy_eligible_accounts}
-        skipped.extend(
-            WarmupSkippedAccountData(
-                account_id=account.id,
-                reason=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
-            )
-            for account in target_accounts
-            if account.id not in policy_eligible_ids
-        )
 
         if normalized_mode == "force":
             accounts_to_submit = policy_eligible_accounts
@@ -438,8 +411,7 @@ class _WarmupMixin:
                     exc_info=True,
                 )
                 authorization = _WarmupAuthorization(
-                    account=None,
-                    decision=OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED),
+                    account=None, decision=OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
                 )
             if authorization.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
                 error_code = _WARMUP_USAGE_LIMIT_AUTHORIZATION_FAILED

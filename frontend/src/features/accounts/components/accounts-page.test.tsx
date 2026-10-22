@@ -82,8 +82,8 @@ function mockAccountsQuery(accounts: AccountSummary[]) {
     exportAuthMutation: idleMutation(),
     setAliasMutation: idleMutation(),
     limitWarmupMutation: idleMutation(),
-    usageLimitMutation: idleMutation(),
     routingPolicyMutation: idleMutation(),
+    usageLimitMutation: idleMutation(),
     updateMutation: idleMutation(),
   } as unknown as ReturnType<typeof useAccounts>);
 }
@@ -92,6 +92,7 @@ function idleMutation() {
   return {
     isPending: false,
     error: null,
+    mutate: vi.fn(),
     mutateAsync: vi.fn(),
   };
 }

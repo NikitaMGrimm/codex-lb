@@ -1,4 +1,3 @@
-import { UsageQuotaSummary } from "@/components/usage-quota-bar";
 import { Flame, Shield, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -11,6 +10,7 @@ import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { useSmoothPercent } from "@/hooks/use-smooth-percent";
 import { StatusBadge } from "@/components/status-badge";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
+import { UsageQuotaSummary } from "@/components/usage-quota-bar";
 import type {
   AccountRoutingPolicy,
   AccountSummary,

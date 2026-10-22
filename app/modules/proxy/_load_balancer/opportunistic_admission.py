@@ -39,7 +39,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     SelectionInputsProtocol,
     _account_cap_error_code,
     _clone_account,
-    _filter_states_for_account_caps,
+    _filter_states_for_usage_limit_and_account_caps,
     _select_account_preferring_budget_safe,
 )
 from app.modules.proxy._load_balancer.tunables import RoutingTunables
@@ -253,18 +253,20 @@ def _observe_selection_states(
 def _account_cap_closed(
     request: OpportunisticAdmissionRequest,
     states: list[AccountState],
+    *,
+    now: float,
 ) -> tuple[list[AccountState], OpportunisticAdmissionOutcome | None]:
     lease_kind = request.lease_kind
-    policy_blocked = [state for state in states if state.usage_limit_state.blocks_account_use]
-    cap_candidates = [state for state in states if not state.usage_limit_state.blocks_account_use]
-    selection_states = _filter_states_for_account_caps(
-        cap_candidates,
+    selection_states, account_caps_exhausted = _filter_states_for_usage_limit_and_account_caps(
+        states,
         lease_kind=lease_kind,
         caps=request.concurrency_caps,
         stream_reserve_slots=request.stream_reserve_slots,
+        traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
+        now=now,
     )
-    if selection_states or not cap_candidates:
-        return [*selection_states, *policy_blocked], None
+    if not account_caps_exhausted:
+        return selection_states, None
     logger.warning(
         "Account cap exhausted during opportunistic admission lease_kind=%s reason=%s candidates=%s",
         lease_kind,
@@ -304,7 +306,7 @@ async def run_opportunistic_admission(
             soft_drain_enabled=request.soft_drain_enabled,
             model=request.model,
         )
-        selection_states, cap_closed = _account_cap_closed(request, states)
+        selection_states, cap_closed = _account_cap_closed(request, states, now=owner._clock.time())
         if cap_closed is not None:
             return cap_closed
     else:
@@ -317,7 +319,7 @@ async def run_opportunistic_admission(
                 soft_drain_enabled=request.soft_drain_enabled,
                 model=request.model,
             )
-            selection_states, cap_closed = _account_cap_closed(request, states)
+            selection_states, cap_closed = _account_cap_closed(request, states, now=owner._clock.time())
             if cap_closed is not None:
                 return cap_closed
     result = _select_account_preferring_budget_safe(

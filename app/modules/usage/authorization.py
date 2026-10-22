@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
@@ -42,6 +43,7 @@ def authorize_usage_snapshot(
     *,
     refresh_interval_seconds: int,
     require_active: bool = False,
+    now: datetime | None = None,
 ) -> OwnerAuthorization:
     """Apply the shared owner contract to one authoritative database snapshot.
 
@@ -66,6 +68,7 @@ def authorize_usage_snapshot(
         secondary=snapshot.secondary,
         monthly=snapshot.monthly,
         refresh_interval_seconds=refresh_interval_seconds,
+        now=now,
     )
     return OwnerAuthorization(
         OwnerAuthorizationKind.USAGE_POLICY_BLOCKED if state.blocks_account_use else OwnerAuthorizationKind.ALLOWED,
@@ -81,12 +84,13 @@ async def load_owner_authorization(
     *,
     refresh_interval_seconds: int,
     require_active: bool = False,
+    now: datetime | None = None,
 ) -> OwnerAuthorization:
     """Read one authoritative snapshot; cancellation remains caller-owned."""
     try:
         snapshot = await usage.account_usage_limit_snapshot(account_id)
         return authorize_usage_snapshot(
-            snapshot, refresh_interval_seconds=refresh_interval_seconds, require_active=require_active
+            snapshot, refresh_interval_seconds=refresh_interval_seconds, require_active=require_active, now=now
         )
     except Exception:
         logger.warning("Fresh owner authorization failed account_id=%s", account_id, exc_info=True)

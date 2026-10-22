@@ -89,3 +89,17 @@ the published DDL. A nullable VARCHAR column is not accepted as evidence that
 the revision already ran. Full IDs, prefixes, and relative targets retain
 Alembic's original target semantics because the plan is not split. Direct
 Alembic invocations bypass the application runner's lock and replay guard.
+
+## Usage-limit history convergence
+
+The usage-limit revisions and later upstream history converge at
+`20261002_000000_merge_usage_limits_and_main_heads` and
+`20261002_010000_merge_usage_limit_review_heads`. Existing revision identifiers
+and parents stay intact, so databases that already applied any lineage upgrade
+normally. For example, a database with an enabled 10% policy and a disabled
+saved 20% policy keeps both values while applying upstream migrations, and an
+upstream-only database gains disabled policy fields.
+
+The topology guard accepts a parallel branch only when the checkout joins it
+with every upstream head and keeps one canonical head; joining an older
+upstream revision while omitting a later head still fails.

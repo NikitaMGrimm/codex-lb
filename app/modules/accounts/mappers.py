@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from functools import partial
 
 from app.core import usage as usage_core
 from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, token_expiry_epoch_ms
@@ -129,6 +130,13 @@ def _account_to_summary(
         secondary=secondary_usage,
         monthly=monthly_usage,
         refresh_interval_seconds=USAGE_REFRESH_INTERVAL_SECONDS,
+    )
+    effective_limit = partial(
+        effective_usage_limit_percent,
+        enabled=bool(account.usage_limit_enabled),
+        limit_percent=account.usage_limit_percent,
+        limit_5h_percent=account.usage_limit_5h_percent,
+        limit_weekly_percent=account.usage_limit_weekly_percent,
     )
 
     if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
@@ -283,27 +291,9 @@ def _account_to_summary(
         usage_limit_weekly_percent=account.usage_limit_weekly_percent,
         usage_limit_5h_percent=account.usage_limit_5h_percent,
         usage_limit_state=usage_limit_state,
-        effective_limit_primary=effective_usage_limit_percent(
-            enabled=bool(account.usage_limit_enabled),
-            limit_percent=account.usage_limit_percent,
-            limit_5h_percent=account.usage_limit_5h_percent,
-            limit_weekly_percent=account.usage_limit_weekly_percent,
-            window_minutes=window_minutes_primary,
-        ),
-        effective_limit_secondary=effective_usage_limit_percent(
-            enabled=bool(account.usage_limit_enabled),
-            limit_percent=account.usage_limit_percent,
-            limit_5h_percent=account.usage_limit_5h_percent,
-            limit_weekly_percent=account.usage_limit_weekly_percent,
-            window_minutes=window_minutes_secondary,
-        ),
-        effective_limit_monthly=effective_usage_limit_percent(
-            enabled=bool(account.usage_limit_enabled),
-            limit_percent=account.usage_limit_percent,
-            limit_5h_percent=account.usage_limit_5h_percent,
-            limit_weekly_percent=account.usage_limit_weekly_percent,
-            window_minutes=window_minutes_monthly,
-        ),
+        effective_limit_primary=effective_limit(window_minutes=window_minutes_primary),
+        effective_limit_secondary=effective_limit(window_minutes=window_minutes_secondary),
+        effective_limit_monthly=effective_limit(window_minutes=window_minutes_monthly),
         security_work_authorized=bool(account.security_work_authorized),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,

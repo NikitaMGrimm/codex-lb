@@ -218,7 +218,8 @@ async def test_precise_live_usage_crossing_cap_changes_selection_within_throttle
         )
 
     selection_cache = AccountSelectionCache(ttl_seconds=60)
-    header_invalidate = AsyncMock()
+    header_invalidated = asyncio.Event()
+    header_invalidate = AsyncMock(side_effect=header_invalidated.set)
     monkeypatch.setattr(live_ingest, "get_account_selection_cache", lambda: selection_cache)
     monkeypatch.setattr(
         live_ingest,
@@ -233,35 +234,21 @@ async def test_precise_live_usage_crossing_cap_changes_selection_within_throttle
     assert admitted.account is not None
     assert admitted.account.id == account_id
 
-    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=60.0)
-    ingestor._last_cache_invalidation = live_ingest.time.monotonic()
-    try:
-        below_limit = LiveRateLimitSnapshot(
-            primary=LiveUsageWindow(
-                used_percent=10.001,
-                window_minutes=300,
-                reset_at=now_epoch + 3600,
-            ),
+    def primary_snapshot(used_percent: float) -> LiveRateLimitSnapshot:
+        return LiveRateLimitSnapshot(
+            primary=LiveUsageWindow(used_percent=used_percent, window_minutes=300, reset_at=now_epoch + 3600),
             secondary=None,
             credits_has=None,
             credits_unlimited=None,
             credits_balance=None,
         )
-        ingestor._last_write[account_id] = (below_limit, live_ingest.time.monotonic())
-        ingestor.publish(
-            LiveRateLimitSnapshot(
-                primary=LiveUsageWindow(
-                    used_percent=10.003,
-                    window_minutes=300,
-                    reset_at=now_epoch + 3600,
-                ),
-                secondary=None,
-                credits_has=None,
-                credits_unlimited=None,
-                credits_balance=None,
-            ),
-            account_id=account_id,
-        )
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=60.0)
+    ingestor._last_cache_invalidation = live_ingest.time.monotonic()
+    try:
+        # 10.001 -> 10.003 rounds to the same 2-decimal fingerprint but crosses the cap.
+        ingestor._last_write[account_id] = (primary_snapshot(10.001), live_ingest.time.monotonic())
+        ingestor.publish(primary_snapshot(10.003), account_id=account_id)
         await ingestor._ingest(ingestor._queue.get_nowait())
 
         async with SessionLocal() as session:
@@ -271,13 +258,11 @@ async def test_precise_live_usage_crossing_cap_changes_selection_within_throttle
             )
         assert latest_primary is not None
         assert latest_primary.used_percent == pytest.approx(10.003)
-        deadline = asyncio.get_event_loop().time() + 1.0
-        while selection_cache.generation == 0 and asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.01)
-        assert selection_cache.generation == 1
+        assert selection_cache.generation >= 1
         denied = await balancer.select_account(routing_strategy="usage_weighted")
         assert denied.account is None
         assert denied.error_code == "account_usage_limit_reached"
+        await asyncio.wait_for(header_invalidated.wait(), timeout=1.0)
         header_invalidate.assert_awaited_once()
     finally:
         await ingestor.stop()

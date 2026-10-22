@@ -1,6 +1,5 @@
 import { Activity, AlertTriangle, Coins, DollarSign, Flame, MessageSquare, type LucideIcon } from "lucide-react";
 
-import { quotaBreakdown } from "@/utils/quota";
 import i18n from "@/i18n";
 import type {
   AccountSummary,
@@ -15,6 +14,7 @@ import type {
 } from "@/features/dashboard/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 import { buildDonutPalette } from "@/utils/colors";
+import { quotaBreakdown } from "@/utils/quota";
 import {
   formatCachedTokensMeta,
   formatCompactNumber,

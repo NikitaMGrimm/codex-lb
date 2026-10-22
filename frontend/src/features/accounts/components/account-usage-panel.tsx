@@ -1,9 +1,9 @@
-import { UsageQuotaBar, UsageQuotaSummary } from "@/components/usage-quota-bar";
 import { lazy, Suspense } from "react";
 import { Clock, Flame, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { UsageQuotaBar, UsageQuotaSummary } from "@/components/usage-quota-bar";
 import { cn } from "@/lib/utils";
 import type { AccountTrendChartProps } from "@/features/accounts/components/account-trend-chart";
 import type {

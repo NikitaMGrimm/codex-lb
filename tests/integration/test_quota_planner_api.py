@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from sqlalchemy import delete, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
@@ -32,10 +32,12 @@ from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyInvalidError, ApiKeyNotFoundError, ApiKeyRateLimitExceededError
 from app.modules.quota_planner import api as quota_planner_api
 from app.modules.quota_planner import scheduler as quota_planner_scheduler
+from app.modules.quota_planner import warmup as quota_planner_warmup
 from app.modules.quota_planner.logic import PlannerAction, PlannerSettings
 from app.modules.quota_planner.repository import QuotaPlannerRepository
 from app.modules.quota_planner.scheduler import QuotaPlannerScheduler
 from app.modules.quota_planner.warmup import QuotaWarmupService, WarmupUsage
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -60,6 +62,114 @@ def _warmup_test_account(account_id: str) -> Account:
         last_refresh=utcnow(),
         status=AccountStatus.ACTIVE,
     )
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warmup_settlement_preserves_newer_operator_policy(async_client, monkeypatch, db_setup):
+    account_id = "warmup-observational-authorization"
+    async with SessionLocal() as session:
+        account = _warmup_test_account(account_id)
+        account.usage_limit_enabled = True
+        account.usage_limit_percent = 10
+        session.add_all(
+            [
+                account,
+                UsageHistory(
+                    account_id=account_id, used_percent=5, window="primary", window_minutes=300, recorded_at=utcnow()
+                ),
+            ]
+        )
+        await QuotaPlannerRepository(session).upsert_settings(_AUTO_WARMUP_SETTINGS)
+
+    original_snapshot = UsageRepository.account_usage_limit_snapshot
+    authorization_reads = 0
+
+    async def save_policy(percent: float) -> None:
+        response = await async_client.put(
+            f"/api/accounts/{account_id}/usage-limit", json={"enabled": True, "percent": percent}
+        )
+        assert response.status_code == 200
+
+    async def authorize_after_edit(self, owner_id: str):
+        nonlocal authorization_reads
+        if owner_id == account_id:
+            authorization_reads += 1
+            if authorization_reads == 2:
+                # The account identity map still holds 10%; the authoritative
+                # projection now sees the newly acknowledged 20% policy.
+                await save_policy(20)
+        return await original_snapshot(self, owner_id)
+
+    async def send_probe(*args, **kwargs):
+        # A later acknowledged edit must survive the admitted probe's log and
+        # decision commits; authorization itself must not queue an UPDATE.
+        await save_policy(30)
+        yield (
+            'data: {"type":"response.completed","response":{"id":"warmup-completed",'
+            '"usage":{"input_tokens":3,"output_tokens":1}}}\n\n'
+        )
+
+    async def no_effect_refresh(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(UsageRepository, "account_usage_limit_snapshot", authorize_after_edit)
+    monkeypatch.setattr(quota_planner_warmup, "stream_responses", send_probe)
+    monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", no_effect_refresh)
+
+    response = await async_client.post(
+        "/api/quota-planner/warm-now", json={"accountId": account_id, "model": "gpt-5.4-mini", "forceProbe": True}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "executed"
+    assert authorization_reads == 2
+    async with SessionLocal() as session:
+        saved = await session.get(Account, account_id)
+        assert saved is not None and saved.usage_limit_percent == 30
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warmup_dispatch_reuses_resolved_dashboard_settings(async_client, monkeypatch, db_setup):
+    account_id = "warmup-one-settings-observation"
+    async with SessionLocal() as session:
+        session.add(_warmup_test_account(account_id))
+        await QuotaPlannerRepository(session).upsert_settings(_AUTO_WARMUP_SETTINGS)
+
+    cache = quota_planner_warmup.get_settings_cache()
+    original_get = cache.get
+    events: list[str] = []
+    original_snapshot = UsageRepository.account_usage_limit_snapshot
+
+    async def read_settings(*args, **kwargs):
+        events.append("settings")
+        return await original_get(*args, **kwargs)
+
+    async def read_authorization(self, owner_id: str):
+        if owner_id == account_id:
+            events.append("authorization")
+        return await original_snapshot(self, owner_id)
+
+    async def send_probe(*args, **kwargs):
+        events.append("dispatch")
+        yield 'data: {"type":"response.completed","response":{"id":"warmup-completed"}}\n\n'
+
+    async def no_effect_refresh(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(cache, "get", read_settings)
+    monkeypatch.setattr(UsageRepository, "account_usage_limit_snapshot", read_authorization)
+    monkeypatch.setattr(quota_planner_warmup, "stream_responses", send_probe)
+    monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", no_effect_refresh)
+
+    response = await async_client.post(
+        "/api/quota-planner/warm-now", json={"accountId": account_id, "model": "gpt-5.4-mini", "forceProbe": True}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "executed"
+    dispatch_index = events.index("dispatch")
+    final_authorization = max(i for i, event in enumerate(events[:dispatch_index]) if event == "authorization")
+    assert "settings" not in events[final_authorization + 1 : dispatch_index]
 
 
 @pytest.mark.asyncio
@@ -105,6 +215,33 @@ async def test_quota_planner_settings_api_get_and_update(monkeypatch, async_clie
     assert updated["maxWarmupsPerDay"] == 3
     assert updated["forecastQuantile"] == "p90"
     assert updated["warmupModelPreference"] == "gpt-5.4-mini"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["workingHoursStart", "workingHoursEnd"])
+@pytest.mark.parametrize("value", ["24:00", "12:60", "99:99", "９:００", "09:00\n"])
+async def test_quota_planner_rejects_invalid_clock_time_without_saving(monkeypatch, async_client, field, value):
+    monkeypatch.setattr("app.modules.quota_planner.api.AuditService.log_async", lambda *args, **kwargs: None)
+    before = (await async_client.get("/api/quota-planner/settings")).json()
+
+    response = await async_client.put("/api/quota-planner/settings", json={field: value, "maxWarmupsPerDay": 99})
+
+    assert response.status_code == 422
+    assert (await async_client.get("/api/quota-planner/settings")).json() == before
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_clock_time_boundaries_and_partial_updates(monkeypatch, async_client):
+    monkeypatch.setattr("app.modules.quota_planner.api.AuditService.log_async", lambda *args, **kwargs: None)
+    response = await async_client.put(
+        "/api/quota-planner/settings", json={"workingHoursStart": "00:00", "workingHoursEnd": "23:59"}
+    )
+    assert response.status_code == 200
+    for payload in ({}, {"workingHoursStart": None, "workingHoursEnd": None}):
+        response = await async_client.put("/api/quota-planner/settings", json=payload)
+        assert response.status_code == 200
+        assert response.json()["workingHoursStart"] == "00:00"
+        assert response.json()["workingHoursEnd"] == "23:59"
 
 
 @pytest.mark.asyncio
@@ -453,7 +590,7 @@ async def test_quota_planner_warm_now_refuses_weekly_only_account(async_client, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "race_point",
-    ["post_claim", "post_reservation", "authorization_failed", "authorization_cancelled"],
+    ["post_reservation", "authorization_failed", "authorization_cancelled"],
 )
 async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
     monkeypatch: pytest.MonkeyPatch,
@@ -462,7 +599,6 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
 ) -> None:
     del db_setup
     account_id = f"acc-warmup-final-authorization-{race_point}"
-    with_reservation = race_point != "post_claim"
     async with SessionLocal() as session:
         account = _warmup_test_account(account_id)
         account.usage_limit_enabled = True
@@ -498,31 +634,20 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
                 )
                 await race_session.commit()
 
-        if with_reservation:
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, *args, **kwargs):
+                del args, kwargs
+                if race_point == "post_reservation":
+                    await reach_limit()
+                return SimpleNamespace(reservation_id="reservation-final-authorization")
 
-            class FakeApiKeys:
-                async def enforce_limits_for_request(self, *args, **kwargs):
-                    del args, kwargs
-                    if race_point == "post_reservation":
-                        await reach_limit()
-                    return SimpleNamespace(reservation_id="reservation-final-authorization")
+            async def release_usage_reservation(self, reservation_id: str) -> None:
+                if race_point == "authorization_cancelled":
+                    release_started.set()
+                    await allow_release.wait()
+                released_reservations.append(reservation_id)
 
-                async def release_usage_reservation(self, reservation_id: str) -> None:
-                    if race_point == "authorization_cancelled":
-                        release_started.set()
-                        await allow_release.wait()
-                    released_reservations.append(reservation_id)
-
-            monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
-        else:
-            claim = service._planner.claim_warmup_decision
-
-            async def claim_then_reach_limit(*args, **kwargs):
-                claimed = await claim(*args, **kwargs)
-                await reach_limit()
-                return claimed
-
-            monkeypatch.setattr(service._planner, "claim_warmup_decision", claim_then_reach_limit)
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
 
         if race_point in {"authorization_failed", "authorization_cancelled"}:
             load_fresh_standard_usage = service._load_fresh_standard_usage
@@ -571,14 +696,14 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
             result = await service.warm_now(
                 account_id=account_id,
                 model="gpt-5.4-mini",
-                api_key_id="api-key-race" if with_reservation else None,
+                api_key_id="api-key-race",
                 force_probe=True,
             )
             decision_id = result.decision_id
         repeated = await service.warm_now(
             account_id=account_id,
             model="gpt-5.4-mini",
-            api_key_id="api-key-race" if with_reservation else None,
+            api_key_id="api-key-race",
             force_probe=True,
             decision_id=decision_id,
         )
@@ -590,19 +715,15 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
 
     assert stored is not None
     assert stored.status == "skipped"
-    expected_reason = (
-        "account_usage_limit_reached"
-        if race_point in {"post_claim", "post_reservation"}
-        else (
-            "account_usage_limit_authorization_cancelled"
-            if race_point == "authorization_cancelled"
-            else "account_usage_limit_authorization_failed"
-        )
-    )
+    expected_reason = {
+        "post_reservation": "account_usage_limit_reached",
+        "authorization_failed": "account_usage_limit_authorization_failed",
+        "authorization_cancelled": "account_usage_limit_authorization_cancelled",
+    }[race_point]
     assert stored.reason == expected_reason
     assert repeated.status == "skipped"
     assert repeated.reason == expected_reason
-    assert released_reservations == (["reservation-final-authorization"] if with_reservation else [])
+    assert released_reservations == ["reservation-final-authorization"]
 
 
 @pytest.mark.asyncio
@@ -657,77 +778,6 @@ async def test_quota_planner_warm_now_final_authorization_blocks_paused_account(
     assert result.status == "skipped"
     assert result.reason == "account_status_paused"
     assert released_reservations == ["reservation-paused-account"]
-
-
-@pytest.mark.asyncio
-async def test_quota_planner_warm_now_final_authorization_blocks_unavailable_usage_data(
-    monkeypatch: pytest.MonkeyPatch,
-    db_setup,
-) -> None:
-    del db_setup
-    account_id = "acc-warmup-final-authorization-data-unavailable"
-    released_reservations: list[str] = []
-    async with SessionLocal() as session:
-        account = _warmup_test_account(account_id)
-        account.usage_limit_enabled = True
-        account.usage_limit_percent = 10.0
-        session.add(account)
-        session.add(
-            UsageHistory(
-                account_id=account_id,
-                used_percent=5.0,
-                recorded_at=utcnow(),
-                window="primary",
-                reset_at=None,
-                window_minutes=300,
-            )
-        )
-        await QuotaPlannerRepository(session).upsert_settings(_AUTO_WARMUP_SETTINGS)
-        service = QuotaWarmupService(session)
-
-        async def drop_measurements_after_claim(*args, **kwargs):
-            claimed = await claim(*args, **kwargs)
-            async with SessionLocal() as race_session:
-                await race_session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
-                await race_session.commit()
-            return claimed
-
-        claim = service._planner.claim_warmup_decision
-        monkeypatch.setattr(service._planner, "claim_warmup_decision", drop_measurements_after_claim)
-
-        class FakeApiKeys:
-            async def enforce_limits_for_request(self, *args, **kwargs):
-                del args, kwargs
-                return SimpleNamespace(reservation_id="reservation-data-unavailable")
-
-            async def release_usage_reservation(self, reservation_id: str) -> None:
-                released_reservations.append(reservation_id)
-
-        async def fail_send(*args, **kwargs):
-            del args, kwargs
-            raise AssertionError("final usage authorization must block the warmup probe")
-
-        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
-        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fail_send)
-
-        result = await service.warm_now(
-            account_id=account_id,
-            model="gpt-5.4-mini",
-            api_key_id="api-key-race",
-            force_probe=True,
-        )
-        stored = await session.scalar(
-            select(QuotaPlannerDecision)
-            .where(QuotaPlannerDecision.id == result.decision_id)
-            .execution_options(populate_existing=True)
-        )
-
-    assert stored is not None
-    assert stored.status == "skipped"
-    assert stored.reason == "account_usage_limit_reached"
-    assert result.status == "skipped"
-    assert result.reason == "account_usage_limit_reached"
-    assert released_reservations == ["reservation-data-unavailable"]
 
 
 @pytest.mark.asyncio

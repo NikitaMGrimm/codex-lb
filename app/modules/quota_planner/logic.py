@@ -8,11 +8,7 @@ from datetime import time as dt_time
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.core.balancer import (
-    AccountState,
-    RoutingCost,
-    RoutingCostsByAccount,
-)
+from app.core.balancer import AccountState, RoutingCost, RoutingCostsByAccount
 from app.db.models import AccountStatus
 
 FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60

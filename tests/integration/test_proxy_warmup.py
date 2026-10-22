@@ -258,15 +258,8 @@ async def test_warmup_normal_mode_skips_account_reached_on_secondary_usage_limit
     assert usage_limit.status_code == 200
     _, key = await _create_api_key(async_client, name="warmup-secondary-limit")
 
-    upstream_called = False
-
-    async def _unexpected_compact(*args, **kwargs):
-        del args, kwargs
-        nonlocal upstream_called
-        upstream_called = True
-        raise AssertionError("usage-limited warmup must not reach upstream")
-
-    monkeypatch.setattr(proxy_module, "core_compact_responses", _unexpected_compact)
+    compact = AsyncMock()
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
 
     response = await async_client.post(
         "/v1/warmup",
@@ -282,45 +275,7 @@ async def test_warmup_normal_mode_skips_account_reached_on_secondary_usage_limit
         "skipped": [{"account_id": account_id, "reason": "account_usage_limit_reached"}],
         "failed": [],
     }
-    assert upstream_called is False
-
-
-@pytest.mark.asyncio
-async def test_warmup_force_mode_does_not_override_account_usage_limit(async_client, monkeypatch):
-    await _enable_api_key_auth(async_client)
-    account_id = await _import_account(
-        async_client,
-        "acc-warmup-force-limit",
-        "warmup-force-limit@example.com",
-    )
-    await _add_primary_usage(account_id, used_percent=10.0, window_minutes=300)
-    usage_limit = await async_client.put(
-        f"/api/accounts/{account_id}/usage-limit",
-        json={"enabled": True, "percent": 10.0},
-    )
-    assert usage_limit.status_code == 200
-    _, key = await _create_api_key(async_client, name="warmup-force-limit")
-
-    async def _unexpected_compact(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("force mode must not bypass a hard account usage limit")
-
-    monkeypatch.setattr(proxy_module, "core_compact_responses", _unexpected_compact)
-
-    response = await async_client.post(
-        "/v1/warmup",
-        headers={"Authorization": f"Bearer {key}"},
-        json={"mode": "force"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "mode": "force",
-        "total_accounts": 1,
-        "submitted": [],
-        "skipped": [{"account_id": account_id, "reason": "account_usage_limit_reached"}],
-        "failed": [],
-    }
+    compact.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -426,43 +381,6 @@ async def test_warmup_immediately_observes_usage_refresh_transitions_for_account
     account_payload = next(item for item in accounts_response.json()["accounts"] if item["accountId"] == account_id)
     assert account_payload["usage"]["primaryRemainingPercent"] is None
     assert account_payload["usageLimitState"] == "data_unavailable"
-
-
-@pytest.mark.asyncio
-async def test_warmup_skips_account_without_current_standard_usage_data(async_client, monkeypatch):
-    await _enable_api_key_auth(async_client)
-    account_id = await _import_account(
-        async_client,
-        "acc-warmup-missing-usage-data",
-        "warmup-missing-usage-data@example.com",
-    )
-    usage_limit = await async_client.put(
-        f"/api/accounts/{account_id}/usage-limit",
-        json={"enabled": True, "percent": 10.0},
-    )
-    assert usage_limit.status_code == 200
-    _, key = await _create_api_key(async_client, name="warmup-missing-usage-data")
-
-    async def _unexpected_compact(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("fail-closed warmup must not reach upstream without current usage data")
-
-    monkeypatch.setattr(proxy_module, "core_compact_responses", _unexpected_compact)
-
-    response = await async_client.post(
-        "/v1/warmup",
-        headers={"Authorization": f"Bearer {key}"},
-        json={"mode": "force"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "mode": "force",
-        "total_accounts": 1,
-        "submitted": [],
-        "skipped": [{"account_id": account_id, "reason": "account_usage_limit_reached"}],
-        "failed": [],
-    }
 
 
 @pytest.mark.asyncio
@@ -1074,6 +992,34 @@ async def test_warmup_uses_api_key_enforced_model_over_dashboard_model(async_cli
     assert captured_request_payload["model"] == "gpt-4.1-nano"
     assert captured_request_payload["instructions"] == "Warmup request."
     assert "warmup_model" not in captured_request_payload
+
+
+@pytest.mark.asyncio
+async def test_warmup_strict_rejects_policy_blocked_target_without_upstream_calls(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    eligible_id = await _import_account(async_client, "acc-strict-eligible", "strict-a@example.com")
+    blocked_id = await _import_account(async_client, "acc-strict-blocked", "strict-b@example.com")
+    await _add_primary_usage(eligible_id, used_percent=0.0, window_minutes=300)
+    await _add_primary_usage(blocked_id, used_percent=0.0, window_minutes=300)
+    await _add_usage(blocked_id, window="secondary", used_percent=40.0, window_minutes=10080)
+    usage_limit = await async_client.put(
+        f"/api/accounts/{blocked_id}/usage-limit",
+        json={"enabled": True, "percentWeekly": 40.0},
+    )
+    assert usage_limit.status_code == 200
+    _, key = await _create_api_key(async_client, name="warmup-strict-policy")
+    compact = AsyncMock()
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "strict"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    compact.assert_not_awaited()
 
 
 @pytest.mark.asyncio

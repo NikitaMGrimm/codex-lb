@@ -24,6 +24,7 @@ from app.core.usage.types import UsageWindowRow
 from app.core.utils.shared_future import _await_cleanup_deferring_cancellation, _await_result_deferring_cancellation
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings, QuotaPlannerDecision
+from app.db.snapshot import clone_row
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import (
@@ -93,9 +94,18 @@ class WarmupUsage:
 class _FreshStandardUsage:
     account: Account | None
     decision: OwnerAuthorization
-    primary: UsageWindowRow | None = None
-    secondary: UsageWindowRow | None = None
-    monthly: UsageWindowRow | None = None
+
+
+def _authorization_skip_reason(authorization: _FreshStandardUsage) -> str | None:
+    if authorization.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
+        return ACCOUNT_USAGE_LIMIT_AUTHORIZATION_FAILED_REASON
+    if authorization.account is None:
+        return "account_not_found"
+    if authorization.decision.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
+        return f"account_status_{authorization.account.status.value}"
+    if authorization.decision.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
+        return ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
+    return None
 
 
 class QuotaWarmupService:
@@ -258,26 +268,14 @@ class QuotaWarmupService:
                 extra={"account_id": account.id, "decision_id": decision.id},
                 exc_info=True,
             )
-            return await self._skip_claimed_warmup_deferring_cancellation(
-                decision_id=decision.id,
-                reason=ACCOUNT_USAGE_LIMIT_AUTHORIZATION_FAILED_REASON,
-                reservation_id=reservation_id,
-                claim_executed_at=claim_executed_at,
-                claim_lease_expires_at=claim_lease_expires_at,
+            authorization = _FreshStandardUsage(
+                account=None, decision=OwnerAuthorization(OwnerAuthorizationKind.AUTHORIZATION_FAILED)
             )
-        authorization_reason: str | None = None
-        if authorization.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
-            authorization_reason = ACCOUNT_USAGE_LIMIT_AUTHORIZATION_FAILED_REASON
-        elif authorization.account is None:
-            authorization_reason = "account_not_found"
-        elif authorization.decision.kind is OwnerAuthorizationKind.OWNER_UNAVAILABLE:
-            authorization_reason = f"account_status_{authorization.account.status.value}"
-        elif authorization.decision.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
-            authorization_reason = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
-        if authorization_reason is not None:
+        skip_reason = _authorization_skip_reason(authorization)
+        if skip_reason is not None:
             return await self._skip_claimed_warmup_deferring_cancellation(
                 decision_id=decision.id,
-                reason=authorization_reason,
+                reason=skip_reason,
                 reservation_id=reservation_id,
                 claim_executed_at=claim_executed_at,
                 claim_lease_expires_at=claim_lease_expires_at,
@@ -294,6 +292,7 @@ class QuotaWarmupService:
             # reclaim the decision. Same binding as the proxy warm-up path
             # (``proxy/_service/warmup.py``).
             with dashboard_overrides_bound(dashboard_settings):
+                bind_resilience_toggles(dashboard_settings)
                 usage = await self._send_warmup_probe(
                     account=account,
                     model=resolved_model,
@@ -535,7 +534,6 @@ class QuotaWarmupService:
         # A cancelled driver call or a PostgreSQL statement error leaves the
         # read transaction unusable. End it before releasing durable resources.
         await self._session.rollback()
-        row: QuotaPlannerDecision | None = None
         try:
             if reservation_id is not None:
                 await self._api_keys.release_usage_reservation(reservation_id)
@@ -628,25 +626,16 @@ class QuotaWarmupService:
             return False, "dry_run_enabled"
 
         standard_usage = await self._load_fresh_standard_usage(account.id)
-        if standard_usage.decision.kind is OwnerAuthorizationKind.AUTHORIZATION_FAILED:
-            return False, ACCOUNT_USAGE_LIMIT_AUTHORIZATION_FAILED_REASON
+        skip_reason = _authorization_skip_reason(standard_usage)
+        if skip_reason is not None:
+            return False, skip_reason
         account = standard_usage.account
-        if account is None:
-            return False, "account_not_found"
-        if account.status != AccountStatus.ACTIVE:
-            return False, f"account_status_{account.status.value}"
-
-        if standard_usage.decision.kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
-            return False, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
-        latest = standard_usage.primary
+        snapshot = standard_usage.decision.snapshot
+        assert account is not None and snapshot is not None
+        latest = snapshot.primary
         if _sample_blocks_short_window_planning(latest):
             return False, "no_short_window"
-        if self._short_window_superseded(
-            account,
-            latest,
-            secondary=standard_usage.secondary,
-            monthly=standard_usage.monthly,
-        ):
+        if self._short_window_superseded(account, latest, secondary=snapshot.secondary, monthly=snapshot.monthly):
             return False, "no_short_window"
         if latest is not None and latest.reset_at is not None and latest.reset_at > naive_utc_to_epoch(utcnow()):
             return False, "account_window_already_active"
@@ -685,19 +674,16 @@ class QuotaWarmupService:
         snapshot = decision.snapshot
         if snapshot is None:
             return _FreshStandardUsage(account=None, decision=decision)
+        # Authorization is observational. A subsequent claim/log/usage commit
+        # must not flush this projected policy over a newer operator edit.
+        account = clone_row(account)
         account.status = snapshot.status
         account.plan_type = snapshot.plan_type
         account.usage_limit_enabled = snapshot.enabled
         account.usage_limit_percent = snapshot.limit_percent
         account.usage_limit_weekly_percent = snapshot.limit_weekly_percent
         account.usage_limit_5h_percent = snapshot.limit_5h_percent
-        return _FreshStandardUsage(
-            account=account,
-            decision=decision,
-            primary=snapshot.primary,
-            secondary=snapshot.secondary,
-            monthly=snapshot.monthly,
-        )
+        return _FreshStandardUsage(account=account, decision=decision)
 
     @staticmethod
     def _short_window_superseded(
@@ -751,9 +737,6 @@ class QuotaWarmupService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         upstream_account_id = account.chatgpt_account_id
         usage = WarmupUsage(input_tokens=0, output_tokens=0, cached_input_tokens=0, reasoning_tokens=None)
-        # C2-3 resilience toggles: background probe, no request snapshot to
-        # inherit; take one here so the breaker gate follows the dashboard.
-        bind_resilience_toggles(await get_settings_cache().get())
         async for event_block in stream_responses(
             payload,
             headers,

@@ -400,6 +400,40 @@ def test_parent_unknown_to_the_base_ref_does_not_report_a_fork(checker: ModuleTy
     assert report.errors == []
 
 
+@pytest.mark.parametrize("include_current_upstream_head", [True, False])
+def test_parallel_branch_is_accepted_only_after_full_convergence(
+    checker: ModuleType, tmp_path: Path, include_current_upstream_head: bool
+) -> None:
+    versions = tmp_path / "versions"
+    parent = _linear_fixture(checker, versions)
+    upstream_first = "20260912_000000_landed_on_main"
+    upstream_head = "20260913_000000_next_on_main"
+    local_head = "20260912_010000_local_revision"
+    _write_revision(versions, upstream_first, parent)
+    _write_revision(versions, upstream_head, upstream_first)
+    _write_revision(versions, local_head, parent)
+    _write_revision(
+        versions,
+        "20260914_000000_merge_heads",
+        (local_head, upstream_head if include_current_upstream_head else upstream_first),
+    )
+    base_revisions = [
+        _base_revision(checker, "20260901_000000_fixture_base", None),
+        _base_revision(checker, parent, "20260901_000000_fixture_base"),
+        _base_revision(checker, upstream_first, parent),
+        _base_revision(checker, upstream_head, upstream_first),
+    ]
+    revisions = checker.load_graph(versions)
+    report = checker.check_branch_fork(revisions, base_revisions, "upstream/main")
+    if include_current_upstream_head:
+        assert report.errors == []
+        assert checker.check_graph_shape(revisions).errors == []
+    else:
+        assert len(report.errors) == 1
+        assert local_head in report.errors[0]
+        assert checker.check_graph_shape(revisions).errors
+
+
 def test_base_ref_revisions_reads_the_graph_out_of_git(checker: ModuleType) -> None:
     """The git plumbing must reproduce the same edges as reading the working tree."""
     base_revisions = checker.base_ref_revisions("HEAD")

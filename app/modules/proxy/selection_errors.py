@@ -7,7 +7,6 @@ from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.resilience.overload import is_local_overload_error_code
 
 USAGE_LIMIT_REACHED = "usage_limit_reached"
-OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 
 
 class SelectionFailure(Protocol):
@@ -38,8 +37,6 @@ def selection_failure_response(selection: SelectionFailure) -> tuple[int, OpenAI
                 resets_at=selection.resets_at,
             ),
         )
-    if code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE:
-        return 429, openai_error(code, message, error_type="rate_limit_error")
-    if is_local_overload_error_code(code):
+    if code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE or is_local_overload_error_code(code):
         return 429, openai_error(code, message, error_type="rate_limit_error")
     return 503, openai_error(code, message)

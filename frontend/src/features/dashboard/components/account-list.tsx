@@ -1,4 +1,3 @@
-import { UsageQuotaBar } from "@/components/usage-quota-bar";
 import { ArrowDown, ArrowUp, ArrowUpDown, Clock, ExternalLink, List, Play, RotateCcw, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -7,6 +6,7 @@ import { Link } from "react-router-dom";
 import { EmptyState } from "@/components/empty-state";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
+import { UsageQuotaBar } from "@/components/usage-quota-bar";
 import type { AccountAction } from "@/features/dashboard/components/account-card";
 import {
   accountSubscriptionCredits,
@@ -74,10 +74,11 @@ function formatWarmupWindow(window: string): string {
   return window === "primary" || window === "primary_idle" ? "5h" : "weekly";
 }
 
-function quotaLabel(label: string, percent: number | null, resetAt: string | null | undefined) {
+function quotaLabel(label: string, percent: number | null, resetAt: string | null | undefined, cap?: number | null) {
   return {
     label,
     percent,
+    cap,
     percentLabel: formatPercentNullable(percent, 1),
     resetLabel: formatQuotaResetLabel(resetAt ?? null),
     resetAt,
@@ -252,12 +253,12 @@ function AccountQuotaCells({ account, quotaLbShare, showQuotaLbShare }: { accoun
   const monthlyOnly = hasMonthlyWindow && !hasPrimaryWindow && !hasSecondaryWindow;
   const weeklyOnly = !hasPrimaryWindow && hasSecondaryWindow;
   const quotas = monthlyOnly
-    ? [quotaLabel("Monthly", monthlyState.percent, account.resetAtMonthly)]
+    ? [quotaLabel("Monthly", monthlyState.percent, account.resetAtMonthly, account.effectiveLimitMonthly)]
     : weeklyOnly
-      ? [quotaLabel("Weekly", secondaryState.percent, account.resetAtSecondary)]
+      ? [quotaLabel("Weekly", secondaryState.percent, account.resetAtSecondary, account.effectiveLimitSecondary)]
       : [
-          quotaLabel("5h", primaryState.percent, account.resetAtPrimary),
-          quotaLabel("Weekly", secondaryState.percent, account.resetAtSecondary),
+          quotaLabel("5h", primaryState.percent, account.resetAtPrimary, account.effectiveLimitPrimary),
+          quotaLabel("Weekly", secondaryState.percent, account.resetAtSecondary, account.effectiveLimitSecondary),
         ];
   return (
     <div className="grid gap-1.5 text-xs">
@@ -265,7 +266,7 @@ function AccountQuotaCells({ account, quotaLbShare, showQuotaLbShare }: { accoun
         <div key={quota.label} className="grid grid-cols-[2.75rem_minmax(3rem,auto)_minmax(2.75rem,0.45fr)_minmax(0,1fr)] items-center gap-2">
           <span className="text-muted-foreground">{localizedQuotaLabel(quota.label, t)}</span>
           <span className="font-medium tabular-nums text-foreground">{quota.percentLabel}</span>
-          <QuotaMeter label={localizedQuotaLabel(quota.label, t)} percent={quota.percent} cap={quota.label === "5h" ? account.effectiveLimitPrimary : quota.label === "Weekly" ? account.effectiveLimitSecondary : account.effectiveLimitMonthly} />
+          <QuotaMeter label={localizedQuotaLabel(quota.label, t)} percent={quota.percent} cap={quota.cap} />
           <span className="flex min-w-0 flex-col text-[11px] text-muted-foreground">
             <span className="inline-flex min-w-0 items-center gap-1">
               <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />

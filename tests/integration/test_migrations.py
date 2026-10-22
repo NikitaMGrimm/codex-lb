@@ -780,6 +780,90 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
         await engine.dispose()
 
 
+_SCALAR_POLICIES = {
+    "enabled-policy": {"usage_limit_enabled": True, "usage_limit_percent": 10.0},
+    "saved-policy": {"usage_limit_enabled": False, "usage_limit_percent": 20.0},
+}
+_OVERRIDE_POLICIES = {
+    "enabled-policy": {
+        "usage_limit_enabled": True,
+        "usage_limit_percent": 10.0,
+        "usage_limit_5h_percent": 20.0,
+        "usage_limit_weekly_percent": 30.0,
+    },
+    "saved-policy": {
+        "usage_limit_enabled": False,
+        "usage_limit_5h_percent": 35.0,
+        "usage_limit_weekly_percent": 45.0,
+    },
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("starting_revision", "policies"),
+    [
+        ("20260918_000000_merge_scim_and_overflow_heads", {"enabled-policy": {}, "saved-policy": {}}),
+        ("20260728_010000_add_account_usage_limits", _SCALAR_POLICIES),
+        ("20260910_010000_add_usage_limit_overrides", _OVERRIDE_POLICIES),
+        ("20261002_000000_merge_usage_limits_and_main_heads", _OVERRIDE_POLICIES),
+    ],
+    ids=["current-upstream", "local-scalar", "published-overrides", "reviewed-local-merge"],
+)
+async def test_usage_limit_lineages_upgrade_to_head_without_losing_policy(tmp_path, starting_revision, policies):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'usage-limit-lineage.sqlite'}"
+    await to_thread.run_sync(lambda: run_upgrade(db_url, starting_revision, bootstrap_legacy=True))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            for account_id, policy in policies.items():
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO accounts (
+                            id, codex_installation_id, email, plan_type,
+                            access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
+                            last_refresh, status
+                        ) VALUES (:id, :id, :email, 'plus', 'access', 'refresh', 'id-token',
+                                  '2026-10-02 00:00:00', 'active')
+                        """
+                    ),
+                    {"id": account_id, "email": f"{account_id}@example.com"},
+                )
+                if policy:
+                    assignments = ", ".join(f"{column} = :{column}" for column in policy)
+                    await conn.execute(
+                        text(f"UPDATE accounts SET {assignments} WHERE id = :id"), {**policy, "id": account_id}
+                    )
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT id, usage_limit_enabled, usage_limit_percent, "
+                        "usage_limit_5h_percent, usage_limit_weekly_percent FROM accounts ORDER BY id"
+                    )
+                )
+            ).all()
+            revisions = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all()
+        assert revisions == [_HEAD_REVISION]
+        assert rows == [
+            (
+                account_id,
+                int(policy.get("usage_limit_enabled", False)),
+                policy.get("usage_limit_percent"),
+                policy.get("usage_limit_5h_percent"),
+                policy.get("usage_limit_weekly_percent"),
+            )
+            for account_id, policy in policies.items()
+        ]
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_dashboard_settings_default_flip_migration_does_not_infer_intent_from_updated_at(tmp_path):
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'dashboard-settings-defaults.sqlite'}"
@@ -3453,7 +3537,7 @@ async def test_bridge_continuity_abandonment_migration_upgrade_and_downgrade(tmp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
-async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path, db_setup, dialect):
+async def test_account_usage_limits_migrations_upgrade_and_downgrade(tmp_path, db_setup, dialect):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect
 
@@ -3471,12 +3555,28 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path, db
             await session.commit()
     else:
         db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-usage-limits.sqlite'}"
-    revision = "20260728_010000_add_account_usage_limits"
+    scalar_revision = "20260728_010000_add_account_usage_limits"
     parent_revision = "20260812_120000_add_sticky_abandonment_scope"
+    policy_columns = {
+        "usage_limit_enabled",
+        "usage_limit_percent",
+        "usage_limit_5h_percent",
+        "usage_limit_weekly_percent",
+    }
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
-
     engine = create_async_engine(db_url, future=True)
+
+    async def present_policy_columns() -> set[str]:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(lambda sync_conn: sa_inspect(sync_conn).get_columns("accounts"))
+        return policy_columns & {column["name"] for column in columns}
+
+    async def assert_rejected(assignments: str) -> None:
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(text(f"UPDATE accounts SET {assignments}"))
+
     try:
         async with engine.begin() as conn:
             await conn.execute(
@@ -3496,185 +3596,39 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path, db
                 ),
                 {"access": b"\x01", "refresh": b"\x02", "identity": b"\x03"},
             )
-    finally:
-        await engine.dispose()
 
-    await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
-
-    engine = create_async_engine(db_url, future=True)
-    try:
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        migration_state = inspect_migration_state(db_url)
+        assert migration_state.current_revision == migration_state.head_revision == _HEAD_REVISION
         async with engine.connect() as conn:
-            columns = await conn.run_sync(
-                lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("accounts")}
-            )
             row = (
                 await conn.execute(
                     text(
-                        """
-                        SELECT usage_limit_enabled, usage_limit_percent
-                        FROM accounts
-                        WHERE id = 'acc_usage_limit_migration'
-                        """
+                        "SELECT usage_limit_enabled, usage_limit_percent, "
+                        "usage_limit_5h_percent, usage_limit_weekly_percent FROM accounts"
                     )
                 )
             ).one()
-        assert {"usage_limit_enabled", "usage_limit_percent"} <= columns
+        assert row == (0, None, None, None)
+        await assert_rejected("usage_limit_enabled = TRUE")
+        await assert_rejected("usage_limit_percent = 101.0")
+        await assert_rejected("usage_limit_weekly_percent = 0")
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE accounts SET usage_limit_enabled = TRUE, usage_limit_weekly_percent = 90"))
+
+        # Removing overrides disables a policy that only an override satisfied.
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), scalar_revision))
+        async with engine.connect() as conn:
+            row = (await conn.execute(text("SELECT usage_limit_enabled, usage_limit_percent FROM accounts"))).one()
         assert row == (0, None)
+        await assert_rejected("usage_limit_enabled = TRUE, usage_limit_percent = NULL")
 
-        async with engine.begin() as conn:
-            await conn.execute(
-                text(
-                    """
-                    UPDATE accounts
-                    SET usage_limit_enabled = TRUE, usage_limit_percent = 10.0
-                    WHERE id = 'acc_usage_limit_migration'
-                    """
-                )
-            )
-        with pytest.raises(IntegrityError):
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        """
-                        UPDATE accounts
-                        SET usage_limit_enabled = TRUE, usage_limit_percent = NULL
-                        WHERE id = 'acc_usage_limit_migration'
-                        """
-                    )
-                )
-        with pytest.raises(IntegrityError):
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        """
-                        UPDATE accounts
-                        SET usage_limit_enabled = FALSE, usage_limit_percent = 101.0
-                        WHERE id = 'acc_usage_limit_migration'
-                        """
-                    )
-                )
-    finally:
-        await engine.dispose()
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        assert await present_policy_columns() == set()
 
-    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-    migration_state = inspect_migration_state(db_url)
-    assert migration_state.head_revision == _HEAD_REVISION
-    assert migration_state.current_revision == _HEAD_REVISION
-    verification_engine = create_async_engine(db_url, future=True)
-    try:
-        async with verification_engine.connect() as conn:
-            revision_rows = await conn.execute(text("SELECT version_num FROM alembic_version"))
-            assert [str(row[0]) for row in revision_rows.fetchall()] == [_HEAD_REVISION]
-    finally:
-        await verification_engine.dispose()
-
-    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
-
-    engine = create_async_engine(db_url, future=True)
-    try:
-        async with engine.connect() as conn:
-            downgraded_columns = await conn.run_sync(
-                lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("accounts")}
-            )
-        assert "usage_limit_enabled" not in downgraded_columns
-        assert "usage_limit_percent" not in downgraded_columns
-    finally:
-        await engine.dispose()
-
-    await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
-
-    engine = create_async_engine(db_url, future=True)
-    try:
-        async with engine.connect() as conn:
-            reapplied_columns = await conn.run_sync(
-                lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("accounts")}
-            )
-            reapplied_row = (
-                await conn.execute(
-                    text(
-                        """
-                        SELECT usage_limit_enabled, usage_limit_percent
-                        FROM accounts
-                        WHERE id = 'acc_usage_limit_migration'
-                        """
-                    )
-                )
-            ).one()
-        assert {"usage_limit_enabled", "usage_limit_percent"} <= reapplied_columns
-        assert reapplied_row == (0, None)
-
-        with pytest.raises(IntegrityError):
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        """
-                        UPDATE accounts
-                        SET usage_limit_enabled = TRUE, usage_limit_percent = NULL
-                        WHERE id = 'acc_usage_limit_migration'
-                        """
-                    )
-                )
-        with pytest.raises(IntegrityError):
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        """
-                        UPDATE accounts
-                        SET usage_limit_enabled = FALSE, usage_limit_percent = 101.0
-                        WHERE id = 'acc_usage_limit_migration'
-                        """
-                    )
-                )
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
-async def test_usage_limit_overrides_preserve_scalar_and_round_trip(tmp_path, db_setup, dialect):
-    from alembic import command
-
-    from app.db.migrate import _build_alembic_config
-
-    if dialect == "postgresql":
-        if not _is_postgresql_database_url(_DATABASE_URL):
-            pytest.skip("PostgreSQL-only override migration round trip")
-        url = _DATABASE_URL
-        async with SessionLocal() as session:
-            await session.execute(text("DROP SCHEMA public CASCADE"))
-            await session.execute(text("CREATE SCHEMA public"))
-            await session.commit()
-    else:
-        url = f"sqlite+aiosqlite:///{tmp_path / 'usage-overrides.sqlite'}"
-    parent = "20260728_010000_add_account_usage_limits"
-    await to_thread.run_sync(lambda: run_upgrade(url, parent, bootstrap_legacy=True))
-    engine = create_async_engine(url)
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(
-                text("""
-                INSERT INTO accounts (id, codex_installation_id, email, plan_type,
-                    access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
-                    last_refresh, status, usage_limit_enabled, usage_limit_percent)
-                VALUES ('override-test', '00000000-0000-0000-0000-000000000001', 'test@example.test', 'plus',
-                     :token, :token, :token, CURRENT_TIMESTAMP, 'active', :enabled, 80)
-            """),
-                {"token": b"synthetic", "enabled": True},
-            )
-        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
-        async with engine.begin() as conn:
-            row = (
-                await conn.execute(
-                    text("SELECT usage_limit_enabled, usage_limit_percent, usage_limit_5h_percent FROM accounts")
-                )
-            ).one()
-            assert tuple(row) == (1, 80, None)
-            await conn.execute(text("UPDATE accounts SET usage_limit_percent=NULL, usage_limit_weekly_percent=90"))
-        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(url), parent))
-        async with engine.connect() as conn:
-            assert (await conn.execute(text("SELECT usage_limit_enabled FROM accounts"))).scalar_one() == 0
-        await to_thread.run_sync(lambda: run_upgrade(url, "head", bootstrap_legacy=False))
-        assert await to_thread.run_sync(lambda: check_schema_drift(url)) == ()
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert await present_policy_columns() == policy_columns
+        assert await to_thread.run_sync(lambda: check_schema_drift(db_url)) == ()
     finally:
         await engine.dispose()
 

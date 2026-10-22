@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from datetime import timedelta
 from typing import cast
 from uuid import uuid4
@@ -665,23 +666,9 @@ class AccountsService:
         account_id: str,
         *,
         enabled: bool,
-        percent: float | None,
-        update_percent: bool,
-        percent_5h: float | None = None,
-        percent_weekly: float | None = None,
-        update_5h: bool = False,
-        update_weekly: bool = False,
+        thresholds: Mapping[str, float | None],
     ) -> AccountUsageLimitConfiguration | None:
-        result = await self._repo.update_usage_limit(
-            account_id,
-            enabled=enabled,
-            percent=percent,
-            update_percent=update_percent,
-            percent_5h=percent_5h,
-            percent_weekly=percent_weekly,
-            update_5h=update_5h,
-            update_weekly=update_weekly,
-        )
+        result = await self._repo.update_usage_limit(account_id, enabled=enabled, thresholds=thresholds)
         if result is not None:
             get_account_selection_cache().invalidate(propagate=False)
             await bump_cache_invalidation_local(NAMESPACE_ACCOUNT_SELECTION)

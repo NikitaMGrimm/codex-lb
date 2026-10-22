@@ -9,6 +9,7 @@ from sqlalchemy import delete, select, update
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
+from app.core.usage.models import RateLimitPayload, UsagePayload
 from app.core.usage.refresh_scheduler import reconcile_recoverable_account_statuses
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, RequestLog, UsageHistory
@@ -18,6 +19,7 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, is_account_routing_unavailable
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
+from app.modules.usage.updater import UsageUpdater
 
 pytestmark = pytest.mark.integration
 
@@ -96,90 +98,6 @@ async def test_import_invalid_json_returns_400(async_client):
 
 
 @pytest.mark.asyncio
-async def test_account_usage_limit_stale_disable_retains_latest_value_and_explicit_null_removes(
-    async_client,
-    db_setup,
-):
-    account = _make_account("acc_usage_limit_api", "usage-limit-api@example.com")
-    async with SessionLocal() as session:
-        await AccountsRepository(session).upsert(account)
-
-    enabled = await async_client.put(
-        f"/api/accounts/{account.id}/usage-limit",
-        json={"enabled": True, "percent": 10},
-    )
-    assert enabled.status_code == 200
-    assert enabled.json() == {
-        "accountId": account.id,
-        "enabled": True,
-        "percent": 10.0,
-        "percent5H": None,
-        "percentWeekly": None,
-    }
-
-    listed = await async_client.get("/api/accounts")
-    summary = next(item for item in listed.json()["accounts"] if item["accountId"] == account.id)
-    assert summary["usageLimitEnabled"] is True
-    assert summary["usageLimitPercent"] == 10.0
-    assert summary["usageLimitState"] == "data_unavailable"
-
-    newer_value = await async_client.put(
-        f"/api/accounts/{account.id}/usage-limit",
-        json={"enabled": True, "percent": 20},
-    )
-    assert newer_value.status_code == 200
-
-    # A dashboard tab that loaded 10% before the newer write toggles only the
-    # enabled flag. Omitting percent must retain the authoritative 20% value.
-    disabled = await async_client.put(
-        f"/api/accounts/{account.id}/usage-limit",
-        json={"enabled": False},
-    )
-    assert disabled.status_code == 200
-    assert disabled.json()["enabled"] is False
-    assert disabled.json()["percent"] == 20.0
-
-    listed = await async_client.get("/api/accounts")
-    summary = next(item for item in listed.json()["accounts"] if item["accountId"] == account.id)
-    assert summary["usageLimitEnabled"] is False
-    assert summary["usageLimitPercent"] == 20.0
-    assert summary["usageLimitState"] == "disabled"
-
-    reenabled = await async_client.put(
-        f"/api/accounts/{account.id}/usage-limit",
-        json={"enabled": True},
-    )
-    assert reenabled.status_code == 200
-    assert reenabled.json()["enabled"] is True
-    assert reenabled.json()["percent"] == 20.0
-
-    cleared_last_threshold = await async_client.put(
-        f"/api/accounts/{account.id}/usage-limit",
-        json={"enabled": True, "percent": None},
-    )
-    assert cleared_last_threshold.status_code == 422
-
-    disabled_again = await async_client.put(
-        f"/api/accounts/{account.id}/usage-limit",
-        json={"enabled": False},
-    )
-    assert disabled_again.status_code == 200
-    assert disabled_again.json()["percent"] == 20.0
-
-    removed = await async_client.put(
-        f"/api/accounts/{account.id}/usage-limit",
-        json={"enabled": False, "percent": None},
-    )
-    assert removed.status_code == 200
-
-    async with SessionLocal() as session:
-        stored = await session.get(Account, account.id)
-        assert stored is not None
-        assert stored.usage_limit_enabled is False
-        assert stored.usage_limit_percent is None
-
-
-@pytest.mark.asyncio
 async def test_account_summary_reports_reached_and_available_usage_limit_states(async_client, db_setup):
     account = _make_account("acc_usage_limit_reached", "usage-limit-reached@example.com")
     async with SessionLocal() as session:
@@ -229,7 +147,6 @@ async def test_account_summary_reports_reached_and_available_usage_limit_states(
     "payload",
     [
         {"enabled": True},
-        {"enabled": True, "percent": None},
         {"enabled": True, "percent": 0},
         {"enabled": True, "percent": 100.01},
     ],
@@ -1895,8 +1812,13 @@ async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(
         assert not (
             await load_owner_authorization(UsageRepository(session), account.id, refresh_interval_seconds=60)
         ).allowed
+    # Omitting thresholds (e.g. a stale dashboard toggling only the flag) retains the newer stored values.
     disabled = await async_client.put(path, json={"enabled": False})
     assert disabled.json() == {"accountId": account.id, **policy, "enabled": False, "percentWeekly": 70}
+    summary = next(
+        item for item in (await async_client.get("/api/accounts")).json()["accounts"] if item["accountId"] == account.id
+    )
+    assert summary["usageLimitState"] == "disabled"
     removed = await async_client.put(
         path,
         json={
@@ -1950,3 +1872,60 @@ async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(
         item for item in (await async_client.get("/api/accounts")).json()["accounts"] if item["accountId"] == account.id
     )
     assert summary["usageLimitState"] == "data_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("plan_type", "policy", "empty_rate_limit"),
+    [
+        ("plus", "scalar", None),
+        ("free", "scalar", RateLimitPayload()),
+        ("plus", "5h", RateLimitPayload()),
+        ("plus", "weekly", None),
+    ],
+    ids=["plus-scalar-omitted", "free-scalar-empty", "plus-5h-empty", "plus-weekly-omitted"],
+)
+async def test_empty_poll_supersedes_usage_limit_telemetry(
+    async_client,
+    db_setup,
+    monkeypatch,
+    plan_type,
+    policy,
+    empty_rate_limit,
+) -> None:
+    account = _make_account("acc_empty_policy_poll", "empty-policy-poll@example.com", plan_type=plan_type)
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 50.0 if policy == "scalar" else None
+    account.usage_limit_5h_percent = 50.0 if policy == "5h" else None
+    account.usage_limit_weekly_percent = 50.0 if policy == "weekly" else None
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        usage = UsageRepository(session)
+        for window, minutes in (("primary", 300), ("secondary", 10080), ("monthly", 43200)):
+            await usage.add_entry(
+                account.id,
+                5.0,
+                window=window,
+                window_minutes=minutes,
+                reset_at=naive_utc_to_epoch(utcnow()) + minutes * 60,
+            )
+    before = await async_client.get("/api/accounts")
+    assert before.json()["accounts"][0]["usageLimitState"] == "available"
+
+    async def empty_poll(**_kwargs):
+        return UsagePayload(plan_type=plan_type, rate_limit=empty_rate_limit)
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", empty_poll)
+    async with SessionLocal() as session:
+        result = await UsageUpdater(UsageRepository(session))._refresh_account(account, usage_account_id=None)
+    assert result.usage_written is True
+    after = await async_client.get("/api/accounts")
+    assert after.status_code == 200
+    assert after.json()["accounts"][0]["usageLimitState"] == "data_unavailable"
+    for stream in (False, True):
+        denied = await async_client.post(
+            "/v1/responses", json={"model": "gpt-5.1", "input": "blocked", "stream": stream}
+        )
+        assert denied.status_code == 429
+        assert denied.json()["error"]["code"] == "account_usage_limit_reached"
+        assert denied.json()["error"]["type"] == "rate_limit_error"

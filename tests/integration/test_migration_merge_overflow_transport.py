@@ -215,6 +215,8 @@ def test_populated_parent_upgrade_and_direct_downgrades_preserve_both_branches(
     # branches' schema coexists. Stepping back there re-creates the overflow
     # schema empty, so seed it in every starting state and the direct-downgrade
     # cases all run with retained settings and non-empty pins.
+    # The 20261002 merges descend from both the usage-limit branch and _MERGE,
+    # so downgrading to _MERGE rewinds them and the usage-limit revision too.
     command.downgrade(_build_alembic_config(database.url), _MERGE)
     # The maintained fork has independent migration branches that remain
     # stamped when downgrading only the overflow/transport ancestry.

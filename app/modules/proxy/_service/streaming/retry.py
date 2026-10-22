@@ -11,7 +11,7 @@ from typing import Any, AsyncGenerator, AsyncIterator, Mapping, cast
 import aiohttp
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
-from app.core.balancer import failover_decision
+from app.core.balancer import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE, failover_decision
 from app.core.balancer.logic import (
     BURST_SAME_ACCOUNT_MAX_RETRIES,
     BURST_SURFACE_RETRY_AFTER_SECONDS,
@@ -1706,9 +1706,11 @@ class _StreamingRetryMixin:
                             raise last_pre_dispatch_transport_error
                         yield _render_dispatch_transport_error(last_pre_dispatch_transport_error)
                         return
-                    if selection.error_code == USAGE_LIMIT_REACHED:
+                    if selection.error_code in {USAGE_LIMIT_REACHED, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE}:
                         await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                         no_accounts_msg = selection.error_message or "Usage limit reached"
+                        error_code = selection.error_code
+                        assert error_code is not None
                         status_code, error_payload = selection_failure_response(selection)
                         await proxy._write_request_log(
                             affinity_observation=affinity_observation,
@@ -1718,7 +1720,7 @@ class _StreamingRetryMixin:
                             model=payload.model,
                             latency_ms=int((clock.monotonic() - start) * 1000),
                             status="error",
-                            error_code=USAGE_LIMIT_REACHED,
+                            error_code=error_code,
                             error_message=no_accounts_msg,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
@@ -1729,13 +1731,13 @@ class _StreamingRetryMixin:
                             useragent_group=useragent_group,
                             client_ip=client_ip,
                         )
-                        if propagate_http_errors:
+                        if propagate_http_errors and (error_code == USAGE_LIMIT_REACHED or enforce_openai_sdk_contract):
                             raise ProxyResponseError(status_code, error_payload)
                         yield format_sse_event(
                             response_failed_event(
-                                USAGE_LIMIT_REACHED,
+                                error_code,
                                 no_accounts_msg,
-                                error_type=USAGE_LIMIT_REACHED,
+                                error_type=error_payload["error"]["type"],
                                 response_id=request_id,
                                 resets_at=selection.resets_at,
                             )
@@ -2795,13 +2797,25 @@ class _StreamingRetryMixin:
                                             failure_class=classified["failure_class"],
                                         )
                                     break
-                                await proxy._handle_stream_error(
-                                    account,
-                                    _upstream_error_from_openai(error),
-                                    code,
-                                    http_status=tex.status_code,
-                                    **_retry_after_kwargs(tex.retry_after_seconds),
-                                )
+                                # Workspace failures are terminal for this
+                                # owner; defer keyed health until settlement.
+                                # Preserve the existing policy for other codes.
+                                if classified["failure_class"] == "account_unavailable":
+                                    await _handle_or_defer_keyed_stream_health(
+                                        account,
+                                        _upstream_error_from_openai(error),
+                                        code,
+                                        http_status=tex.status_code,
+                                        retry_after_seconds=tex.retry_after_seconds,
+                                    )
+                                else:
+                                    await proxy._handle_stream_error(
+                                        account,
+                                        _upstream_error_from_openai(error),
+                                        code,
+                                        http_status=tex.status_code,
+                                        **_retry_after_kwargs(tex.retry_after_seconds),
+                                    )
                                 setattr(tex, _STREAM_HEALTH_RECORDED_ATTR, True)
                                 if burst:
                                     _stamp_surfaced_burst_retry_after(tex)
