@@ -1875,6 +1875,7 @@ async def test_combined_usage_policy_persists_and_authorizes_fresh_owner(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("disable_during_poll", [False, True])
 @pytest.mark.parametrize(
     ("plan_type", "policy", "empty_rate_limit"),
     [
@@ -1892,6 +1893,7 @@ async def test_empty_poll_supersedes_usage_limit_telemetry(
     plan_type,
     policy,
     empty_rate_limit,
+    disable_during_poll,
 ) -> None:
     account = _make_account("acc_empty_policy_poll", "empty-policy-poll@example.com", plan_type=plan_type)
     account.usage_limit_enabled = True
@@ -1913,14 +1915,22 @@ async def test_empty_poll_supersedes_usage_limit_telemetry(
     assert before.json()["accounts"][0]["usageLimitState"] == "available"
 
     async def empty_poll(**_kwargs):
+        if disable_during_poll:
+            disabled = await async_client.put(f"/api/accounts/{account.id}/usage-limit", json={"enabled": False})
+            assert disabled.status_code == 200
         return UsagePayload(plan_type=plan_type, rate_limit=empty_rate_limit)
 
     monkeypatch.setattr("app.modules.usage.updater.fetch_usage", empty_poll)
     async with SessionLocal() as session:
-        result = await UsageUpdater(UsageRepository(session))._refresh_account(account, usage_account_id=None)
-    assert result.usage_written is True
+        updater = UsageUpdater(UsageRepository(session), accounts_repo=AccountsRepository(session))
+        result = await updater._refresh_account(account, usage_account_id=None)
+    assert result.usage_written is (not disable_during_poll)
     after = await async_client.get("/api/accounts")
     assert after.status_code == 200
+    if disable_during_poll:
+        assert after.json()["accounts"][0]["usageLimitState"] == "disabled"
+        assert after.json()["accounts"][0]["usage"] == before.json()["accounts"][0]["usage"]
+        return
     assert after.json()["accounts"][0]["usageLimitState"] == "data_unavailable"
     for stream in (False, True):
         denied = await async_client.post(

@@ -739,12 +739,12 @@ class UsageUpdater:
             monthly = normalized_windows.monthly
         standard_data_unavailable = primary is None and secondary is None and monthly is None
         # No-data placeholders supersede older measurements only for an enabled
-        # policy, so it fails closed. Re-read a policy captured as disabled in
-        # case it was enabled during the fetch; disabled accounts keep earlier rows.
+        # policy, so it fails closed. Re-read after the fetch in case the policy
+        # changed while waiting; disabled accounts keep earlier rows.
         write_placeholders = (
             standard_data_unavailable
             or any(window is not None and window.used_percent is None for window in (primary, secondary, monthly))
-        ) and (bool(account.usage_limit_enabled) or await self._usage_limit_enabled_now(account))
+        ) and await self._usage_limit_enabled_now(account)
         if standard_data_unavailable and not write_placeholders:
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             return AccountRefreshResult(usage_written=additional_synced)
