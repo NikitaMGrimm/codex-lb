@@ -25567,15 +25567,16 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_cleanup", [False, True])
+@pytest.mark.parametrize("cleanup_mode", ["complete", "cancel", "error"])
 @pytest.mark.parametrize(
     "authorization_kind", [OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, OwnerAuthorizationKind.AUTHORIZATION_FAILED]
 )
 async def test_anchored_bridge_dispatch_rejection_completes_cleanup_before_cancellation(
     monkeypatch: pytest.MonkeyPatch,
     authorization_kind: OwnerAuthorizationKind,
-    cancel_cleanup: bool,
+    cleanup_mode: str,
 ) -> None:
+    cancel_cleanup = cleanup_mode == "cancel"
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     session = _make_bridge_session(key_value="anchored-rejection-cleanup")
     session.last_used_at = time.monotonic()
@@ -25625,6 +25626,14 @@ async def test_anchored_bridge_dispatch_rejection_completes_cleanup_before_cance
     monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", authorization)
     reconnect = AsyncMock(side_effect=AssertionError("anchored rejection must not migrate accounts"))
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    if cleanup_mode == "error":
+        retire = service._retire_http_bridge_after_drain_if_ready
+
+        async def retire_then_fail(retired_session: Any) -> None:
+            await retire(retired_session)
+            raise RuntimeError("retirement bookkeeping failed")
+
+        monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire_then_fail)
 
     async def admit(
         state: proxy_service._WebSocketRequestState, *, response_create_gate: asyncio.Semaphore, **kwargs: Any

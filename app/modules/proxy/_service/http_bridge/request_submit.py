@@ -2381,7 +2381,12 @@ class _HTTPBridgeRequestSubmitMixin:
             # A cancellation during create-lease release must not skip the
             # remaining idle-stream release or retirement of a rejected owner.
             cleanup_task = scheduler_for(self).create_task(cleanup_rejection())
-            _, cancellation = await _await_task_deferring_cancellation(cleanup_task)
+            cancellation = None
+            try:
+                _, cancellation = await _await_task_deferring_cancellation(cleanup_task)
+            except Exception:
+                # The client must still receive the mapped authorization error.
+                logger.warning("Failed to clean up rejected HTTP bridge submit", exc_info=True)
             if cancellation is not None:
                 raise cancellation
             raise
