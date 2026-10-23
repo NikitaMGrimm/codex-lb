@@ -25626,11 +25626,13 @@ async def test_anchored_bridge_dispatch_rejection_completes_cleanup_before_cance
     monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", authorization)
     reconnect = AsyncMock(side_effect=AssertionError("anchored rejection must not migrate accounts"))
     monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+    retirement_errors: list[str] = []
     if cleanup_mode == "error":
         retire = service._retire_http_bridge_after_drain_if_ready
 
         async def retire_then_fail(retired_session: Any) -> None:
             await retire(retired_session)
+            retirement_errors.append("raised")
             raise RuntimeError("retirement bookkeeping failed")
 
         monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire_then_fail)
@@ -25714,6 +25716,7 @@ async def test_anchored_bridge_dispatch_rejection_completes_cleanup_before_cance
         await stream.aclose()
 
     assert released == ["admission", "response_create", "stream"]
+    assert retirement_errors == (["raised"] if cleanup_mode == "error" else [])
     assert authorization.await_count == 2
     assert all(args.args == (original_account.id,) for args in authorization.await_args_list)
     assert session.account is original_account
