@@ -141,6 +141,16 @@ def _account_to_summary(
 
     if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
         monthly_usage = None
+    # Match policy evaluation when a weekly-only plan replaces its monthly window.
+    if (
+        monthly_usage is not None
+        and effective_primary_usage is None
+        and effective_secondary_usage is not None
+        and usage_core.should_use_weekly_primary(
+            usage_history_to_window_row(effective_secondary_usage), usage_history_to_window_row(monthly_usage)
+        )
+    ):
+        monthly_usage = None
     usage_refreshed_at = _latest_usage_recorded_at(primary_usage, secondary_usage, monthly_usage)
     monthly_used_percent = _normalize_used_percent(monthly_usage)
     monthly_remaining_percent = usage_core.remaining_percent_from_used(monthly_used_percent)

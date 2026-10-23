@@ -22,6 +22,19 @@ Decisions and constraints:
 - Warmup authorization works on transient copies of the account, so its settlement commits cannot write an older policy over a newer operator edit.
 - Selection checks the invalidation generation after every await that precedes returning an account (affinity persistence, recovery-probe commitment, process-seed persistence). After affinity persistence or probe commitment it releases provisional admission and retries against fresh inputs on a bounded budget, so ambient cache invalidation does not fail requests; after process-seed persistence it fails closed with `selection_state_changed`. Committed affinity and seeds are kept, because a sibling request may already rely on them.
 
+Rejected websocket requests retain one settlement-only retry in their registered
+finalization task. Provisional gate and admission ownership are released first;
+the scope keeps its bounded wait if settlement stalls, so other pending requests
+and the connection lease can still be cleaned up. Bridge rejection defers
+cancellation through request cleanup and required retirement. Repeated settlement
+failures retain the existing warning and stale-reservation recovery behavior.
+
+Reserve presentation follows the evaluator's weekly/monthly precedence. Fresh
+weekly usage can supersede an old monthly row in both the summary and editor.
+When a weekly reserve constrains the primary donut, its reduction remains reserved,
+not consumed: an unused Plus account with capacities 225/7560 and a 1% weekly
+maximum shows 75.6 usable, 149.4 reserved, and zero consumed primary credits.
+
 Failure example: a bridge turn passes queue admission while its account is at 5% against a 10% limit, then waits for serialized dispatch. A refresh records 10% during the wait. The final check rejects the unsent turn with `account_usage_limit_reached` and releases its queue and lease accounting, while earlier turns on the bridge finish normally.
 ## Reauthentication warning state
 

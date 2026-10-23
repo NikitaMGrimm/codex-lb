@@ -25567,6 +25567,171 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_cleanup", [False, True])
+@pytest.mark.parametrize(
+    "authorization_kind", [OwnerAuthorizationKind.USAGE_POLICY_BLOCKED, OwnerAuthorizationKind.AUTHORIZATION_FAILED]
+)
+async def test_anchored_bridge_dispatch_rejection_completes_cleanup_before_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    authorization_kind: OwnerAuthorizationKind,
+    cancel_cleanup: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="anchored-rejection-cleanup")
+    session.last_used_at = time.monotonic()
+    original_account = session.account
+    create_release_started = asyncio.Event()
+    allow_create_release = asyncio.Event()
+    stream_release_started = asyncio.Event()
+    allow_stream_release = asyncio.Event()
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+    released: list[str] = []
+
+    async def release_lease(lease: proxy_service.AccountLease | None) -> None:
+        if lease is None:
+            return
+        assert lease.account_id == original_account.id
+        if cancel_cleanup:
+            started, allowed = (
+                (create_release_started, allow_create_release)
+                if lease.kind == "response_create"
+                else (stream_release_started, allow_stream_release)
+            )
+            started.set()
+            await allowed.wait()
+        released.append(lease.kind)
+
+    async def close_upstream() -> None:
+        if cancel_cleanup:
+            close_started.set()
+            await allow_close.wait()
+
+    send_text = AsyncMock()
+    close = AsyncMock(side_effect=close_upstream)
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=close))
+    session.account_lease = proxy_service.AccountLease(
+        "rejected-bridge-stream", original_account.id, "stream", time.monotonic()
+    )
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", AsyncMock(side_effect=lambda text, _state: text))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0))
+    authorization = AsyncMock(
+        side_effect=[OwnerAuthorization(OwnerAuthorizationKind.ALLOWED), OwnerAuthorization(authorization_kind)]
+    )
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", authorization)
+    reconnect = AsyncMock(side_effect=AssertionError("anchored rejection must not migrate accounts"))
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    async def admit(
+        state: proxy_service._WebSocketRequestState, *, response_create_gate: asyncio.Semaphore, **kwargs: Any
+    ) -> None:
+        await response_create_gate.acquire()
+        state.response_create_gate = response_create_gate
+        state.response_create_gate_acquired = True
+        state.response_create_admission = cast(Any, SimpleNamespace(release=lambda: released.append("admission")))
+        state.account_response_create_lease = proxy_service.AccountLease(
+            "rejected-bridge-create", original_account.id, "response_create", time.monotonic()
+        )
+        state.account_response_create_release = release_lease
+
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", admit)
+    text = json.dumps(
+        {"type": "response.create", "previous_response_id": "resp_previous", "model": "gpt-5.5", "input": "continue"}
+    )
+    state = proxy_service._WebSocketRequestState(
+        request_id="anchored-rejection-cleanup",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp_previous",
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text=text,
+        transport="http",
+        skip_request_log=True,
+    )
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=state,
+        text_data=text,
+        queue_limit=8,
+        propagate_http_errors=True,
+        downstream_turn_state=None,
+        request_deadline=time.monotonic() + 30,
+    )
+    consumer = asyncio.create_task(anext(stream))
+    try:
+        if cancel_cleanup:
+            await asyncio.wait_for(create_release_started.wait(), timeout=1)
+            consumer.cancel()
+            await asyncio.sleep(0)
+            assert not consumer.done()
+            allow_create_release.set()
+            await asyncio.wait_for(stream_release_started.wait(), timeout=1)
+            consumer.cancel()
+            await asyncio.sleep(0)
+            assert not consumer.done()
+            allow_stream_release.set()
+            if authorization_kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
+                await asyncio.wait_for(close_started.wait(), timeout=1)
+                consumer.cancel()
+                await asyncio.sleep(0)
+                assert not consumer.done()
+                allow_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(consumer, timeout=1)
+        else:
+            with pytest.raises(ProxyResponseError) as exc_info:
+                await asyncio.wait_for(consumer, timeout=1)
+            expected = http_bridge_request_submit_module._owner_authorization_error(
+                OwnerAuthorization(authorization_kind), None
+            )
+            assert expected is not None
+            assert exc_info.value.status_code == expected.status_code
+            assert exc_info.value.payload == expected.payload
+    finally:
+        allow_create_release.set()
+        allow_stream_release.set()
+        allow_close.set()
+        if not consumer.done():
+            consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        await stream.aclose()
+
+    assert released == ["admission", "response_create", "stream"]
+    assert authorization.await_count == 2
+    assert all(args.args == (original_account.id,) for args in authorization.await_args_list)
+    assert session.account is original_account
+    assert state.previous_response_id == "resp_previous"
+    assert session.account_lease is None
+    assert session.queued_request_count == 0
+    assert session.admission_waiter_count == 0
+    assert not session.pending_requests
+    assert not session.response_create_gate.locked()
+    assert not session.lifecycle_lock.locked()
+    assert state.response_create_admission is None
+    assert state.response_create_gate is None
+    assert state.account_response_create_lease is None
+    if authorization_kind is OwnerAuthorizationKind.USAGE_POLICY_BLOCKED:
+        assert session.closed
+        assert session.upstream_close_attempted
+        close.assert_awaited_once()
+    else:
+        assert not session.closed
+        assert service._http_bridge_sessions[session.key] is session
+        close.assert_not_awaited()
+    send_text.assert_not_awaited()
+    reconnect.assert_not_awaited()
+    assert not service._background_cleanup_tasks
+
+
+@pytest.mark.asyncio
 async def test_submit_http_bridge_request_rechecks_owner_policy_after_late_admission_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

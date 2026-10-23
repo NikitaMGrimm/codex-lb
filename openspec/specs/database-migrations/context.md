@@ -75,13 +75,22 @@ Branch A and B each create migration revisions in parallel. After merge, CI dete
 
 ## Usage-limit history convergence
 
-The usage-limit revisions and later upstream history converge at
-`20261002_000000_merge_usage_limits_and_main_heads` and
-`20261002_010000_merge_usage_limit_review_heads`. Existing revision identifiers
-and parents stay intact, so databases that already applied any lineage upgrade
-normally. For example, a database with an enabled 10% policy and a disabled
-saved 20% policy keeps both values while applying upstream migrations, and an
-upstream-only database gains disabled policy fields.
+The usage-limit revisions retain the maintainer-requested linear graph. Earlier
+PR snapshots reused scalar, override, and merge identifiers with different
+upstream ancestors, so the revision stamp alone does not establish the installed
+schema. Upgrade tooling recognizes the observed historical checkpoints from
+schema markers and credential-retirement evidence before applying missing DDL.
+For example, an old scalar database missing `dashboard_users` gains the upstream
+tables and override columns while keeping its saved policies and account tokens.
+
+A temporary `usage_limit_upstream_repair` row in the existing runtime sentinel
+table commits with the ledger move. Interrupted repair resumes through the
+ordinary Alembic cursor; unknown historical marker combinations stop before
+mutation. Credential retirement is preserved. Canonical installations retain
+ordinary index-drift handling. This is bounded compatibility for observed
+PR-branch histories, not a general damaged-schema repair facility. See the
+[repair context](../../changes/archive/2026-10-23-repair-usage-limit-review-gaps/context.md)
+for the supported checkpoints and limits.
 
 The topology guard accepts a parallel branch only when the checkout joins it
 with every upstream head and keeps one canonical head; joining an older

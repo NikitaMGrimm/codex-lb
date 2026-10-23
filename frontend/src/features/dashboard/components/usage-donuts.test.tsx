@@ -2,6 +2,8 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
+import { buildDashboardView } from "@/features/dashboard/utils";
+import { createAccountSummary, createDashboardOverview } from "@/test/mocks/factories";
 
 /** Helper to build a minimal RemainingItem for tests. */
 function item(overrides: { accountId: string; label: string; value: number; remainingPercent: number; color: string }) {
@@ -9,6 +11,24 @@ function item(overrides: { accountId: string; label: string; value: number; rema
 }
 
 describe("UsageDonuts", () => {
+  it("renders a weekly reserve as reserved primary credits without inventing consumption", async () => {
+    const overview = createDashboardOverview({ accounts: [createAccountSummary({
+      usage: { primaryRemainingPercent: 100, secondaryRemainingPercent: 100 },
+      capacityCreditsPrimary: 225, capacityCreditsSecondary: 7560,
+      remainingCreditsSecondary: 7560, effectiveLimitSecondary: 1,
+    })] });
+    const view = buildDashboardView(overview, [], false);
+    render(<UsageDonuts
+      primaryItems={view.primaryUsageItems} secondaryItems={view.secondaryUsageItems}
+      primaryTotal={225} secondaryTotal={7560}
+      primaryCenterValue={view.primaryTotal} secondaryCenterValue={view.secondaryTotal}
+    />);
+    expect(await screen.findByRole("button", { name: "Reserved 149.4" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Used 0" })).toHaveLength(2);
+    expect(screen.getByText("Total 225 · 0% used")).toBeInTheDocument();
+    expect(screen.getAllByTestId("donut-center-remaining").map((node) => node.textContent)).toEqual(["75.6", "75.6"]);
+  });
+
   it("renders primary and secondary donut panels with legends", async () => {
     render(
       <UsageDonuts

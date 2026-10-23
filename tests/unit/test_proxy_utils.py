@@ -156,6 +156,196 @@ class _ScriptedDownstreamWebSocket:
         del code, reason
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reader_owned,cancel_at_attempt", [(False, None), (False, 1), (False, 2), (True, None)])
+@pytest.mark.parametrize("rejection", ["usage_policy", "authorization_failed", "error_fields"])
+async def test_websocket_dispatch_rejection_retries_failed_settlement_in_rejection_task(
+    monkeypatch: pytest.MonkeyPatch,
+    reader_owned: bool,
+    cancel_at_attempt: int | None,
+    rejection: str,
+) -> None:
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "_TASK_CANCEL_TIMEOUT_SECONDS", 0.01)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc-rejected-websocket")
+    text = json.dumps({"type": "response.create", "model": "gpt-5.1", "input": "hi"})
+    state = proxy_service._WebSocketRequestState(
+        request_id="rejected-websocket",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=ApiKeyUsageReservationData(
+            reservation_id="rejected-reservation", key_id="rejected-key", model="gpt-5.1"
+        ),
+        started_at=time.monotonic(),
+        request_text=text,
+        awaiting_response_created=True,
+    )
+    stream_lease = AccountLease("rejected-stream", account.id, "stream", time.monotonic())
+    create_lease = AccountLease("rejected-create", account.id, "response_create", time.monotonic())
+    connection_lease_released = asyncio.Event()
+
+    async def release_account_lease(lease: AccountLease | None) -> None:
+        if lease is stream_lease:
+            connection_lease_released.set()
+
+    release_lease = AsyncMock(side_effect=release_account_lease)
+    state.websocket_stream_lease = stream_lease
+    state.account_response_create_lease = create_lease
+    state.account_response_create_release = release_lease
+    upstream = SimpleNamespace(send_text=AsyncMock(), close=AsyncMock())
+    downstream = _ScriptedDownstreamWebSocket(text)
+    connect = AsyncMock(return_value=(account, upstream))
+    monkeypatch.setattr(service, "_connect_proxy_websocket", connect)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_lease)
+    monkeypatch.setattr(
+        service,
+        "_prepare_websocket_response_create_request",
+        AsyncMock(
+            return_value=proxy_service._PreparedWebSocketRequest(
+                text_data=text, request_state=state, affinity_policy=proxy_service._AffinityPolicy()
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
+    settlement_started = asyncio.Event()
+    allow_settlement = asyncio.Event()
+    settlement_attempts = 0
+
+    async def settle_reservation(_reservation: ApiKeyUsageReservationData | None) -> None:
+        nonlocal settlement_attempts
+        settlement_attempts += 1
+        if settlement_attempts == cancel_at_attempt:
+            settlement_started.set()
+            await allow_settlement.wait()
+        if not reader_owned and settlement_attempts == 1:
+            raise RuntimeError("settlement failed")
+
+    release_reservation = AsyncMock(side_effect=settle_reservation)
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+    write_log = AsyncMock()
+    health_write = AsyncMock()
+    monkeypatch.setattr(service, "_write_request_log", write_log)
+    monkeypatch.setattr(service, "_handle_stream_error", health_write)
+    reader_ready = asyncio.Event()
+    reader_context: dict[str, Any] = {}
+
+    async def reader(*args: Any, **kwargs: Any) -> None:
+        reader_context.update(kwargs)
+        reader_ready.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(service, "_relay_upstream_websocket_messages", reader)
+    decision = OwnerAuthorization(
+        OwnerAuthorizationKind.AUTHORIZATION_FAILED
+        if rejection == "authorization_failed"
+        else OwnerAuthorizationKind.USAGE_POLICY_BLOCKED
+    )
+    expected_error = proxy_http_bridge_request_submit._owner_authorization_error(decision, None)
+    assert expected_error is not None
+    if rejection == "error_fields":
+        expected_error = proxy_module.ProxyResponseError(
+            429,
+            {
+                "error": {
+                    "code": "account_usage_limit_reached",
+                    "message": "Custom policy rejection",
+                    "type": "rate_limit_error",
+                    "param": "limit",
+                }
+            },
+        )
+        monkeypatch.setattr(websocket_mixin, "_owner_authorization_error", lambda *_args: expected_error)
+    expected_fields = expected_error.payload["error"]
+
+    async def authorize(account_id: str) -> OwnerAuthorization:
+        assert account_id == account.id
+        await reader_ready.wait()
+        if reader_owned:
+            await service._fail_pending_websocket_requests(
+                account_id_value=account.id,
+                pending_requests=reader_context["pending_requests"],
+                pending_lock=reader_context["pending_lock"],
+                error_code=expected_fields["code"],
+                error_message=expected_fields["message"],
+                api_key=None,
+                websocket=cast(WebSocket, downstream),
+                client_send_lock=reader_context["client_send_lock"],
+                response_create_gate=reader_context["response_create_gate"],
+                penalize_account=False,
+            )
+        return decision
+
+    if reader_owned:
+        state.error_type_override = expected_fields["type"]
+        state.error_param_override = expected_fields.get("param")
+    monkeypatch.setattr(service._load_balancer, "authorize_account_fresh", authorize)
+
+    consumer = asyncio.create_task(
+        service.proxy_responses_websocket(
+            cast(WebSocket, downstream), {}, codex_session_affinity=False, openai_cache_affinity=False, api_key=None
+        )
+    )
+    try:
+        if cancel_at_attempt is not None:
+            await asyncio.wait_for(settlement_started.wait(), timeout=1)
+            consumer.cancel()
+            await asyncio.wait_for(connection_lease_released.wait(), timeout=1)
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(consumer, timeout=1)
+            rejection_tasks = [
+                task
+                for task in service._background_cleanup_tasks
+                if task.get_name() == "proxy-websocket-finalization-dispatch-rejection"
+            ]
+            assert len(rejection_tasks) == 1
+            assert not rejection_tasks[0].done()
+            assert state.api_key_reservation is not None
+            assert state.response_create_gate is None
+            assert state.response_create_admission is None
+            assert state.account_response_create_lease is None
+            assert not reader_context["response_create_gate"].locked()
+            assert len(downstream.sent_text) == write_log.await_count == cancel_at_attempt - 1
+            allow_settlement.set()
+            await asyncio.wait_for(asyncio.shield(rejection_tasks[0]), timeout=1)
+        else:
+            await asyncio.wait_for(consumer, timeout=2)
+    finally:
+        allow_settlement.set()
+        if not consumer.done():
+            consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert release_reservation.await_count == (1 if reader_owned else 2)
+    assert state.api_key_reservation is None
+    assert state.response_create_admission is None
+    assert state.response_create_gate is None
+    assert state.response_create_gate_acquired is False
+    assert state.account_response_create_lease is None
+    assert not reader_context["response_create_gate"].locked()
+    assert not reader_context["pending_requests"]
+    assert [args.args[0] for args in release_lease.await_args_list if args.args[0] is not None] == [
+        create_lease,
+        stream_lease,
+    ]
+    release_lease.assert_any_await(create_lease)
+    release_lease.assert_any_await(stream_lease)
+    connect.assert_awaited_once()
+    upstream.send_text.assert_not_awaited()
+    health_write.assert_not_awaited()
+    write_log.assert_awaited_once()
+    assert len(downstream.sent_text) == 1
+    terminal = json.loads(downstream.sent_text[0])
+    assert terminal["type"] == "response.failed"
+    assert terminal["response"]["error"] == expected_fields
+    assert service._background_cleanup_tasks == set()
+
+
 class _QueuedTestUpstreamWebSocket:
     def __init__(self, messages: Sequence[SimpleNamespace], *, turn_state: str | None = None) -> None:
         self._messages: asyncio.Queue[SimpleNamespace] = asyncio.Queue()

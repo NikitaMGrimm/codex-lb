@@ -163,16 +163,25 @@ export function applySecondaryConstraint(
     const secondaryItem = secondaryByAccount.get(item.accountId);
     if (!secondaryItem) return item;
     if (secondaryItem.remainingPercent == null) return item;
-    if (secondaryItem.value >= item.value) return item;
+    // Apply the provider constraint separately so a weekly reserve cannot
+    // become consumed quota (or preserve reserves after provider exhaustion).
+    const providerRemaining = Math.min(
+      item.value + (item.reservedValue ?? 0),
+      secondaryItem.value + (secondaryItem.reservedValue ?? 0),
+    );
+    const usable = Math.max(0, Math.min(item.value, secondaryItem.value));
+    const reserved = Math.max(0, providerRemaining - usable);
+    if (usable === item.value && reserved === (item.reservedValue ?? 0)) return item;
 
     const effectivePercent =
       item.remainingPercent != null && item.value > 0
-        ? item.remainingPercent * (secondaryItem.value / item.value)
+        ? item.remainingPercent * (usable / item.value)
         : item.remainingPercent;
 
     return {
       ...item,
-      value: Math.max(0, secondaryItem.value),
+      value: usable,
+      reservedValue: reserved,
       remainingPercent: effectivePercent != null ? Math.max(0, effectivePercent) : null,
     };
   });

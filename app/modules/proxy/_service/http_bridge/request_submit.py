@@ -2365,16 +2365,25 @@ class _HTTPBridgeRequestSubmitMixin:
                             raise rollback_cancellation
                     raise
         except ProxyResponseError:
-            await self._cleanup_http_bridge_submit_interruption(
-                session,
-                request_state=request_state,
-                gate_acquired=gate_acquired,
-                request_enqueued=request_enqueued,
-                counted_in_queue=True,
-                admission_waiter_registered=admission_waiter_registered,
-            )
-            if not session.upstream_close_attempted:
-                await self._retire_http_bridge_after_drain_if_ready(session)
+
+            async def cleanup_rejection() -> None:
+                await self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=gate_acquired,
+                    request_enqueued=request_enqueued,
+                    counted_in_queue=True,
+                    admission_waiter_registered=admission_waiter_registered,
+                )
+                if not session.upstream_close_attempted:
+                    await self._retire_http_bridge_after_drain_if_ready(session)
+
+            # A cancellation during create-lease release must not skip the
+            # remaining idle-stream release or retirement of a rejected owner.
+            cleanup_task = scheduler_for(self).create_task(cleanup_rejection())
+            _, cancellation = await _await_task_deferring_cancellation(cleanup_task)
+            if cancellation is not None:
+                raise cancellation
             raise
         except asyncio.CancelledError as cancellation:
             cleanup_task = scheduler_for(self).create_task(

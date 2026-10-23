@@ -2884,39 +2884,58 @@ class _WebSocketMixin:
                     if request_state is not None:
 
                         async def finalize_rejection(state: _WebSocketRequestState, owns_rejection: bool) -> None:
-                            await proxy._release_request_state_account_response_create_lease(state)
                             if not owns_rejection:
                                 # The reader already settled and reported this frame.
+                                await proxy._release_request_state_account_response_create_lease(state)
                                 return
-                            await proxy._release_websocket_request_state_reservation(state)
-                            if request_state_registered:
-                                await _release_websocket_response_create_gate(
-                                    state, response_create_gate, scheduler=scheduler_for(proxy)
-                                )
+                            await _release_websocket_response_create_ownership_for_cleanup(state, response_create_gate)
+                            settlement_failed = False
                             try:
-                                await proxy._write_websocket_connect_failure(
-                                    account_id=account.id if account is not None else None,
-                                    api_key=api_key,
-                                    request_state=state,
-                                    error_code=error_code or "upstream_error",
-                                    error_message=error_message,
-                                )
+                                await proxy._release_websocket_request_state_reservation(state)
                             except Exception:
+                                settlement_failed = True
                                 _facade().logger.warning(
-                                    "Failed to log websocket pre-dispatch rejection request_id=%s",
+                                    "Failed to release rejected websocket reservation request_id=%s",
                                     state.request_log_id or state.request_id,
                                     exc_info=True,
                                 )
-                            await proxy._emit_websocket_terminal_error(
-                                websocket,
-                                client_send_lock=client_send_lock,
-                                request_state=state,
-                                error_code=error_code or "upstream_error",
-                                error_message=error_message,
-                                error_type=error_type,
-                                error_param=error.param_state if error else None,
-                                downstream_activity=downstream_activity,
-                            )
+                            try:
+                                try:
+                                    await proxy._write_websocket_connect_failure(
+                                        account_id=account.id if account is not None else None,
+                                        api_key=api_key,
+                                        request_state=state,
+                                        error_code=error_code or "upstream_error",
+                                        error_message=error_message,
+                                    )
+                                except Exception:
+                                    _facade().logger.warning(
+                                        "Failed to log websocket pre-dispatch rejection request_id=%s",
+                                        state.request_log_id or state.request_id,
+                                        exc_info=True,
+                                    )
+                                await proxy._emit_websocket_terminal_error(
+                                    websocket,
+                                    client_send_lock=client_send_lock,
+                                    request_state=state,
+                                    error_code=error_code or "upstream_error",
+                                    error_message=error_message,
+                                    error_type=error_type,
+                                    error_param=error.param_state if error else None,
+                                    downstream_activity=downstream_activity,
+                                )
+                            finally:
+                                if settlement_failed:
+                                    # This registered task retains the retry even
+                                    # after scope cleanup's bounded wait expires.
+                                    try:
+                                        await proxy._release_websocket_request_state_reservation(state)
+                                    except Exception:
+                                        _facade().logger.warning(
+                                            "Failed to retry rejected websocket reservation settlement request_id=%s",
+                                            state.request_log_id or state.request_id,
+                                            exc_info=True,
+                                        )
 
                         if request_state_registered:
                             await pending_lock.acquire()

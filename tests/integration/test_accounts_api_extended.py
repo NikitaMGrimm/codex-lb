@@ -1430,6 +1430,67 @@ async def test_accounts_list_ignores_zero_capacity_monthly_primary_status(async_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("weekly_slot", ["primary", "secondary"])
+@pytest.mark.parametrize("monthly_newer,monthly_elapsed", [(False, True), (False, False), (True, False)])
+async def test_accounts_reserve_window_matches_policy(
+    async_client, db_setup, weekly_slot, monthly_newer, monthly_elapsed
+):
+    now = utcnow()
+    account = _make_account("window-change", "window-change@example.com", plan_type="free")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 50
+    account.usage_limit_weekly_percent = 80
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        session.add_all(
+            [
+                UsageHistory(
+                    account_id=account.id,
+                    window=weekly_slot,
+                    window_minutes=10080,
+                    used_percent=85,
+                    recorded_at=now - timedelta(seconds=30 if monthly_newer else 0),
+                    reset_at=naive_utc_to_epoch(now + timedelta(days=6)),
+                ),
+                UsageHistory(
+                    account_id=account.id,
+                    window="monthly",
+                    window_minutes=43200,
+                    used_percent=10,
+                    recorded_at=now - timedelta(seconds=0 if monthly_newer else 60),
+                    reset_at=naive_utc_to_epoch(now + timedelta(days=-1 if monthly_elapsed else 20)),
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get("/api/accounts")
+    assert response.status_code == 200
+    summary = next(item for item in response.json()["accounts"] if item["accountId"] == account.id)
+    assert summary["windowMinutesPrimary"] is None
+    if monthly_newer:
+        assert summary["usageLimitState"] == "available"
+        assert summary["windowMinutesMonthly"] == 43200
+        assert summary["effectiveLimitMonthly"] == 50
+        assert summary["windowMinutesSecondary"] is None
+    else:
+        assert summary["usageLimitState"] == "reached"
+        assert summary["windowMinutesMonthly"] is None
+        assert summary["usage"]["monthlyRemainingPercent"] is None
+        assert summary["windowMinutesSecondary"] == 10080
+        assert summary["effectiveLimitSecondary"] == 80
+        assert summary["usage"]["secondaryRemainingPercent"] == 15
+        updated = await async_client.put(
+            f"/api/accounts/{account.id}/usage-limit", json={"enabled": True, "percentWeekly": 90}
+        )
+        assert updated.status_code == 200
+        refreshed = await async_client.get("/api/accounts")
+        summary = next(item for item in refreshed.json()["accounts"] if item["accountId"] == account.id)
+        assert summary["effectiveLimitSecondary"] == 90
+        assert summary["usageLimitState"] == "available"
+
+
+@pytest.mark.asyncio
 async def test_accounts_list_recovers_weekly_only_primary_rate_limited_status(async_client, db_setup):
     future_reset = int((utcnow() + timedelta(days=7)).replace(tzinfo=timezone.utc).timestamp())
     account = _make_account("acc_free_weekly_primary_only", "free-weekly-primary@example.com", plan_type="free")

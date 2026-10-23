@@ -4924,7 +4924,7 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
     policy_blocked = False
     failure_logs: list[dict[str, object]] = []
     released_create_leases: list[object] = []
-    original_release_create_lease = proxy_module.ProxyService._release_request_state_account_response_create_lease
+    original_release_create_lease = proxy_module.LoadBalancer.release_account_lease
     original_acquire_create_lease = proxy_module.ProxyService._acquire_account_response_create_lease_or_overload
 
     async def acquire_create_lease(self, **kwargs):
@@ -4954,10 +4954,9 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
         del self
         failure_logs.append(kwargs)
 
-    async def track_release_create_lease(self, request_state):
-        lease = request_state.account_response_create_lease
-        await original_release_create_lease(self, request_state)
-        if lease is not None:
+    async def track_release_create_lease(self, lease):
+        await original_release_create_lease(self, lease)
+        if lease is not None and lease.kind == "response_create":
             released_create_leases.append(lease)
 
     _install_pinned_websocket(
@@ -4971,8 +4970,8 @@ def test_v1_responses_websocket_usage_limit_revalidation_rejects_only_new_reques
     )
     monkeypatch.setattr(proxy_module.ProxyService, "_write_websocket_connect_failure", record_connect_failure)
     monkeypatch.setattr(
-        proxy_module.ProxyService,
-        "_release_request_state_account_response_create_lease",
+        proxy_module.LoadBalancer,
+        "release_account_lease",
         track_release_create_lease,
     )
     monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", authorize_account_fresh)
