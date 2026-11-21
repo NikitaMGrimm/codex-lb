@@ -196,15 +196,26 @@ def _sqlite_file_async_engine_kwargs() -> dict[str, object]:
 def _configure_sqlite_engine(engine: Engine, *, enable_wal: bool) -> None:
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection: sqlite3.Connection, _: object) -> None:
-        cursor: sqlite3.Cursor = dbapi_connection.cursor()
         try:
-            if enable_wal:
-                cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
-        finally:
-            cursor.close()
+            cursor: sqlite3.Cursor = dbapi_connection.cursor()
+            try:
+                if enable_wal:
+                    cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+            finally:
+                cursor.close()
+        except BaseException:
+            # SQLAlchemy does not close a DBAPI connection whose "connect" handler
+            # raises. An unclosed aiosqlite connection keeps its worker thread
+            # forever, so a persistent failure such as a full disk would leak one
+            # thread per connection attempt until the process cannot start threads.
+            try:
+                dbapi_connection.close()
+            except Exception:
+                logger.debug("Closing a SQLite connection after a failed connect handler failed", exc_info=True)
+            raise
 
     _install_sqlite_long_write_watchdog(engine)
 

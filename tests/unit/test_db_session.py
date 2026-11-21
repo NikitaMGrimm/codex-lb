@@ -999,6 +999,41 @@ async def test_sqlite_long_write_watchdog_reports_the_holder(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_sqlite_failed_connect_pragmas_close_the_connection_thread(tmp_path, monkeypatch) -> None:
+    """A full disk makes the connect-time PRAGMAs fail on every attempt. Each
+    aiosqlite connection owns a worker thread, so a connection left open after
+    that failure leaked a thread per attempt until the process hit its thread
+    limit and stayed down after the disk recovered."""
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'pragma-failure.db'}",
+        poolclass=NullPool,
+        connect_args={"timeout": 5.0},
+    )
+    session_module._configure_sqlite_engine(engine.sync_engine, enable_wal=True)
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(sa_text("SELECT 1"))
+        baseline_threads = threading.active_count()
+
+        monkeypatch.setattr(session_module, "_SQLITE_BUSY_TIMEOUT_MS", "not-a-number")
+        for _ in range(5):
+            with pytest.raises(Exception, match="syntax error"):
+                async with engine.connect():
+                    pass
+
+        deadline = time.monotonic() + 5.0
+        while threading.active_count() > baseline_threads and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert threading.active_count() <= baseline_threads
+
+        monkeypatch.undo()
+        async with engine.connect() as connection:
+            assert (await connection.execute(sa_text("SELECT 1"))).scalar_one() == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_sqlite_long_write_watchdog_stays_silent_below_threshold_and_for_reads(tmp_path, caplog) -> None:
     """Fast writes and read-only transactions (which never take the writer
     slot in WAL) must not produce reports."""
