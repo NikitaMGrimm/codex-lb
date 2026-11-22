@@ -598,7 +598,9 @@ def _http_bridge_owner_error_allows_account_neutral_replay(exc: ProxyResponseErr
     if _http_bridge_is_previous_response_owner_unavailable(exc):
         return True
     code, _message = _proxy_error_code_message(exc)
-    return exc.status_code == 503 and code == "account_usage_limit_reached"
+    # ``selection_failure_response`` reports an owner usage-limit denial as 429;
+    # 503 is the status it carried before, which a peer replica may still send.
+    return exc.status_code in (429, 503) and code == "account_usage_limit_reached"
 
 
 _HTTP_BRIDGE_AMBIGUOUS_RECOVERY_ERROR_CODES = frozenset(

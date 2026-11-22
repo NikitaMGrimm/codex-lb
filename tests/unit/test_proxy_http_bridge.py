@@ -29,6 +29,7 @@ from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
 from app.core.auth.refresh import RefreshError
+from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
 from app.core.clients.proxy import (
     CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY,
     ProxyResponseError,
@@ -89,6 +90,7 @@ from app.modules.proxy.http_bridge_event_batcher import (
 )
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission, LoadBalancer
+from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizationKind
 from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 from tests.unit.hypothesis_strategies import json_values as hypothesis_json_values
@@ -28380,11 +28382,8 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("owner_failure_status", "owner_failure_code"),
-    [
-        (502, "previous_response_owner_unavailable"),
-        (503, "account_usage_limit_reached"),
-    ],
+    "owner_failure_code",
+    ["previous_response_owner_unavailable", "account_usage_limit_reached"],
 )
 @pytest.mark.parametrize(
     ("unsafe_replay_input", "replace_retired_gate", "stored_model"),
@@ -28404,7 +28403,6 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
 )
 async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_when_owner_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
-    owner_failure_status: int,
     owner_failure_code: str,
     unsafe_replay_input: str | None,
     replace_retired_gate: bool,
@@ -28568,18 +28566,27 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
         latest_input_full_fingerprint=proxy_service._fingerprint_input_items(historical_input),
         model=stored_model,
     )
-    owner_unavailable = ProxyResponseError(
-        owner_failure_status,
-        proxy_service.openai_error(
-            owner_failure_code,
-            (
-                "Previous response owner account is unavailable; retry later."
-                if owner_failure_code == "previous_response_owner_unavailable"
-                else "All otherwise available accounts have reached their usage limit or lack current usage data"
+    if owner_failure_code == "previous_response_owner_unavailable":
+        owner_unavailable = ProxyResponseError(
+            502,
+            proxy_service.openai_error(
+                owner_failure_code,
+                "Previous response owner account is unavailable; retry later.",
+                error_type="server_error",
             ),
-            error_type="server_error",
-        ),
-    )
+        )
+    else:
+        # Built by the mapper the bridge raises this denial through, so the
+        # replay stays tied to the status a usage-limited owner really reports.
+        owner_unavailable = ProxyResponseError(
+            *selection_failure_response(
+                proxy_service.AccountSelection(
+                    account=None,
+                    error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+                    error_code=owner_failure_code,
+                )
+            )
+        )
     capacity_unavailable = ProxyResponseError(
         503,
         proxy_service.openai_error("no_accounts", "Rate limit exceeded. Try again in 120s"),
@@ -31577,6 +31584,42 @@ async def test_http_bridge_reader_preserves_routed_aiohttp_close_code(
     assert session.last_upstream_close_code == 1011
     assert session.closed is True
     routed_websocket.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_failure_retires_without_waiting_on_its_own_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The session's registered reader fails mid-stream and retires the session
+    # from a child task it awaits. The close inside that retirement cancels and
+    # awaits ``session.upstream_reader``; when that is the awaiting reader the
+    # close used to wait out the whole cancel timeout on every reader failure.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-reader-self-retire")
+    upstream_close = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(
+                return_value=UpstreamWebSocketMessage(kind="error", error="Upstream websocket receive failed")
+            ),
+            close=upstream_close,
+        ),
+    )
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.service"):
+        reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+        session.upstream_reader = reader_task
+        await asyncio.wait_for(reader_task, timeout=10.0)
+
+    assert "Timed out waiting for http bridge upstream reader cancellation" not in caplog.text
+    upstream_close.assert_awaited_once()
+    assert session.closed is True
+    assert session.upstream_reader is None
+    assert service._http_bridge_sessions.get(session.key) is None
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import errno
 import json
+import logging
 import ssl
 from datetime import UTC, datetime
 from pathlib import Path
@@ -327,6 +328,30 @@ async def test_native_direct_adapter_classifies_helper_pong_timeout() -> None:
 
     assert message.kind == "error"
     assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+async def test_native_direct_adapter_logs_helper_failure_detail_behind_generic_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class NativeConnection(_FakeNativeWebSocket):
+        async def receive(self) -> NativeWebSocketMessage:
+            raise NativeEgressTransportError(
+                "native websocket consumer exceeded the bounded message queue",
+                failure_phase="consumer_backpressure",
+            )
+
+    websocket = NativeUpstreamWebSocket(cast(Any, NativeConnection()))
+
+    with caplog.at_level(logging.WARNING, logger="app.core.clients.proxy_websocket"):
+        message = await websocket.receive()
+
+    # The relay contract is unchanged: a fixed message and no adapter code.
+    assert message.kind == "error"
+    assert message.error == "Upstream websocket receive failed"
+    assert message.error_code is None
+    assert "failure_phase=consumer_backpressure" in caplog.text
+    assert "native websocket consumer exceeded the bounded message queue" in caplog.text
 
 
 @pytest.mark.asyncio

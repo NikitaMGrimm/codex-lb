@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import stat
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -1270,6 +1272,86 @@ for line in sys.stdin:
     body = await asyncio.wait_for(response.read(), timeout=5.0)
     assert body == b"delta" * 2000
     await asyncio.wait_for(client.aclose(), timeout=2.0)
+
+
+_WEBSOCKET_BURST_HELPER = """#!/usr/bin/env python3
+import json
+import sys
+command = json.loads(sys.stdin.readline())
+request_id = command["request_id"]
+print(json.dumps({"type": "websocket_open", "request_id": request_id, "status": 101, "headers": []}), flush=True)
+out = [
+    json.dumps({"type": "websocket_text", "request_id": request_id, "text": json.dumps({"n": index})})
+    for index in range(FRAME_COUNT)
+]
+out.append(json.dumps({"type": "websocket_close", "request_id": request_id, "code": 1000, "reason": None}))
+sys.stdout.write("\\n".join(out) + "\\n")
+sys.stdout.flush()
+for line in sys.stdin:
+    command = json.loads(line)
+    print(json.dumps({"type": "cancelled", "request_id": command["request_id"]}), flush=True)
+"""
+
+
+async def _open_burst_websocket(tmp_path: Path, *, frame_count: int) -> tuple[SubprocessNativeEgressClient, Any]:
+    helper = tmp_path / "native-helper"
+    _write_helper(helper, _WEBSOCKET_BURST_HELPER.replace("FRAME_COUNT", str(frame_count)))
+    client = SubprocessNativeEgressClient(helper)
+    websocket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/codex/responses",
+            headers={},
+            connect_timeout_seconds=2,
+            max_message_bytes=1024,
+        )
+    )
+    return client, websocket
+
+
+@pytest.mark.asyncio
+async def test_native_websocket_burst_does_not_fail_a_relay_reader_that_is_draining(tmp_path: Path) -> None:
+    """A burst of upstream frames buffered in the helper pipe must reach a
+    consumer that reads the way the relay readers do: one task per
+    ``receive()`` awaited through ``asyncio.wait``. That costs several event
+    loop turns per frame against the pump's one, so the consumer falls
+    hundreds of frames behind while still draining; the 64-frame cap failed
+    such a stream mid-response with ``consumer_backpressure``."""
+    client, websocket = await _open_burst_websocket(tmp_path, frame_count=1000)
+    wakeup = asyncio.create_task(asyncio.Event().wait())
+    received: list[int] = []
+    try:
+        while True:
+            receive = asyncio.create_task(websocket.receive())
+            done, _ = await asyncio.wait((receive, wakeup), timeout=5.0, return_when=asyncio.FIRST_COMPLETED)
+            assert receive in done, "relay reader stalled"
+            message = receive.result()
+            if message.kind == "close":
+                break
+            assert message.text is not None
+            received.append(json.loads(message.text)["n"])
+    finally:
+        wakeup.cancel()
+        await asyncio.gather(wakeup, return_exceptions=True)
+        await asyncio.wait_for(client.aclose(), timeout=2.0)
+
+    assert received == list(range(1000))
+
+
+@pytest.mark.asyncio
+async def test_native_websocket_consumer_that_stops_draining_still_trips_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(native_egress_module, "_NATIVE_STREAM_QUEUE_LIMIT", 16)
+    client, websocket = await _open_burst_websocket(tmp_path, frame_count=200)
+    try:
+        # Never read while the burst arrives: the pump must fail the socket
+        # instead of buffering without limit.
+        await asyncio.wait_for(asyncio.shield(websocket._pump_task), timeout=5.0)
+        with pytest.raises(NativeEgressTransportError) as exc_info:
+            await websocket.receive()
+        assert exc_info.value.failure_phase == "consumer_backpressure"
+    finally:
+        await asyncio.wait_for(client.aclose(), timeout=2.0)
 
 
 @pytest.mark.asyncio

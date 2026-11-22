@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
@@ -1201,6 +1202,30 @@ async def _http_bridge_receive_timeout_with_eventless_deadline(
     return receive_timeout
 
 
+@contextlib.contextmanager
+def _http_bridge_reader_yields_slot_to_owned_retirement(session: "_HTTPBridgeSession") -> Iterator[None]:
+    """Let a retirement the reader awaits close the session without waiting on the reader.
+
+    Closing a session cancels and awaits ``session.upstream_reader``. The
+    reader runs its own retirement in a child task and awaits it with
+    cancellation deferred, so that close would wait out the whole cancel
+    timeout on a task that cannot finish before the close does. The reader
+    leaves the slot while it awaits the child, as the bounded close already
+    does for a reader that calls it directly, and takes the slot back when
+    the session survived so a later reconnect still drains this reader.
+    """
+    reader = asyncio.current_task()
+    if reader is None or session.upstream_reader is not reader:
+        yield
+        return
+    session.upstream_reader = None
+    try:
+        yield
+    finally:
+        if session.upstream_reader is None and not session.upstream_close_attempted:
+            session.upstream_reader = reader
+
+
 async def _cancel_http_bridge_reader_child(
     task: asyncio.Task[Any] | None,
     *,
@@ -1974,13 +1999,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # poisoned anchor stored with no retirement left to retry
                     # the abandonment. Defer cancellation across the whole
                     # settlement like the grouped path, then re-raise it.
-                    reader_settlement_task = scheduler.create_task(
-                        _reader_strike_and_clear(),
-                        name=f"http-bridge-reader-poison-settlement-{session.durable_session_id}",
-                    )
-                    reader_retired, reader_cancellation = await _await_task_deferring_cancellation(
-                        reader_settlement_task
-                    )
+                    with _http_bridge_reader_yields_slot_to_owned_retirement(session):
+                        reader_settlement_task = scheduler.create_task(
+                            _reader_strike_and_clear(),
+                            name=f"http-bridge-reader-poison-settlement-{session.durable_session_id}",
+                        )
+                        reader_retired, reader_cancellation = await _await_task_deferring_cancellation(
+                            reader_settlement_task
+                        )
                 if reader_retired is True:
                     force_retire = True
                     if reader_cancellation is not None:
@@ -2039,13 +2065,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # no remaining request lifecycle to retry them. Defer
                 # cancellation across the whole retirement like the
                 # admission-waiter branch above, then re-raise it.
-                waiterless_retirement_task = scheduler.create_task(
-                    waiterless_retirement,
-                    name=f"http-bridge-waiterless-retirement-{session.durable_session_id}",
-                )
-                _waiterless_result, waiterless_cancellation = await _await_task_deferring_cancellation(
-                    waiterless_retirement_task
-                )
+                with _http_bridge_reader_yields_slot_to_owned_retirement(session):
+                    waiterless_retirement_task = scheduler.create_task(
+                        waiterless_retirement,
+                        name=f"http-bridge-waiterless-retirement-{session.durable_session_id}",
+                    )
+                    _waiterless_result, waiterless_cancellation = await _await_task_deferring_cancellation(
+                        waiterless_retirement_task
+                    )
                 if waiterless_cancellation is not None:
                     raise waiterless_cancellation
         return force_retire or session.admission_waiter_count == 0

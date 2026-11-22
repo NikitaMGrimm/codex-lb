@@ -472,6 +472,15 @@ def _native_websocket_transport_error(
     operation: str,
 ) -> UpstreamWebSocketTransportError:
     phase = exc.failure_phase if isinstance(exc, NativeEgressTransportError) else "protocol"
+    # Relay owners only ever see the fixed message below, so this is the one
+    # place the helper's failure phase and message stay observable.
+    logger.warning(
+        "Native upstream websocket %s failed failure_phase=%s error_type=%s detail=%s",
+        operation,
+        phase,
+        type(exc).__name__,
+        exc,
+    )
     if phase == "liveness_timeout":
         return UpstreamWebSocketTransportError(
             f"Upstream websocket {operation} failed",
