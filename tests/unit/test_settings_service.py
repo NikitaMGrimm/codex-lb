@@ -23,6 +23,11 @@ from app.modules.settings.service import (
 pytestmark = pytest.mark.unit
 
 
+def _settings_row() -> DashboardSettings:
+    # These stand-ins never insert a row and therefore need the persisted default explicitly.
+    return DashboardSettings(quota_lb_share_reference_account_ids_json="[]")
+
+
 def test_resolve_inheritable_null_column_uses_environment_when_it_differs_from_default() -> None:
     assert resolve_inheritable(None, 12, 8) == InheritableValue(12, "env", 12, 8)
 
@@ -43,7 +48,7 @@ def test_resolve_inheritable_dashboard_value_wins_including_zero() -> None:
 async def test_settings_data_reports_provenance_for_every_inheritable_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    row = DashboardSettings()
+    row = _settings_row()
     row.proxy_account_response_create_limit = None
     row.proxy_account_stream_limit = None
     row.proxy_account_stream_recovery_reserve = 3
@@ -149,7 +154,7 @@ def test_resolve_inheritable_handles_float_timeouts_including_zero_keepalive() -
 async def test_timeout_settings_resolve_dashboard_then_environment_then_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    row = DashboardSettings()
+    row = _settings_row()
     row.proxy_request_budget_seconds = 900.0
     row.sse_keepalive_interval_seconds = None
     row.upstream_connect_timeout_seconds = None
@@ -183,7 +188,7 @@ async def test_stream_and_bridge_budgets_resolve_dashboard_then_environment_then
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # M1 stream/bridge budgets: the three resolver states on the two new columns.
-    row = DashboardSettings()
+    row = _settings_row()
     row.http_responses_stream_request_budget_seconds = 3600.0
     row.http_responses_session_bridge_request_budget_seconds = None
 
@@ -227,7 +232,7 @@ async def test_stream_and_bridge_budgets_resolve_dashboard_then_environment_then
 
 @pytest.mark.asyncio
 async def test_migrated_null_account_caps_inherit_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    row = DashboardSettings()
+    row = _settings_row()
     row.proxy_account_response_create_limit = None
     row.proxy_account_stream_limit = None
     row.proxy_account_stream_recovery_reserve = None
@@ -267,7 +272,7 @@ async def test_migrated_null_account_caps_inherit_environment(monkeypatch: pytes
 
 @pytest.mark.asyncio
 async def test_cleared_account_cap_follows_environment_changes(monkeypatch: pytest.MonkeyPatch) -> None:
-    row = DashboardSettings()
+    row = _settings_row()
     row.proxy_account_stream_limit = None
     startup_settings = SimpleNamespace(
         proxy_account_response_create_limit=24,
@@ -301,7 +306,7 @@ async def test_cleared_account_cap_follows_environment_changes(monkeypatch: pyte
 async def test_migrated_null_api_key_fair_share_threshold_inherits_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    row = DashboardSettings()
+    row = _settings_row()
     row.proxy_api_key_fair_share_congestion_threshold_pct = None
 
     class _Repository:
@@ -349,7 +354,7 @@ async def test_migrated_null_api_key_fair_share_threshold_inherits_environment(
 async def test_null_retention_inherits_environment_and_dashboard_value_wins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    row = DashboardSettings()
+    row = _settings_row()
 
     class _Repository:
         async def get_or_create(self) -> DashboardSettings:
@@ -442,7 +447,7 @@ def test_resolve_inheritable_boolean_toggle_in_each_state() -> None:
 
 @pytest.mark.asyncio
 async def test_settings_data_resolves_resilience_toggles_with_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
-    row = DashboardSettings()
+    row = _settings_row()
     row.soft_drain_enabled = None
     row.deterministic_failover_enabled = None
     row.circuit_breaker_enabled = True
@@ -502,7 +507,7 @@ async def test_settings_data_resolves_codex_prewarm_switch_with_provenance(
     env_value: bool,
     expected: InheritableValue[bool],
 ) -> None:
-    row = DashboardSettings()
+    row = _settings_row()
     row.http_responses_session_bridge_codex_prewarm_enabled = column_value
 
     class _Repository:
@@ -537,7 +542,7 @@ async def test_settings_data_resolves_codex_prewarm_switch_with_provenance(
 @pytest.mark.asyncio
 async def test_settings_data_resolves_background_job_toggles_with_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
     """M2 background jobs: dashboard column > deprecated env alias > default, plus the topology flag."""
-    row = DashboardSettings()
+    row = _settings_row()
     row.auth_guardian_enabled = None
     row.automations_scheduler_enabled = False
     row.rate_limit_reset_credits_refresh_enabled = None
@@ -592,7 +597,7 @@ async def test_settings_data_resolves_background_job_toggles_with_provenance(mon
 async def test_settings_data_resolves_conversation_archive_toggle_with_provenance(
     monkeypatch: pytest.MonkeyPatch, column: bool | None, env: bool, expected: bool, source: SettingSource
 ) -> None:
-    row = DashboardSettings()
+    row = _settings_row()
     row.conversation_archive_enabled = column
 
     class _Repository:
@@ -623,7 +628,7 @@ async def test_settings_data_resolves_conversation_archive_toggle_with_provenanc
 
 def test_conversation_archive_env_shadow_warning_names_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
     """A set CODEX_LB_CONVERSATION_ARCHIVE_ENABLED that the dashboard column overrides is reported at startup."""
-    row = DashboardSettings()
+    row = _settings_row()
     row.conversation_archive_enabled = False
     environment = Settings(conversation_archive_enabled=True)
 
