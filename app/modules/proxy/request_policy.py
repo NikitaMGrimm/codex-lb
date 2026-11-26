@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from typing import NamedTuple
@@ -374,6 +375,25 @@ def apply_api_key_enforcement(
             )
     apply_prohibit_fast_mode(payload, prohibit_fast_mode=prohibit_fast_mode)
     return ApiKeyEnforcementResult(service_tier_was_enforced, pre_normalization_effort)
+
+
+FAST_SERVICE_TIER = "priority"
+
+
+def account_supports_fast_mode(model: str | None, account_id: str) -> bool:
+    if not model:
+        return False
+    registry = get_model_registry()
+    supported_account_ids = registry.account_ids_for_model_service_tier(model, FAST_SERVICE_TIER)
+    return supported_account_ids is None or account_id in supported_account_ids
+
+
+def force_fast_response_create(text: str) -> str:
+    # Only the dispatched frame gets the override. The retained replay body can
+    # move to a different account and must still carry the original tier.
+    payload = json.loads(text)
+    payload["service_tier"] = FAST_SERVICE_TIER
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
 def apply_prohibit_fast_mode(

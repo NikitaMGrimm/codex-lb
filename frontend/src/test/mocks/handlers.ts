@@ -1213,8 +1213,12 @@ export const handlers = [
       );
     }
     const payload = (await request.json()) as {
+      forceFastMode?: boolean;
       securityWorkAuthorized?: boolean;
     };
+    if (typeof payload.forceFastMode === "boolean") {
+      account.forceFastMode = payload.forceFastMode;
+    }
     if (typeof payload.securityWorkAuthorized === "boolean") {
       account.securityWorkAuthorized = payload.securityWorkAuthorized;
     }

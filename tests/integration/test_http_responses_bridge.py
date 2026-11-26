@@ -200,6 +200,9 @@ class _SettingsCache:
     async def get(self) -> DashboardSettings:
         return self._settings
 
+    def cached_row(self) -> DashboardSettings:
+        return self._settings
+
 
 def _make_app_settings(
     *,
@@ -4956,6 +4959,41 @@ def _install_bridge_account_upstream(
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_force_fast_mode_updates_existing_session(async_client, app_instance, monkeypatch):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(async_client, "acc_bridge_fast", "bridge-fast@example.com")
+    upstream = _FakeBridgeUpstreamWebSocket("resp_bridge_fast")
+    _install_bridge_account_upstream(monkeypatch, account=await _get_account(account_id), upstream=upstream)
+
+    payload = {
+        "model": "gpt-5.1",
+        "input": "Hello",
+        "prompt_cache_key": "force-fast-bridge",
+        "service_tier": "default",
+    }
+    first = await async_client.post("/v1/responses", json=payload)
+    assert first.status_code == 200
+    key = proxy_module._HTTPBridgeSessionKey("prompt_cache", "force-fast-bridge", None)
+    service = get_proxy_service_for_app(app_instance)
+    bridge_session = service._http_bridge_sessions[key]
+    for index, enabled in enumerate((True, False), start=2):
+        changed = await async_client.patch(f"/api/accounts/{account_id}", json={"forceFastMode": enabled})
+        assert changed.status_code == 200
+        result = await async_client.get("/api/accounts")
+        assert result.status_code == 200
+        assert result.json()["accounts"][0]["forceFastMode"] == enabled
+
+        next_turn = await async_client.post(
+            "/v1/responses", json={**payload, "previous_response_id": f"resp_bridge_fast_{index - 1}"}
+        )
+        assert next_turn.status_code == 200
+        assert next_turn.json()["id"] == f"resp_bridge_fast_{index}"
+
+    assert service._http_bridge_sessions[key] is bridge_session
+    assert [json.loads(frame).get("service_tier") for frame in upstream.sent_text] == ["default", "priority", "default"]
 
 
 @pytest.mark.asyncio
@@ -14638,7 +14676,7 @@ async def test_retry_http_bridge_precreated_request_releases_pending_lock_before
             max_age_seconds=300,
         ),
         request_model="gpt-5.1",
-        account=cast(Account, SimpleNamespace(id="acct-retry", status=AccountStatus.ACTIVE)),
+        account=cast(Account, SimpleNamespace(id="acct-retry", status=AccountStatus.ACTIVE, force_fast_mode=False)),
         upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
         upstream_control=proxy_module._WebSocketUpstreamControl(),
         pending_requests=deque(),
@@ -14710,7 +14748,7 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
             max_age_seconds=300,
         ),
         request_model="gpt-5.1",
-        account=cast(Account, SimpleNamespace(id="acct-race", status=AccountStatus.ACTIVE)),
+        account=cast(Account, SimpleNamespace(id="acct-race", status=AccountStatus.ACTIVE, force_fast_mode=False)),
         upstream=cast(proxy_module.UpstreamWebSocket, _SilentUpstreamWebSocket()),
         upstream_control=proxy_module._WebSocketUpstreamControl(),
         pending_requests=deque(),

@@ -58,6 +58,7 @@ from app.modules.usage.authorization import OwnerAuthorization, OwnerAuthorizati
 pytestmark = pytest.mark.integration
 
 _REAL_WRITE_REQUEST_LOG = proxy_module.ProxyService._write_request_log
+_REAL_AUTHORIZE_ACCOUNT = proxy_module.LoadBalancer.authorize_account_fresh
 _CODEX_CLIENT_CONFIG = Path(__file__).resolve().parents[2] / "docs/examples/codex/config.toml"
 _CODEX_DAYBREAK_PROFILE = Path(__file__).resolve().parents[2] / "docs/examples/codex/daybreak-blue.config.toml"
 
@@ -14077,6 +14078,73 @@ def test_backend_responses_websocket_trusted_capability_pending_conflict_keeps_o
 
 def _ws_event(payload: dict[str, object]) -> _FakeUpstreamMessage:
     return _FakeUpstreamMessage("text", text=json.dumps(payload, separators=(",", ":")))
+
+
+def test_backend_responses_websocket_force_fast_mode_updates_existing_connection(app_instance, monkeypatch):
+    monkeypatch.setattr(proxy_module.LoadBalancer, "authorize_account_fresh", _REAL_AUTHORIZE_ACCOUNT)
+    account_id = "acct_force_fast"
+    upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[
+            [
+                _ws_event({"type": "response.created", "response": {"id": f"resp_fast_{i}", "status": "in_progress"}}),
+                _ws_event({"type": "response.completed", "response": {"id": f"resp_fast_{i}", "status": "completed"}}),
+            ]
+            for i in range(3)
+        ],
+    )
+    connect_calls = []
+
+    async def fake_connect(self, headers, **kwargs):
+        connect_calls.append(True)
+        return account, upstream
+
+    async def insert_account():
+        async with SessionLocal() as session:
+            session.add(account)
+            await session.commit()
+            session.expunge(account)
+
+    async def update_force_fast_mode(enabled: bool) -> None:
+        from app.modules.accounts.repository import AccountsRepository
+
+        async with SessionLocal() as session:
+            updated = await AccountsRepository(session).update_account_options(
+                account_id, security_work_authorized=None, force_fast_mode=enabled
+            )
+            assert updated
+
+    async def allow(*args, **kwargs):
+        return None
+
+    account = Account(
+        id=account_id,
+        chatgpt_account_id=account_id,
+        email="fast-websocket@example.com",
+        plan_type="team",
+        access_token_encrypted=b"access",
+        refresh_token_encrypted=b"refresh",
+        id_token_encrypted=b"id",
+        last_refresh=proxy_module.utcnow(),
+        status=AccountStatus.ACTIVE,
+    )
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow)
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect)
+
+    payload = {"type": "response.create", "model": "gpt-5.6-sol", "input": "Hello", "service_tier": "default"}
+    with TestClient(app_instance) as client:
+        assert client.portal is not None
+        client.portal.call(insert_account)
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            for enabled in (False, True, False):
+                client.portal.call(update_force_fast_mode, enabled)
+                websocket.send_json(payload)
+                assert websocket.receive_json()["type"] == "response.created"
+                assert websocket.receive_json()["type"] == "response.completed"
+
+    assert len(connect_calls) == 1
+    assert [json.loads(frame).get("service_tier") for frame in upstream.sent_text] == ["default", "priority", "default"]
 
 
 def _accepted_output_free_prelude(response_id: str) -> list[_FakeUpstreamMessage]:

@@ -975,15 +975,25 @@ async def test_compact_deactivated_workspace_fails_over_once(async_client, monke
 
 
 @pytest.mark.asyncio
-async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_client, monkeypatch):
+@pytest.mark.parametrize("force_fast_mode", [False, True])
+async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_client, monkeypatch, force_fast_mode):
     """Connect-phase 429/usage_limit_reached on A should fail over to B before any downstream event."""
-    await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
+    account_a = await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
     await _import_account(async_client, "acc_stream_429_b", "stream429b@example.com")
 
+    updated = await async_client.patch(f"/api/accounts/{account_a}", json={"forceFastMode": force_fast_mode})
+    assert updated.status_code == 200
+    preferred = await async_client.put(
+        f"/api/accounts/{account_a}/routing-policy", json={"routingPolicy": "burn_first"}
+    )
+    assert preferred.status_code == 200
+
     seen_account_ids: list[str | None] = []
+    seen_service_tiers: list[str | None] = []
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         seen_account_ids.append(account_id)
+        seen_service_tiers.append(payload.service_tier)
         if account_id == seen_account_ids[0]:
             raise ProxyResponseError(
                 429,
@@ -994,7 +1004,7 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True, "service_tier": "default"}
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
@@ -1004,7 +1014,8 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
     failed = [e for e in events if e.get("type") == "response.failed"]
     assert len(completed) == 1
     assert len(failed) == 0
-    assert set(seen_account_ids[:2]) == {"acc_stream_429_a", "acc_stream_429_b"}
+    assert seen_account_ids == ["acc_stream_429_a", "acc_stream_429_b"]
+    assert seen_service_tiers == ["priority" if force_fast_mode else "default", "default"]
 
     async with SessionLocal() as session:
         exhausted_account = await session.scalar(

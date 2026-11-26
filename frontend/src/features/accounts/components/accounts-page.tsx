@@ -244,6 +244,9 @@ export function AccountsPage() {
             onUsageLimitChange={(accountId, update) =>
               usageLimitMutation.mutate({ accountId, update })
             }
+            onForceFastModeChange={(accountId, forceFastMode) =>
+              updateMutation.mutate({ accountId, forceFastMode })
+            }
             onSecurityWorkAuthorizedChange={(accountId, enabled) =>
               void updateMutation.mutateAsync({
                 accountId,

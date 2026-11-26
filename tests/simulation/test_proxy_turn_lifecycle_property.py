@@ -474,6 +474,7 @@ class _ProductionBridgeTurn:
                     plan_type="plus",
                     chatgpt_account_id=None,
                     security_work_authorized=False,
+                    force_fast_mode=False,
                 ),
             ),
             upstream=cast(

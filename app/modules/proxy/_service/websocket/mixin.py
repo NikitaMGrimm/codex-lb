@@ -509,8 +509,11 @@ from app.modules.proxy.http_bridge_forwarding import (
 )
 from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
+    FAST_SERVICE_TIER,
+    account_supports_fast_mode,
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
+    force_fast_response_create,
     model_alias_requests_fast_mode,
     normalize_responses_request_payload,
     openai_client_payload_error,
@@ -1364,7 +1367,7 @@ async def _process_upstream_websocket_transport_end(
     return True
 
 
-async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, account: Account) -> None:
+async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, account: Account) -> bool:
     owner_authorization = await _load_owner_authorization(
         proxy,
         account.id,
@@ -1379,6 +1382,7 @@ async def _authorize_websocket_dispatch_owner(proxy: _WebSocketServiceProtocol, 
     error = _owner_authorization_error(owner_authorization, access_token_expires_at)
     if error is not None:
         raise error
+    return owner_authorization.force_fast_mode
 
 
 class _WebSocketMixin:
@@ -2721,7 +2725,16 @@ class _WebSocketMixin:
                             request_state.fresh_upstream_request_text = fresh_upstream_request_text
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
-                        await _authorize_websocket_dispatch_owner(proxy, account)
+                        force_fast_mode = await _authorize_websocket_dispatch_owner(proxy, account)
+                        service_tier = request_state.requested_service_tier
+                        if (
+                            force_fast_mode
+                            and not prohibit_fast_mode
+                            and account_supports_fast_mode(request_state.model, account.id)
+                        ):
+                            text_data = force_fast_response_create(text_data)
+                            _websocket_enforce_response_create_text_size(request_state, text_data)
+                            service_tier = FAST_SERVICE_TIER
                         # The reader can retire the socket or finalize an
                         # unsent request while authorization awaits. Sample
                         # reconnect and claim dispatch under the same lock as
@@ -2747,6 +2760,7 @@ class _WebSocketMixin:
                                         exact_request_text=text_data,
                                     )
                                     if dispatch_owner_bound:
+                                        request_state.service_tier = service_tier
                                         request_state.response_create_sent_at = clock.monotonic()
                         if not dispatch_requires_reconnect:
                             if not dispatch_pending:

@@ -273,8 +273,11 @@ export function useAccountMutations() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ accountId, securityWorkAuthorized }: { accountId: string; securityWorkAuthorized: boolean }) =>
-      updateAccount(accountId, { securityWorkAuthorized }),
+    mutationFn: ({
+      accountId,
+      ...update
+    }: { accountId: string; securityWorkAuthorized?: boolean; forceFastMode?: boolean }) =>
+      updateAccount(accountId, update),
     onSuccess: () => {
       toast.success(t("accounts.toasts.updated"));
       void invalidateAccountRelatedQueries(queryClient);

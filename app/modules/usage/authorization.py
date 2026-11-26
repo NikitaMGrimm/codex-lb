@@ -34,6 +34,10 @@ class OwnerAuthorization:
     snapshot: AccountUsageLimitSnapshot | None = None
 
     @property
+    def force_fast_mode(self) -> bool:
+        return self.snapshot is not None and self.snapshot.force_fast_mode
+
+    @property
     def allowed(self) -> bool:
         return self.kind is OwnerAuthorizationKind.ALLOWED
 

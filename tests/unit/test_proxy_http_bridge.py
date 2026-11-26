@@ -6182,7 +6182,9 @@ def _hard_capable_bridge_session(
     )
     session.affinity = _BRIDGE_BARE_SESSION_HEADER_AFFINITY
     assert session.affinity.legacy_selection_key == "bridge-legacy-process"
-    session.account = cast(Any, SimpleNamespace(id="acc-legacy-hard-owner", status=AccountStatus.ACTIVE))
+    session.account = cast(
+        Any, SimpleNamespace(id="acc-legacy-hard-owner", status=AccountStatus.ACTIVE, force_fast_mode=False)
+    )
     session.last_upstream_close_code = close_code
     session.upstream_turn_state = "upstream-turn-state-owner"
     session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
@@ -27735,6 +27737,7 @@ async def test_retry_http_bridge_request_on_fresh_upstream_replays_retry_safe_in
                 id="acc-2",
                 status=AccountStatus.ACTIVE,
                 codex_installation_id="installation-b",
+                force_fast_mode=False,
             ),
         )
 
@@ -31072,7 +31075,7 @@ async def test_retry_http_bridge_model_fallback_excludes_rejected_hard_affinity_
         pending_requests=deque([request_state]),
         queued_request_count=1,
     )
-    session.account = cast(Any, SimpleNamespace(id="acc-rejected", status=AccountStatus.ACTIVE))
+    session.account = cast(Any, SimpleNamespace(id="acc-rejected", status=AccountStatus.ACTIVE, force_fast_mode=False))
     session.last_upstream_close_code = 1011
     session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
     old_lease = request_state.account_response_create_lease
@@ -31115,7 +31118,7 @@ async def test_retry_http_bridge_fresh_hard_request_excludes_silent_account(
         pending_requests=deque([request_state]),
         queued_request_count=1,
     )
-    session.account = cast(Any, SimpleNamespace(id="acc-silent", status=AccountStatus.ACTIVE))
+    session.account = cast(Any, SimpleNamespace(id="acc-silent", status=AccountStatus.ACTIVE, force_fast_mode=False))
     session.last_upstream_close_code = 1011
     session.upstream = cast(Any, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
     old_lease = request_state.account_response_create_lease
@@ -48612,6 +48615,7 @@ def _make_bridge_session(
                 chatgpt_account_id="workspace-bridge",
                 status=AccountStatus.ACTIVE,
                 plan_type="plus",
+                force_fast_mode=False,
             ),
         ),
         upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),

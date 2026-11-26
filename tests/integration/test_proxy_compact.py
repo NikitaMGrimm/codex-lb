@@ -35,6 +35,47 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
+async def test_compact_force_fast_mode_respects_catalog_and_global_prohibition(async_client, monkeypatch):
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "auth.json",
+                json.dumps(_make_auth_json("acc_fast", "compact-fast@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    account_id = imported.json()["accountId"]
+    changed = await async_client.patch(f"/api/accounts/{account_id}", json={"forceFastMode": True})
+    assert changed.status_code == 200
+    compact = AsyncMock(
+        return_value=CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+    )
+    monkeypatch.setattr(proxy_module, "core_compact_responses", compact)
+
+    body = {"model": "gpt-5.1", "instructions": "hi", "input": [], "service_tier": "default"}
+    route = "/backend-api/codex/responses/compact"
+    response = await async_client.post(route, json=body)
+    assert response.status_code == 200
+    assert compact.await_args_list[-1].args[0].service_tier == "priority"
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(get_model_registry(), "account_ids_for_model_service_tier", lambda *args: frozenset())
+        response = await async_client.post(route, json=body)
+        assert response.status_code == 200
+        assert compact.await_args_list[-1].args[0].service_tier == "default"
+
+    settings = (await async_client.get("/api/settings")).json()
+    settings["prohibitFastMode"] = True
+    assert (await async_client.put("/api/settings", json=settings)).status_code == 200
+    response = await async_client.post(route, json=body)
+    assert response.status_code == 200
+    assert compact.await_args_list[-1].args[0].service_tier == "default"
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_and_releases_reservation(
     async_client,
     monkeypatch,

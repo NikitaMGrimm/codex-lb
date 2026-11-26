@@ -100,6 +100,7 @@ class AccountSummary(DashboardModel):
     effective_limit_monthly: float | None = None
     usage_limit_state: AccountUsageLimitState = AccountUsageLimitState.DISABLED
     status: str
+    force_fast_mode: bool = False
     security_work_authorized: bool = False
     usage: AccountUsage | None = None
     reset_at_primary: datetime | None = None
@@ -173,6 +174,7 @@ class AccountOpenCodeAuthExportAccount(DashboardModel):
 
 
 class AccountUpdateRequest(DashboardModel):
+    force_fast_mode: bool | None = None
     security_work_authorized: bool | None = None
 
 

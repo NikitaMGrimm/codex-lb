@@ -252,6 +252,11 @@ from app.modules.proxy.load_balancer import (
     effective_account_concurrency_caps,
     effective_routing_tunables,
 )
+from app.modules.proxy.request_policy import (
+    FAST_SERVICE_TIER,
+    account_supports_fast_mode,
+    force_fast_response_create,
+)
 from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
@@ -499,14 +504,26 @@ async def _send_http_bridge_request_text_with_archive_id(
     text_data: str,
     *,
     on_send_started: Callable[[], None] | None = None,
+    force_fast_mode: bool | None = None,
     clock: Clock = REAL_CLOCK,
 ) -> None:
+    if force_fast_mode is None:
+        force_fast_mode = bool(session.account.force_fast_mode)
+    service_tier = request_state.requested_service_tier
+    if force_fast_mode and account_supports_fast_mode(request_state.model, session.account.id):
+        # Ingress resolves the dashboard policy. A retry can send under the
+        # session's lifecycle lock, so use the last loaded row without awaiting.
+        settings = _service_get_settings_cache().cached_row()
+        if settings is not None and not settings.prohibit_fast_mode:
+            text_data = force_fast_response_create(text_data)
+            service_tier = FAST_SERVICE_TIER
     text_data = _text_with_operation_id(text_data, request_state.operation_id)
     text_data = _text_with_thread_cache_identity(text_data, _bridge_thread_cache_identity(session))
     # Operation metadata is added after the initial payload sizing pass. Check
     # the exact frame that will cross the websocket so the metadata cannot
     # push an otherwise-valid response.create over the upstream limit.
     _enforce_http_bridge_response_create_text_size(request_state, text_data)
+    request_state.service_tier = service_tier
     if on_send_started is not None:
         on_send_started()
     token = set_request_id(request_state.archive_request_id)
@@ -2299,6 +2316,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             request_state,
                             text_data,
                             on_send_started=mark_upstream_send_started,
+                            force_fast_mode=owner_authorization.force_fast_mode,
                             clock=clock,
                         )
                     except BaseException as exc:
@@ -2663,7 +2681,11 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_enqueued = True
                     warmup_send_started = True
                     await _send_http_bridge_request_text_with_archive_id(
-                        session, warmup_state, warmup_text, clock=clock
+                        session,
+                        warmup_state,
+                        warmup_text,
+                        force_fast_mode=owner_authorization.force_fast_mode,
+                        clock=clock,
                     )
                 while True:
                     try:

@@ -88,6 +88,7 @@ export const AccountSummarySchema = z.object({
   effectiveLimitMonthly: z.number().nullable().optional(),
   usageLimitState: z.enum(["disabled", "available", "reached", "data_unavailable"]).optional(),
   status: z.string(),
+  forceFastMode: z.boolean().optional(),
   securityWorkAuthorized: z.boolean().optional(),
   usage: AccountUsageSchema.nullable().optional(),
   resetAtPrimary: z.iso.datetime({ offset: true }).nullable().optional(),
@@ -291,6 +292,7 @@ export const AccountUsageLimitUpdateResponseSchema = z.object({
 });
 
 export const AccountUpdateRequestSchema = z.object({
+  forceFastMode: z.boolean().optional(),
   securityWorkAuthorized: z.boolean().optional(),
 });
 

@@ -86,6 +86,7 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
+from app.modules.proxy.request_policy import FAST_SERVICE_TIER, account_supports_fast_mode
 from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 
@@ -1133,7 +1134,15 @@ class _CompactMixin:
                 target: Account,
                 account_response_create_lease: AccountLease | None = None,
             ) -> CompactResponsePayload:
-                nonlocal route_fallback_used, route_mode, route_pool_id, route_endpoint_id
+                nonlocal route_fallback_used, route_mode, route_pool_id, route_endpoint_id, request_service_tier
+                attempt_payload = payload
+                if (
+                    target.force_fast_mode
+                    and not settings.prohibit_fast_mode
+                    and account_supports_fast_mode(payload.model, target.id)
+                ):
+                    attempt_payload = payload.model_copy(update={"service_tier": FAST_SERVICE_TIER})
+                request_service_tier = _service_tier_from_compact_payload(attempt_payload)
                 access_token = proxy._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
                 remaining_budget = _remaining_budget_seconds(deadline)
@@ -1194,7 +1203,7 @@ class _CompactMixin:
                         response = await asyncio.wait_for(
                             _call_with_supported_optional_kwargs(
                                 _service_core_compact_responses(),
-                                payload,
+                                attempt_payload,
                                 filtered,
                                 access_token,
                                 account_id,

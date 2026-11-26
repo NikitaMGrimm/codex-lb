@@ -8,9 +8,6 @@ from typing import Any, AsyncIterator, Mapping, cast
 import aiohttp
 
 from app.core.balancer.types import UpstreamError
-from app.core.clients.files import create_file as core_create_file  # noqa: F401
-from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
-from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     ImageFetchSession,
@@ -29,9 +26,6 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
 )
-from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
-from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
-from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.thread_cache_identity import ThreadCacheIdentity
 from app.core.clock import clock_for, scheduler_for
 from app.core.errors import (
@@ -44,7 +38,6 @@ from app.core.errors import synthetic_stream_failure_event as response_failed_ev
 from app.core.openai.parsing import _LIFECYCLE_EVENT_TYPES, classify_event_type, parse_sse_event_payload
 from app.core.openai.requests import ResponsesRequest
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
-from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
@@ -394,7 +387,6 @@ from app.modules.proxy._service.websocket.helpers import (
 )
 from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
-    _sticky_key_from_session_header,  # noqa: F401
 )
 from app.modules.proxy.affinity_observation import AffinityObservation
 from app.modules.proxy.durable_bridge_coordinator import (
@@ -413,6 +405,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountLease
+from app.modules.proxy.request_policy import FAST_SERVICE_TIER, account_supports_fast_mode
 from app.modules.proxy.tool_call_dedupe import mark_duplicate_tool_call_downstream_event
 from app.modules.proxy.tool_call_dedupe import (
     response_id_from_payload as tool_call_response_id_from_payload,
@@ -559,6 +552,13 @@ class _StreamingMixin(_StreamingRetryMixin):
                 )
             )
         try:
+            if (
+                account.force_fast_mode
+                and account_supports_fast_mode(model, account.id)
+                and not (await _facade().get_settings_cache().get()).prohibit_fast_mode
+            ):
+                payload = payload.model_copy(update={"service_tier": FAST_SERVICE_TIER})
+                service_tier = FAST_SERVICE_TIER
             route = await proxy._resolve_upstream_route_for_account(account, operation="responses")
             account_response_create_lease = await proxy._acquire_account_response_create_lease_or_overload(
                 account_id=account.id,

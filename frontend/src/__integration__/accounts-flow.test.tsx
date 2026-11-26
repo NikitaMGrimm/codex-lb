@@ -33,6 +33,26 @@ describe("accounts flow integration", () => {
     }
   });
 
+  it("saves Force Fast mode on the selected account only", async () => {
+    const user = userEvent.setup({ delay: null });
+
+    window.history.pushState({}, "", "/accounts");
+    renderWithProviders(<App />);
+
+    const fastMode = await screen.findByRole("switch", { name: "Force Fast mode" });
+    expect(fastMode).not.toBeChecked();
+    await user.click(fastMode);
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Force Fast mode" })).toBeChecked());
+
+    await user.click(screen.getByText("secondary@example.com"));
+    expect(screen.getByRole("switch", { name: "Force Fast mode" })).not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: /primary@example.com/ }));
+    expect(screen.getByRole("switch", { name: "Force Fast mode" })).toBeChecked();
+    await user.click(screen.getByRole("switch", { name: "Force Fast mode" }));
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Force Fast mode" })).not.toBeChecked());
+  });
+
   it("lets operators set, search, and clear an account alias", async () => {
     const user = userEvent.setup({ delay: null });
 

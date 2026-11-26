@@ -50,6 +50,7 @@ export type AccountDetailProps = {
     accountId: string,
     update: AccountUsageLimitUpdateRequest,
   ) => void;
+  onForceFastModeChange: (accountId: string, enabled: boolean) => void;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
   upstreamProxyAdmin?: UpstreamProxyAdmin | null;
   onProxyBindingSave?: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
@@ -77,6 +78,7 @@ export function AccountDetail({
   onLimitWarmupChange,
   onRoutingPolicyChange,
   onUsageLimitChange,
+  onForceFastModeChange,
   onSecurityWorkAuthorizedChange,
   upstreamProxyAdmin = null,
   onProxyBindingSave,
@@ -193,6 +195,7 @@ export function AccountDetail({
         onLimitWarmupChange={onLimitWarmupChange}
         onRoutingPolicyChange={onRoutingPolicyChange}
         onUsageLimitChange={onUsageLimitChange}
+        onForceFastModeChange={onForceFastModeChange}
         onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
       />
     </div>

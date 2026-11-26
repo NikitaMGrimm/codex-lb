@@ -780,7 +780,20 @@ class AccountsRepository:
             await self._session.commit()
             return updated_id is not None
 
-    async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
+    async def update_account_options(
+        self,
+        account_id: str,
+        *,
+        security_work_authorized: bool | None,
+        force_fast_mode: bool | None,
+    ) -> bool:
+        values: dict[str, bool] = {}
+        if security_work_authorized is not None:
+            values["security_work_authorized"] = security_work_authorized
+        if force_fast_mode is not None:
+            values["force_fast_mode"] = force_fast_mode
+        if not values:
+            return False
         async with sqlite_writer_section():
             result = await self._session.execute(
                 update(Account)
@@ -789,7 +802,7 @@ class AccountsRepository:
                 # perspective: ID-based mutations must report not-found, as the
                 # synchronous delete did once the row was removed.
                 .where(Account.delete_requested_at.is_(None))
-                .values(security_work_authorized=enabled)
+                .values(**values)
                 .returning(Account.id)
             )
             await self._session.commit()

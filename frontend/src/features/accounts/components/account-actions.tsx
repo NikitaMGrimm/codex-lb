@@ -42,6 +42,7 @@ export type AccountActionsProps = {
   onExportAuth: (accountId: string) => void;
   onResetCredit: (accountId: string) => void;
   showResetCreditExpiryBadge?: boolean;
+  onForceFastModeChange: (accountId: string, enabled: boolean) => void;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
   onRoutingPolicyChange: (
@@ -66,6 +67,7 @@ export function AccountActions({
   onExportAuth,
   onResetCredit,
   showResetCreditExpiryBadge = true,
+  onForceFastModeChange,
   onSecurityWorkAuthorizedChange,
   onLimitWarmupChange,
   onRoutingPolicyChange,
@@ -133,6 +135,23 @@ export function AccountActions({
         readOnly={readOnly}
         onChange={onUsageLimitChange}
       />
+
+      <label
+        htmlFor={`force-fast-mode-${account.accountId}`}
+        className="flex min-w-0 items-center justify-between gap-3 rounded-md border px-3 py-2"
+      >
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{t("accounts.actions.forceFastMode")}</div>
+          <div className="text-xs text-muted-foreground">{t("accounts.actions.forceFastModeDescription")}</div>
+        </div>
+        <Switch
+          id={`force-fast-mode-${account.accountId}`}
+          aria-label={t("accounts.actions.forceFastMode")}
+          checked={account.forceFastMode ?? false}
+          disabled={busy || readOnly}
+          onCheckedChange={(checked) => onForceFastModeChange(account.accountId, checked)}
+        />
+      </label>
 
       <label
         htmlFor={`security-work-authorized-${account.accountId}`}

@@ -641,10 +641,16 @@ class AccountsService:
             await propagate_account_routing_change()
         return result
 
-    async def update_account(self, account_id: str, *, security_work_authorized: bool | None = None) -> bool:
-        result = False
-        if security_work_authorized is not None:
-            result = await self._repo.update_security_work_authorized(account_id, security_work_authorized)
+    async def update_account(
+        self,
+        account_id: str,
+        *,
+        security_work_authorized: bool | None = None,
+        force_fast_mode: bool | None = None,
+    ) -> bool:
+        result = await self._repo.update_account_options(
+            account_id, security_work_authorized=security_work_authorized, force_fast_mode=force_fast_mode
+        )
         if result:
             get_account_selection_cache().invalidate()
         return result

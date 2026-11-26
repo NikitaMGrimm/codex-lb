@@ -3,6 +3,8 @@
   "accounts.actions.enableWarmup": "Enable Warmup",
   "accounts.actions.forceProbe": "Force probe",
   "accounts.actions.resetWithCount": "Reset ({{count}})",
+  "accounts.actions.forceFastMode": "Force Fast mode",
+  "accounts.actions.forceFastModeDescription": "Use Fast for supported requests on this account, regardless of the requested speed.",
   "accounts.actions.routingPolicy": "Routing policy",
   "accounts.actions.trustedAccess": "Trusted Access for Cyber",
   "accounts.addDialog.description": "Choose how to add a Codex account.",

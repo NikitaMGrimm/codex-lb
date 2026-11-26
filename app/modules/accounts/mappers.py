@@ -294,6 +294,7 @@ def _account_to_summary(
         effective_limit_primary=effective_limit(window_minutes=window_minutes_primary),
         effective_limit_secondary=effective_limit(window_minutes=window_minutes_secondary),
         effective_limit_monthly=effective_limit(window_minutes=window_minutes_monthly),
+        force_fast_mode=bool(account.force_fast_mode),
         security_work_authorized=bool(account.security_work_authorized),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,

@@ -277,6 +277,7 @@ async def update_account(
         raise DashboardBadRequestError("No supported account fields to update", code="empty_account_update")
     success = await context.service.update_account(
         account_id,
+        force_fast_mode=payload.force_fast_mode,
         security_work_authorized=payload.security_work_authorized,
     )
     if not success:

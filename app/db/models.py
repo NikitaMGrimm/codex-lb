@@ -125,6 +125,7 @@ class Account(Base):
         server_default=text("'normal'"),
         nullable=False,
     )
+    force_fast_mode: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
     usage_limit_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

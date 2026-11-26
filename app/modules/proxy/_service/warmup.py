@@ -36,6 +36,8 @@ from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_client_fields
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.request_policy import (
+    FAST_SERVICE_TIER,
+    account_supports_fast_mode,
     apply_prohibit_fast_mode,
     normalize_upstream_model_alias,
     validate_model_access,
@@ -444,6 +446,8 @@ class _WarmupMixin:
                 store=False,
             )
             normalize_upstream_model_alias(payload)
+            if authorization.decision.force_fast_mode and account_supports_fast_mode(payload.model, live_account.id):
+                payload.service_tier = FAST_SERVICE_TIER
             apply_prohibit_fast_mode(
                 payload,
                 prohibit_fast_mode=prohibit_fast_mode,

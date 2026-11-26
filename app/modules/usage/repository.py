@@ -94,6 +94,7 @@ class AccountUsageLimitSnapshot:
     monthly: UsageWindowRow | None
     limit_5h_percent: float | None = None
     limit_weekly_percent: float | None = None
+    force_fast_mode: bool = False
 
 
 def _live_snapshot_settlement(owner: Any) -> LiveSnapshotSettlement:
@@ -761,6 +762,7 @@ class UsageRepository:
                 Account.usage_limit_percent,
                 Account.usage_limit_5h_percent,
                 Account.usage_limit_weekly_percent,
+                Account.force_fast_mode,
                 Account.plan_type,
             )
             .select_from(Account)
@@ -809,6 +811,7 @@ class UsageRepository:
             limit_percent=row.usage_limit_percent,
             limit_5h_percent=row.usage_limit_5h_percent,
             limit_weekly_percent=row.usage_limit_weekly_percent,
+            force_fast_mode=row.force_fast_mode,
             plan_type=row.plan_type,
             primary=projected("primary"),
             secondary=projected("secondary"),

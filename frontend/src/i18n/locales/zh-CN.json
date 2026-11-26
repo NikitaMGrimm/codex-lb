@@ -3,6 +3,8 @@
   "accounts.actions.enableWarmup": "启用 Warm-up",
   "accounts.actions.forceProbe": "强制探测",
   "accounts.actions.resetWithCount": "重置 ({{count}})",
+  "accounts.actions.forceFastMode": "强制快速模式",
+  "accounts.actions.forceFastModeDescription": "无论请求指定何种速度，此账户均对支持的请求使用快速模式。",
   "accounts.actions.routingPolicy": "路由策略",
   "accounts.actions.trustedAccess": "受信任访问",
   "accounts.addDialog.description": "选择添加 Codex 账户的方式。",
